@@ -33,7 +33,7 @@ export async function POST(request: Request) {
   ]);
 
   const origin = new URL(request.url).origin;
-  const installCommand = `( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL ${shellArg(`${origin}/install.sh`)} -o "$tmp" && sudo bash "$tmp" ddns --server ${shellArg(origin)} --token ${shellArg(token)} )`;
+  const installCommand = `( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL ${shellArg(`${origin}/install.sh`)} -o "$tmp" && sudo bash "$tmp" all --server ${shellArg(origin)} --token ${shellArg(token)} )`;
   return Response.json({ node: { id, name, region }, token, installCommand }, { status: 201 });
 }
 

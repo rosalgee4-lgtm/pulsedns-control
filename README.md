@@ -69,6 +69,8 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 5. 配置 BBR/sysctl
 6. 卸载 DDNS
 
+Web 中“添加探针节点”生成的也是同一条完整安装链，而不是只安装 DDNS：SSH → DDNS → 一个或多个 Nyanpass → BBR。执行到 Nyanpass 时，按提示粘贴面板生成的官方命令；安装完一个实例后可继续添加下一个。
+
 完整安装会修改 root 密码、SSH 登录策略并覆盖 `/etc/sysctl.conf`（原文件会带时间戳备份），与原脚本行为一致。卸载 DDNS 不会回滚这些系统设置，也不会卸载 Nyanpass。
 
 ## 升级 DDNS 探针

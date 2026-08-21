@@ -9,7 +9,7 @@ set -euo pipefail
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.4.0"
+VERSION="0.4.1"
 SERVER_URL="${SERVER_URL:-}"
 TOKEN="${TOKEN:-}"
 CHECK_INTERVAL=10

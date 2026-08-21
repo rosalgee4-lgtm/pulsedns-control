@@ -127,7 +127,7 @@ export default function Dashboard({ user, initialNodes, initialEvents, initialNy
             onClick={() => setActiveView(item.id)}
           ><span aria-hidden="true">{item.icon}</span>{item.label}</a>)}
         </nav>
-        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.4.0 · {nodes.length} 个探针</small></div>
+        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.4.1 · {nodes.length} 个探针</small></div>
       </aside>
 
       <section className="workspace">
@@ -176,9 +176,9 @@ export default function Dashboard({ user, initialNodes, initialEvents, initialNy
       {showCreate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="create-title">
           <button className="modal-close" onClick={closeModal} aria-label="关闭">×</button>
-          {!created ? <><p className="eyebrow cyan">安全注册</p><h2 id="create-title">添加一个探针节点</h2><p className="modal-intro">主控将生成一次性可见的独立令牌和安装命令。</p>
+          {!created ? <><p className="eyebrow cyan">安全注册</p><h2 id="create-title">添加一个探针节点</h2><p className="modal-intro">主控将按原脚本生成一次性完整安装命令：SSH → DDNS 探针 → 一个或多个 Nyanpass → BBR。</p>
             <form onSubmit={createNode} className="node-form"><label>节点名称<input name="name" required placeholder="例如：东京 · jp-01" /></label><label>区域<input name="region" placeholder="ap-northeast" /></label><label>阿里云主域名<input name="domainName" placeholder="example.com" /></label><div className="form-grid"><label>IPv4 主机记录<input name="recordV4" placeholder="home 或 @" /></label><label>IPv6 主机记录<input name="recordV6" placeholder="home 或 @" /></label></div><p className="form-hint">例如 home.example.com：主域名填 example.com，主机记录填 home；根域名填 @。</p>{error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '创建中…' : '创建节点并生成命令'}</button></form></>
-          : <><p className="eyebrow cyan">节点已创建</p><h2>复制安装命令</h2><p className="modal-intro">令牌不会再次显示。请立即在目标 VPS 上执行下面的命令。</p><pre className="install-command">{created.installCommand}</pre><button className="primary-button wide" onClick={() => navigator.clipboard.writeText(created.installCommand)}>复制安装命令</button><button className="ghost-button wide" onClick={closeModal}>完成</button></>}
+          : <><p className="eyebrow cyan">节点已创建</p><h2>复制完整安装命令</h2><p className="modal-intro">令牌不会再次显示。请立即在目标 VPS 上执行；安装过程中会要求设置 SSH，并粘贴一个或多个 Nyanpass 官方命令。</p><pre className="install-command">{created.installCommand}</pre><button className="primary-button wide" onClick={() => navigator.clipboard.writeText(created.installCommand)}>复制安装命令</button><button className="ghost-button wide" onClick={closeModal}>完成</button></>}
         </section>
       </div>}
 
