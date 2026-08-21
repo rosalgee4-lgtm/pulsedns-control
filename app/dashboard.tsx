@@ -138,7 +138,7 @@ export default function Dashboard({ user, initialNodes, initialEvents, initialNy
             onClick={() => setActiveView(item.id)}
           ><span aria-hidden="true">{item.icon}</span>{item.label}</a>)}
         </nav>
-        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.6.0 · {nodes.length} 个探针</small></div>
+        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.6.1 · {nodes.length} 个探针</small></div>
       </aside>
 
       <section className="workspace">

@@ -2,7 +2,7 @@
 # PulseDNS Web 主控一键安装与管理脚本
 set -euo pipefail
 
-VERSION="0.6.0"
+VERSION="0.6.1"
 REPOSITORY="rosalgee4-lgtm/pulsedns-control"
 INSTALL_ROOT="/opt/pulsedns-control"
 RELEASES_DIR="${INSTALL_ROOT}/releases"
@@ -16,7 +16,6 @@ CADDY_CONFIG="/etc/pulsedns-control/Caddyfile"
 PANEL_PORT="3100"
 CADDY_VERSION="2.11.4"
 PNPM_VERSION="10.28.2"
-GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 
 blue='\033[1;34m'; green='\033[1;32m'; yellow='\033[1;33m'; red='\033[1;31m'; reset='\033[0m'
 info() { printf "%b[INFO]%b %s\n" "$blue" "$reset" "$*"; }
@@ -96,14 +95,8 @@ download_and_build_panel() {
     release_id=$(date '+%Y%m%d%H%M%S')
     release_dir="${RELEASES_DIR}/${release_id}"
     source_archive="${temp_dir}/source.tar.gz"
-    [[ -n "$GITHUB_TOKEN" ]] || fail "私有仓库安装需要 GitHub Token"
     curl --proto '=https' --proto-redir '=https' -fLSs \
-        -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'X-GitHub-Api-Version: 2022-11-28' \
-        "https://api.github.com/repos/${REPOSITORY}/tarball/main" -o "$source_archive"
-    unset GH_TOKEN || true
-    GITHUB_TOKEN=""
+        "https://github.com/${REPOSITORY}/archive/refs/heads/main.tar.gz" -o "$source_archive"
     mkdir -p "$release_dir"
     tar -xzf "$source_archive" --strip-components=1 -C "$release_dir"
 
@@ -138,14 +131,6 @@ prompt_install_config() {
     read -r -s -p "阿里云 AccessKey Secret: " ALIYUN_KEY_SECRET; printf '\n'
     [[ "$ALIYUN_KEY_ID" =~ ^[A-Za-z0-9._~+/=-]{8,128}$ ]] || fail "AccessKey ID 格式无效"
     [[ "$ALIYUN_KEY_SECRET" =~ ^[A-Za-z0-9._~+/=-]{8,256}$ ]] || fail "AccessKey Secret 格式无效"
-}
-
-prompt_github_token() {
-    if [[ -z "$GITHUB_TOKEN" ]]; then
-        read -r -s -p "GitHub Token（私有仓库 Contents 只读权限）: " GITHUB_TOKEN
-        printf '\n'
-    fi
-    [[ ${#GITHUB_TOKEN} -ge 20 && "$GITHUB_TOKEN" != *$'\n'* && "$GITHUB_TOKEN" != *$'\r'* ]] || fail "GitHub Token 格式无效"
 }
 
 write_panel_config() {
@@ -242,7 +227,6 @@ install_panel() {
     need_root
     [[ ! -e "$ENV_FILE" ]] || fail "面板已安装；请使用 update 升级，或先卸载"
     prompt_install_config
-    prompt_github_token
     install_dependencies
     detect_arch
     local temp_dir
@@ -264,7 +248,6 @@ update_panel() {
     [[ -f "$ENV_FILE" && -L "$CURRENT_LINK" ]] || fail "未检测到已安装面板"
     local previous_release
     previous_release=$(readlink -f "$CURRENT_LINK")
-    prompt_github_token
     install_dependencies
     detect_arch
     local temp_dir

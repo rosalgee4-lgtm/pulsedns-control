@@ -51,10 +51,10 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 
 ### 一键安装 Web 主控面板
 
-准备一台使用 systemd 的 Linux VPS，并先把面板域名的 A/AAAA 记录解析到该 VPS，放行 80 与 443 端口。由于本仓库是私有仓库，需要一个对此仓库具有 Contents 只读权限的 GitHub Token。然后以 root 执行这一条命令：
+准备一台使用 systemd 的 Linux VPS，并先把面板域名的 A/AAAA 记录解析到该 VPS，放行 80 与 443 端口。然后以 root 执行这一条命令，无需 GitHub Token：
 
 ```bash
-read -rsp "GitHub Token: " GH_TOKEN && echo && export GH_TOKEN && bash <(curl -fLSs -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw+json" https://api.github.com/repos/rosalgee4-lgtm/pulsedns-control/contents/public/panel-install.sh?ref=main) install; unset GH_TOKEN
+bash <(curl -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh) install
 ```
 
 脚本会询问面板域名、管理员账号、阿里云 AccessKey，随后自动安装经过校验的 Node.js 与 Caddy、构建 PulseDNS、创建本地 SQLite 数据库、配置管理员 Basic Auth、申请 HTTPS 证书并注册 systemd 服务。再次不带参数运行同一脚本会打开操作菜单：
@@ -67,7 +67,7 @@ read -rsp "GitHub Token: " GH_TOKEN && echo && export GH_TOKEN && bash <(curl -f
 一键升级命令：
 
 ```bash
-read -rsp "GitHub Token: " GH_TOKEN && echo && export GH_TOKEN && bash <(curl -fLSs -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw+json" https://api.github.com/repos/rosalgee4-lgtm/pulsedns-control/contents/public/panel-install.sh?ref=main) update; unset GH_TOKEN
+bash <(curl -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh) update
 ```
 
 面板数据保存在 `/var/lib/pulsedns-control/pulsedns.db`；管理员密码和阿里云凭据保存在权限为 `0600` 的 `/etc/pulsedns-control.env`。卸载面板时数据库默认保留。
