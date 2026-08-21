@@ -1,0 +1,1 @@
+ALTER TABLE `nyanpass_instances` ADD `role` text DEFAULT 'outbound' NOT NULL;

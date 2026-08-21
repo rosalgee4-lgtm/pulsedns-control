@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `idx_nyanpass_node_ws_port` ON `nyanpass_instances` (`node_id`,`ws_port`);
