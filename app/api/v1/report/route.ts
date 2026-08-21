@@ -22,7 +22,7 @@ export async function POST(request: Request) {
   if (!token) return Response.json({ status: 'error', error: '无效的探针凭据' }, { status: 401 });
 
   await ensureSchema();
-  const db = getDb();
+  const db = await getDb();
   const [node] = await db.select().from(nodes).where(eq(nodes.tokenHash, await sha256(token))).limit(1);
   if (!node) return Response.json({ status: 'error', error: '未知探针' }, { status: 401 });
 

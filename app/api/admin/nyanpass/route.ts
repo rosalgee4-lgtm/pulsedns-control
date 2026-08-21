@@ -4,6 +4,7 @@ import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { events, nodes, nyanpassInstances } from '@/db/schema';
 import { parseOfficialNyanpassCommand } from '@/lib/nyanpass-command';
+import { publicOrigin } from '@/lib/public-origin';
 import { cleanText } from '@/lib/validation';
 
 export async function POST(request: Request) {
@@ -24,7 +25,7 @@ export async function POST(request: Request) {
   const { args, panelUrl, role } = parsedCommand;
 
   await ensureSchema();
-  const db = getDb();
+  const db = await getDb();
   const [node] = await db.select({ id: nodes.id, name: nodes.name }).from(nodes).where(eq(nodes.id, nodeId)).limit(1);
   if (!node) return Response.json({ error: '所属节点不存在' }, { status: 404 });
   const duplicate = await db.select({ id: nyanpassInstances.id }).from(nyanpassInstances)
@@ -39,7 +40,7 @@ export async function POST(request: Request) {
     db.insert(events).values({ nodeId, kind: 'nyanpass_created', message: `${user.email} 从原命令识别并添加了${roleLabel}实例 ${name}`, createdAt: now }),
   ]);
 
-  const origin = new URL(request.url).origin;
+  const origin = publicOrigin(request);
   const installCommand = `( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL ${shellArg(`${origin}/install.sh`)} -o "$tmp" && sudo bash "$tmp" nyanpass --nyanpass-name ${shellArg(name)} --nyanpass-optimize ${shellArg(optimize ? '1' : '0')} --nyanpass-args ${shellArg(args)} --nyanpass-unattended )`;
 
   return Response.json({
@@ -54,7 +55,8 @@ export async function DELETE(request: Request) {
   const id = new URL(request.url).searchParams.get('id');
   if (!id) return Response.json({ error: '缺少实例 ID' }, { status: 400 });
   await ensureSchema();
-  await getDb().delete(nyanpassInstances).where(eq(nyanpassInstances.id, id));
+  const db = await getDb();
+  await db.delete(nyanpassInstances).where(eq(nyanpassInstances.id, id));
   return Response.json({ status: 'ok' });
 }
 

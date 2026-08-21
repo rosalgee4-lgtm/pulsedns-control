@@ -22,7 +22,16 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
   const requestHeaders = await headers();
   const userId = requestHeaders.get(USER_ID_HEADER);
   const email = requestHeaders.get(USER_EMAIL_HEADER);
-  if (!userId || !email) return null;
+  if (!userId || !email) {
+    const localUser = process.env.PULSEDNS_ADMIN_USER;
+    const localPassword = process.env.PULSEDNS_ADMIN_PASSWORD;
+    const authorization = requestHeaders.get('authorization');
+    if (!localUser || !localPassword || !authorization?.startsWith('Basic ')) return null;
+    const decoded = decodeBasicAuthorization(authorization.slice(6));
+    if (!decoded || !secureEqual(decoded.user, localUser) || !secureEqual(decoded.password, localPassword)) return null;
+    const localEmail = process.env.PULSEDNS_ADMIN_EMAIL || `${localUser}@localhost`;
+    return { userId: `self-hosted:${localUser}`, displayName: localUser, email: localEmail, fullName: localUser };
+  }
 
   const encodedFullName = requestHeaders.get(USER_FULL_NAME_HEADER);
   const fullName =
@@ -45,6 +54,9 @@ export async function requireChatGPTUser(
   const user = await getChatGPTUser();
   if (user) return user;
 
+  if (process.env.PULSEDNS_ADMIN_USER && process.env.PULSEDNS_ADMIN_PASSWORD) {
+    redirect(`/api/auth/basic?return_to=${encodeURIComponent(safeRelativeReturnPath(returnTo))}`);
+  }
   redirect(chatGPTSignInPath(returnTo));
 }
 
@@ -87,4 +99,22 @@ function safeDecodeURIComponent(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+function decodeBasicAuthorization(encoded: string): { user: string; password: string } | null {
+  try {
+    const decoded = atob(encoded);
+    const separator = decoded.indexOf(':');
+    if (separator < 1) return null;
+    return { user: decoded.slice(0, separator), password: decoded.slice(separator + 1) };
+  } catch {
+    return null;
+  }
+}
+
+function secureEqual(left: string, right: string) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  return difference === 0;
 }

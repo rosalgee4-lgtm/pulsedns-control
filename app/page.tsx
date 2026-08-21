@@ -14,7 +14,7 @@ export default function Home() {
 async function AuthenticatedDashboard() {
   const user = await requireChatGPTUser('/');
   await ensureSchema();
-  const db = getDb();
+  const db = await getDb();
   const nodeRows = await db.select().from(nodes).orderBy(desc(nodes.createdAt));
   const eventRows = await db.select({
     id: events.id,

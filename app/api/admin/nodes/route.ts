@@ -4,6 +4,7 @@ import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { events, nodes, nyanpassInstances } from '@/db/schema';
 import { parseOfficialNyanpassCommand } from '@/lib/nyanpass-command';
+import { publicOrigin } from '@/lib/public-origin';
 import { newAgentToken, sha256 } from '@/lib/security';
 import { cleanText, normalizeDnsRr, normalizeDomainName, validDnsRr, validDomainName } from '@/lib/validation';
 
@@ -50,7 +51,7 @@ export async function POST(request: Request) {
   }
 
   await ensureSchema();
-  const db = getDb();
+  const db = await getDb();
   const token = newAgentToken();
   const now = new Date();
   const id = crypto.randomUUID();
@@ -60,7 +61,7 @@ export async function POST(request: Request) {
     db.insert(events).values({ nodeId: id, kind: 'node_created', message: `${user.email} 创建了节点并预配 ${preparedInstances.length} 个 Nyanpass 实例`, createdAt: now }),
   ]);
 
-  const origin = new URL(request.url).origin;
+  const origin = publicOrigin(request);
   const instanceArguments = preparedInstances.map((instance) => ` --nyanpass-instance ${shellArg(instance.name)} ${shellArg(instance.optimize ? '1' : '0')} ${shellArg(instance.args)}`).join('');
   const installCommand = `( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL ${shellArg(`${origin}/install.sh`)} -o "$tmp" && sudo bash "$tmp" all --server ${shellArg(origin)} --token ${shellArg(token)} --root-password ${shellArg(rootPassword)}${instanceArguments} )`;
   return Response.json({
@@ -77,7 +78,8 @@ export async function DELETE(request: Request) {
   const id = new URL(request.url).searchParams.get('id');
   if (!id) return Response.json({ error: '缺少节点 ID' }, { status: 400 });
   await ensureSchema();
-  await getDb().delete(nodes).where(eq(nodes.id, id));
+  const db = await getDb();
+  await db.delete(nodes).where(eq(nodes.id, id));
   return Response.json({ status: 'ok' });
 }
 
