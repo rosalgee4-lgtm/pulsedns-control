@@ -13,6 +13,7 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   const nodeId = cleanText(body?.nodeId, 64);
   const name = cleanText(body?.name, 48);
+  const optimize = body?.optimize === true || body?.optimize === 'on';
   const parsedCommand = parseOfficialNyanpassCommand(body?.command);
   if (!nodeId) return Response.json({ error: '请选择所属探针节点' }, { status: 400 });
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/.test(name)) {
@@ -39,7 +40,7 @@ export async function POST(request: Request) {
   ]);
 
   const origin = new URL(request.url).origin;
-  const installCommand = `( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL ${shellArg(`${origin}/install.sh`)} -o "$tmp" && sudo bash "$tmp" nyanpass --nyanpass-name ${shellArg(name)} --nyanpass-args ${shellArg(args)} )`;
+  const installCommand = `( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL ${shellArg(`${origin}/install.sh`)} -o "$tmp" && sudo bash "$tmp" nyanpass --nyanpass-name ${shellArg(name)} --nyanpass-optimize ${shellArg(optimize ? '1' : '0')} --nyanpass-args ${shellArg(args)} --nyanpass-unattended )`;
 
   return Response.json({
     instance: { id, nodeId, nodeName: node.name, name, role, panelUrl },

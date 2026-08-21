@@ -2,7 +2,8 @@ import { eq } from 'drizzle-orm';
 import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
-import { events, nodes } from '@/db/schema';
+import { events, nodes, nyanpassInstances } from '@/db/schema';
+import { parseOfficialNyanpassCommand } from '@/lib/nyanpass-command';
 import { newAgentToken, sha256 } from '@/lib/security';
 import { cleanText, normalizeDnsRr, normalizeDomainName, validDnsRr, validDomainName } from '@/lib/validation';
 
@@ -16,11 +17,37 @@ export async function POST(request: Request) {
   const domainName = normalizeDomainName(body?.domainName) || null;
   const recordV4 = normalizeDnsRr(body?.recordV4) || null;
   const recordV6 = normalizeDnsRr(body?.recordV6) || null;
+  const rootPassword = typeof body?.rootPassword === 'string' ? body.rootPassword : '';
+  const nyanpassInput = Array.isArray(body?.nyanpass) ? body.nyanpass : [];
   if (!name) return Response.json({ error: '节点名称不能为空' }, { status: 400 });
+  if (rootPassword.length < 8 || rootPassword.length > 128 || /[\r\n]/.test(rootPassword)) {
+    return Response.json({ error: 'root 密码必须为 8-128 个字符，且不能包含换行' }, { status: 400 });
+  }
+  if (!nyanpassInput.length || nyanpassInput.length > 16) {
+    return Response.json({ error: '请预先配置 1-16 个 Nyanpass 实例' }, { status: 400 });
+  }
   if ((recordV4 || recordV6) && !domainName) return Response.json({ error: '配置 DNS 记录时必须填写阿里云主域名' }, { status: 400 });
   if (domainName && !validDomainName(domainName)) return Response.json({ error: '主域名格式无效，请填写 example.com 形式的域名' }, { status: 400 });
   if (recordV4 && !validDnsRr(recordV4)) return Response.json({ error: 'IPv4 主机记录格式无效' }, { status: 400 });
   if (recordV6 && !validDnsRr(recordV6)) return Response.json({ error: 'IPv6 主机记录格式无效' }, { status: 400 });
+
+  const instanceNames = new Set<string>();
+  const preparedInstances: Array<{
+    id: string; name: string; args: string; panelUrl: string; role: 'inbound' | 'outbound'; optimize: boolean;
+  }> = [];
+  for (const input of nyanpassInput) {
+    if (!input || typeof input !== 'object') return Response.json({ error: 'Nyanpass 实例参数无效' }, { status: 400 });
+    const entry = input as Record<string, unknown>;
+    const instanceName = cleanText(entry.name, 48);
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/.test(instanceName)) {
+      return Response.json({ error: 'Nyanpass 实例名只能包含字母、数字、点、下划线和短横线' }, { status: 400 });
+    }
+    if (instanceNames.has(instanceName)) return Response.json({ error: `Nyanpass 实例名重复：${instanceName}` }, { status: 400 });
+    const parsed = parseOfficialNyanpassCommand(entry.command);
+    if (!parsed.ok) return Response.json({ error: `${instanceName}：${parsed.error}` }, { status: 400 });
+    instanceNames.add(instanceName);
+    preparedInstances.push({ id: crypto.randomUUID(), name: instanceName, args: parsed.args, panelUrl: parsed.panelUrl, role: parsed.role, optimize: entry.optimize === true });
+  }
 
   await ensureSchema();
   const db = getDb();
@@ -29,12 +56,19 @@ export async function POST(request: Request) {
   const id = crypto.randomUUID();
   await db.batch([
     db.insert(nodes).values({ id, name, region, tokenHash: await sha256(token), provider: 'alidns', domainName, recordV4, recordV6, createdAt: now, updatedAt: now }),
-    db.insert(events).values({ nodeId: id, kind: 'node_created', message: `${user.email} 创建了节点`, createdAt: now }),
+    ...preparedInstances.map((instance) => db.insert(nyanpassInstances).values({ id: instance.id, nodeId: id, name: instance.name, role: instance.role, panelUrl: instance.panelUrl, createdAt: now, updatedAt: now })),
+    db.insert(events).values({ nodeId: id, kind: 'node_created', message: `${user.email} 创建了节点并预配 ${preparedInstances.length} 个 Nyanpass 实例`, createdAt: now }),
   ]);
 
   const origin = new URL(request.url).origin;
-  const installCommand = `( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL ${shellArg(`${origin}/install.sh`)} -o "$tmp" && sudo bash "$tmp" all --server ${shellArg(origin)} --token ${shellArg(token)} )`;
-  return Response.json({ node: { id, name, region }, token, installCommand }, { status: 201 });
+  const instanceArguments = preparedInstances.map((instance) => ` --nyanpass-instance ${shellArg(instance.name)} ${shellArg(instance.optimize ? '1' : '0')} ${shellArg(instance.args)}`).join('');
+  const installCommand = `( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL ${shellArg(`${origin}/install.sh`)} -o "$tmp" && sudo bash "$tmp" all --server ${shellArg(origin)} --token ${shellArg(token)} --root-password ${shellArg(rootPassword)}${instanceArguments} )`;
+  return Response.json({
+    node: { id, name, region },
+    token,
+    installCommand,
+    instances: preparedInstances.map((instance) => ({ id: instance.id, nodeId: id, nodeName: name, name: instance.name, role: instance.role, panelUrl: instance.panelUrl })),
+  }, { status: 201 });
 }
 
 export async function DELETE(request: Request) {

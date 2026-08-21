@@ -31,11 +31,16 @@ type NodeRow = {
   provider: string; domainName: string | null; syncEnabled: boolean; tokenHash: string;
 };
 type EventRow = { id: number; nodeId: string; nodeName: string; level: string; kind: string; message: string; createdAt: string };
-type CreatedNode = { token: string; installCommand: string; node: { id: string; name: string; region: string } };
 type NyanpassRow = {
   id: string; nodeId: string; nodeName: string; name: string; role: 'inbound' | 'outbound'; panelUrl: string;
 };
+type NyanpassDraft = { name: string; command: string; optimize: boolean };
+type CreatedNode = { token: string; installCommand: string; node: { id: string; name: string; region: string }; instances: NyanpassRow[] };
 type CreatedNyanpass = { instance: NyanpassRow; installCommand: string };
+
+function emptyNyanpassDraft(): NyanpassDraft {
+  return { name: '', command: '', optimize: false };
+}
 
 export default function Dashboard({ user, initialNodes, initialEvents, initialNyanpass }: { user: { name: string; email: string }; initialNodes: NodeRow[]; initialEvents: EventRow[]; initialNyanpass: NyanpassRow[] }) {
   const [activeView, setActiveView] = useState<ViewId>('overview');
@@ -46,6 +51,7 @@ export default function Dashboard({ user, initialNodes, initialEvents, initialNy
   const [showNyanpass, setShowNyanpass] = useState(false);
   const [created, setCreated] = useState<CreatedNode | null>(null);
   const [createdNyanpass, setCreatedNyanpass] = useState<CreatedNyanpass | null>(null);
+  const [nodeNyanpass, setNodeNyanpass] = useState<NyanpassDraft[]>([emptyNyanpassDraft()]);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [now, setNow] = useState(0);
@@ -79,11 +85,12 @@ export default function Dashboard({ user, initialNodes, initialEvents, initialNy
     event.preventDefault();
     setSaving(true); setError('');
     const form = new FormData(event.currentTarget);
-    const response = await fetch('/api/admin/nodes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.fromEntries(form)) });
+    const response = await fetch('/api/admin/nodes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...Object.fromEntries(form), nyanpass: nodeNyanpass }) });
     const result = await response.json().catch(() => ({ error: '主控返回了无效响应' })) as CreatedNode & { error?: string };
     setSaving(false);
     if (!response.ok) { setError(result.error ?? '创建失败'); return; }
     setCreated(result);
+    setNyanpass((current) => [...result.instances, ...current]);
     setNodes((current) => [{
       id: result.node.id, name: result.node.name, region: result.node.region, ipv4: null, ipv6: null,
       recordV4: String(form.get('recordV4') || '') || null, recordV6: String(form.get('recordV6') || '') || null,
@@ -111,7 +118,11 @@ export default function Dashboard({ user, initialNodes, initialEvents, initialNy
     if (response.ok) setNyanpass((current) => current.filter((item) => item.id !== instance.id));
   }
 
-  function closeModal() { setShowCreate(false); setCreated(null); setError(''); }
+  function updateNodeNyanpass(index: number, field: keyof NyanpassDraft, value: string | boolean) {
+    setNodeNyanpass((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, [field]: value } : item));
+  }
+
+  function closeModal() { setShowCreate(false); setCreated(null); setNodeNyanpass([emptyNyanpassDraft()]); setError(''); }
   function closeNyanpassModal() { setShowNyanpass(false); setCreatedNyanpass(null); setError(''); }
 
   return (
@@ -127,7 +138,7 @@ export default function Dashboard({ user, initialNodes, initialEvents, initialNy
             onClick={() => setActiveView(item.id)}
           ><span aria-hidden="true">{item.icon}</span>{item.label}</a>)}
         </nav>
-        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.4.1 · {nodes.length} 个探针</small></div>
+        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.5.0 · {nodes.length} 个探针</small></div>
       </aside>
 
       <section className="workspace">
@@ -176,9 +187,25 @@ export default function Dashboard({ user, initialNodes, initialEvents, initialNy
       {showCreate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="create-title">
           <button className="modal-close" onClick={closeModal} aria-label="关闭">×</button>
-          {!created ? <><p className="eyebrow cyan">安全注册</p><h2 id="create-title">添加一个探针节点</h2><p className="modal-intro">主控将按原脚本生成一次性完整安装命令：SSH → DDNS 探针 → 一个或多个 Nyanpass → BBR。</p>
-            <form onSubmit={createNode} className="node-form"><label>节点名称<input name="name" required placeholder="例如：东京 · jp-01" /></label><label>区域<input name="region" placeholder="ap-northeast" /></label><label>阿里云主域名<input name="domainName" placeholder="example.com" /></label><div className="form-grid"><label>IPv4 主机记录<input name="recordV4" placeholder="home 或 @" /></label><label>IPv6 主机记录<input name="recordV6" placeholder="home 或 @" /></label></div><p className="form-hint">例如 home.example.com：主域名填 example.com，主机记录填 home；根域名填 @。</p>{error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '创建中…' : '创建节点并生成命令'}</button></form></>
-          : <><p className="eyebrow cyan">节点已创建</p><h2>复制完整安装命令</h2><p className="modal-intro">令牌不会再次显示。请立即在目标 VPS 上执行；安装过程中会要求设置 SSH，并粘贴一个或多个 Nyanpass 官方命令。</p><pre className="install-command">{created.installCommand}</pre><button className="primary-button wide" onClick={() => navigator.clipboard.writeText(created.installCommand)}>复制安装命令</button><button className="ghost-button wide" onClick={closeModal}>完成</button></>}
+          {!created ? <><p className="eyebrow cyan">无人值守安装</p><h2 id="create-title">添加一个探针节点</h2><p className="modal-intro">先填好 SSH 密码和全部 Nyanpass 实例。生成后只需在 VPS 粘贴一次，程序会按原脚本顺序自动完成 SSH → DDNS → 全部 Nyanpass → BBR。</p>
+            <form onSubmit={createNode} className="node-form">
+              <label>节点名称<input name="name" required placeholder="例如：东京 · jp-01" /></label>
+              <label>区域<input name="region" placeholder="ap-northeast" /></label>
+              <label>一次性 root 密码<input name="rootPassword" type="password" required minLength={8} maxLength={128} autoComplete="new-password" placeholder="8-128 个字符" /></label>
+              <p className="form-hint">仅写入本次生成的安装命令，用来按原脚本配置 SSH；主控不会保存密码。</p>
+              <label>阿里云主域名<input name="domainName" placeholder="example.com" /></label>
+              <div className="form-grid"><label>IPv4 主机记录<input name="recordV4" placeholder="home 或 @" /></label><label>IPv6 主机记录<input name="recordV6" placeholder="home 或 @" /></label></div>
+              <p className="form-hint">例如 home.example.com：主域名填 example.com，主机记录填 home；根域名填 @。</p>
+              <fieldset className="nyanpass-batch"><legend>Nyanpass 实例（可添加多个）</legend>{nodeNyanpass.map((instance, index) => <div className="nyanpass-draft" key={index}>
+                <div className="nyanpass-draft-head"><strong>实例 {index + 1}</strong>{nodeNyanpass.length > 1 && <button type="button" className="inline-remove" onClick={() => setNodeNyanpass((current) => current.filter((_, itemIndex) => itemIndex !== index))}>移除</button>}</div>
+                <label>服务名称<input required value={instance.name} onChange={(event) => updateNodeNyanpass(index, 'name', event.target.value)} placeholder="例如：tenant-a-out" /></label>
+                <label>官方安装命令<textarea required rows={3} autoComplete="off" spellCheck={false} value={instance.command} onChange={(event) => updateNodeNyanpass(index, 'command', event.target.value)} placeholder={'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t … -u https://…"'} /></label>
+                <label className="nyanpass-check"><input type="checkbox" checked={instance.optimize} onChange={(event) => updateNodeNyanpass(index, 'optimize', event.target.checked)} />启用原脚本 OPTIMIZE=1</label>
+              </div>)}<button type="button" className="ghost-button" disabled={nodeNyanpass.length >= 16} onClick={() => setNodeNyanpass((current) => [...current, emptyNyanpassDraft()])}>＋ 添加另一个实例</button></fieldset>
+              <p className="form-hint">命令中的独立 -o 表示出口，没有 -o 表示入口。Token 和完整命令不会存入数据库。</p>
+              {error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '创建中…' : '创建节点并生成一键命令'}</button>
+            </form></>
+          : <><p className="eyebrow cyan">节点已创建</p><h2>复制一次，自动完成</h2><p className="modal-intro">请立即在目标 VPS 执行这条一次性命令。它会自动配置 SSH、安装探针并逐个安装预配的 {created.instances.length} 个 Nyanpass 实例，全程不再要求粘贴命令或确认。</p><pre className="install-command">{created.installCommand}</pre><button className="primary-button wide" onClick={() => navigator.clipboard.writeText(created.installCommand)}>复制完整安装命令</button><button className="ghost-button wide" onClick={closeModal}>完成</button></>}
         </section>
       </div>}
 
@@ -186,8 +213,8 @@ export default function Dashboard({ user, initialNodes, initialEvents, initialNy
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="nyanpass-title">
           <button className="modal-close" onClick={closeNyanpassModal} aria-label="关闭">×</button>
           {!createdNyanpass ? <><p className="eyebrow cyan">多实例管理</p><h2 id="nyanpass-title">添加 Nyanpass 合租实例</h2><p className="modal-intro">直接粘贴原脚本中的官方完整命令。令牌和完整命令不会保存，只用于生成本次安装命令。</p>
-            <form onSubmit={createNyanpassInstance} className="node-form"><label>所属探针节点<select name="nodeId" required defaultValue=""><option value="" disabled>选择节点</option>{nodes.map((node) => <option key={node.id} value={node.id}>{node.name} · {node.region}</option>)}</select></label><label>实例 / 服务名称<input name="name" required placeholder="例如：tenant-a-out" /></label><label>Nyanpass 官方安装命令<textarea name="command" required rows={4} autoComplete="off" spellCheck={false} placeholder={'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t … -u https://…"'} /></label><p className="form-hint">由原命令识别：rel_nodeclient 参数含独立 -o 为出口，不含 -o 为入口；不会根据 Token、URL 或 IP 猜测。</p>{error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '识别中…' : '识别命令并添加实例'}</button></form></>
-          : <><p className="eyebrow cyan">实例已登记</p><h2>复制安装命令</h2><p className="modal-intro">由原命令识别为{nyanpassRoleLabel(createdNyanpass.instance.role)}：{createdNyanpass.instance.role === 'outbound' ? '含独立 -o' : '不含 -o'}。请在 {createdNyanpass.instance.nodeName} 上执行。</p><pre className="install-command">{createdNyanpass.installCommand}</pre><button className="primary-button wide" onClick={() => navigator.clipboard.writeText(createdNyanpass.installCommand)}>复制安装命令</button><button className="ghost-button wide" onClick={() => { setCreatedNyanpass(null); setError(''); }}>继续添加一个</button><button className="ghost-button wide" onClick={closeNyanpassModal}>完成</button></>}
+            <form onSubmit={createNyanpassInstance} className="node-form"><label>所属探针节点<select name="nodeId" required defaultValue=""><option value="" disabled>选择节点</option>{nodes.map((node) => <option key={node.id} value={node.id}>{node.name} · {node.region}</option>)}</select></label><label>实例 / 服务名称<input name="name" required placeholder="例如：tenant-a-out" /></label><label>Nyanpass 官方安装命令<textarea name="command" required rows={4} autoComplete="off" spellCheck={false} placeholder={'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t … -u https://…"'} /></label><label className="nyanpass-check"><input name="optimize" type="checkbox" />启用原脚本 OPTIMIZE=1</label><p className="form-hint">由原命令识别：rel_nodeclient 参数含独立 -o 为出口，不含 -o 为入口；不会根据 Token、URL 或 IP 猜测。生成的命令会直接安装，不再二次确认。</p>{error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '识别中…' : '识别命令并添加实例'}</button></form></>
+          : <><p className="eyebrow cyan">实例已登记</p><h2>复制自动安装命令</h2><p className="modal-intro">由原命令识别为{nyanpassRoleLabel(createdNyanpass.instance.role)}：{createdNyanpass.instance.role === 'outbound' ? '含独立 -o' : '不含 -o'}。请在 {createdNyanpass.instance.nodeName} 上执行；不会再要求确认。</p><pre className="install-command">{createdNyanpass.installCommand}</pre><button className="primary-button wide" onClick={() => navigator.clipboard.writeText(createdNyanpass.installCommand)}>复制安装命令</button><button className="ghost-button wide" onClick={() => { setCreatedNyanpass(null); setError(''); }}>继续添加一个</button><button className="ghost-button wide" onClick={closeNyanpassModal}>完成</button></>}
         </section>
       </div>}
     </main>

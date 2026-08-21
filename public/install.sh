@@ -9,9 +9,10 @@ set -euo pipefail
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.4.1"
+VERSION="0.5.0"
 SERVER_URL="${SERVER_URL:-}"
 TOKEN="${TOKEN:-}"
+ROOT_PASSWORD="${ROOT_PASSWORD:-}"
 CHECK_INTERVAL=10
 LOG_FILE="/var/log/ddns-monitor.log"
 CACHE_V4="/tmp/.ddns_last_ipv4"
@@ -25,8 +26,13 @@ NYANPASS_INSTALL_URL="https://dl.nyafw.com/download/nyanpass-install.sh"
 NYANPASS_TIMEOUT=600
 NYANPASS_INPUT=""
 NYANPASS_NAME=""
+NYANPASS_OPTIMIZE="0"
+NYANPASS_UNATTENDED="0"
 PARSED_NYANPASS_ARGS=""
 PARSED_NYANPASS_ROLE=""
+NYANPASS_BATCH_NAMES=()
+NYANPASS_BATCH_OPTIMIZES=()
+NYANPASS_BATCH_INPUTS=()
 
 IPV4_SERVICES=(
     "https://api.ipify.org"
@@ -153,9 +159,13 @@ SYSCTL_EOF
 
 configure_ssh() {
     need_root
-    local root_password="" root_password_confirm="" sshd_config="/etc/ssh/sshd_config"
+    local root_password="$ROOT_PASSWORD" root_password_confirm="" sshd_config="/etc/ssh/sshd_config"
 
     log INFO "配置 SSH root 登录和密码登录..."
+    if [[ -n "$root_password" ]]; then
+        [[ ${#root_password} -ge 8 && ${#root_password} -le 128 ]] || fail "root 密码长度必须为 8-128 个字符"
+        [[ "$root_password" != *$'\n'* && "$root_password" != *$'\r'* ]] || fail "root 密码不能包含换行"
+    fi
     while [[ -z "$root_password" ]]; do
         read -r -s -p "请输入新的 root 密码: " root_password
         printf '\n'
@@ -176,6 +186,7 @@ configure_ssh() {
     fi
     root_password=""
     root_password_confirm=""
+    ROOT_PASSWORD=""
 
     if [[ ! -f "$sshd_config" ]]; then
         log WARN "未找到 $sshd_config，跳过 SSH 配置"
@@ -276,16 +287,22 @@ parse_nyanpass_input() {
 }
 
 install_nyanpass_once() {
-    local input="$1" installer="" digest="" answer="" install_ok=false
+    local input="$1"
+    local service_name="${2:-$NYANPASS_NAME}"
+    local optimize="${3:-$NYANPASS_OPTIMIZE}"
+    local unattended="${4:-$NYANPASS_UNATTENDED}"
+    local installer="" digest="" answer="" install_ok=false
     need_root
     install_deps
 
     if ! parse_nyanpass_input "$input"; then
         fail "Nyanpass 命令无效。只接受官方安装命令，或 -t TOKEN -u HTTPS_URL；出口仅多一个独立的 -o 参数"
     fi
-    if [[ -n "$NYANPASS_NAME" && ! "$NYANPASS_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$ ]]; then
+    if [[ -n "$service_name" && ! "$service_name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$ ]]; then
         fail "Nyanpass 服务名称只能包含字母、数字、点、下划线和短横线"
     fi
+    [[ "$optimize" == "0" || "$optimize" == "1" ]] || fail "Nyanpass OPTIMIZE 只能为 0 或 1"
+    [[ "$unattended" == "0" || "$unattended" == "1" ]] || fail "Nyanpass 无人值守标记无效"
 
     installer=$(mktemp /tmp/nyanpass-install.XXXXXX.sh)
     if ! curl -fLSs "$NYANPASS_INSTALL_URL" -o "$installer"; then
@@ -294,17 +311,21 @@ install_nyanpass_once() {
     fi
 
     digest=$(sha256sum "$installer" | awk '{print $1}')
-    warn "识别为 Nyanpass ${PARSED_NYANPASS_ROLE}；即将执行官方安装器"
+    warn "识别为 Nyanpass ${PARSED_NYANPASS_ROLE}；即将执行官方安装器${service_name:+（${service_name}）}"
     warn "安装器 SHA-256：$digest"
-    read -r -p "确认继续？[y/N]: " answer
-    if [[ ! "$answer" =~ ^[Yy]$ ]]; then
-        rm -f "$installer"
-        warn "已取消"
-        return 0
+    if [[ "$unattended" == "1" ]]; then
+        log INFO "无人值守安装 Nyanpass：${service_name:-未命名} (OPTIMIZE=${optimize})"
+    else
+        read -r -p "确认继续？[y/N]: " answer
+        if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+            rm -f "$installer"
+            warn "已取消"
+            return 0
+        fi
     fi
 
-    if [[ -n "$NYANPASS_NAME" ]]; then
-        if S="$NYANPASS_NAME" timeout "$NYANPASS_TIMEOUT" bash "$installer" rel_nodeclient "$PARSED_NYANPASS_ARGS" 2>&1 | tee -a "$LOG_FILE"; then
+    if [[ -n "$service_name" ]]; then
+        if S="$service_name" OPTIMIZE="$optimize" timeout "$NYANPASS_TIMEOUT" bash "$installer" rel_nodeclient "$PARSED_NYANPASS_ARGS" 2>&1 | tee -a "$LOG_FILE"; then
             install_ok=true
         fi
     else
@@ -322,6 +343,8 @@ install_nyanpass_once() {
     PARSED_NYANPASS_ARGS=""
     PARSED_NYANPASS_ROLE=""
     NYANPASS_NAME=""
+    NYANPASS_OPTIMIZE="0"
+    NYANPASS_UNATTENDED="0"
 }
 
 install_nyanpass_many() {
@@ -329,7 +352,7 @@ install_nyanpass_many() {
     need_root
 
     if [[ -n "$NYANPASS_INPUT" ]]; then
-        install_nyanpass_once "$NYANPASS_INPUT"
+        install_nyanpass_once "$NYANPASS_INPUT" "$NYANPASS_NAME" "$NYANPASS_OPTIMIZE" "$NYANPASS_UNATTENDED"
         NYANPASS_INPUT=""
         return 0
     fi
@@ -345,6 +368,21 @@ install_nyanpass_many() {
 
         read -r -p "继续添加另一个 Nyanpass 实例？[y/N]: " another
         [[ "$another" =~ ^[Yy]$ ]] || return 0
+    done
+}
+
+install_nyanpass_batch() {
+    local index=0
+    need_root
+    [[ ${#NYANPASS_BATCH_NAMES[@]} -gt 0 ]] || fail "无人值守安装缺少 Nyanpass 实例"
+    [[ ${#NYANPASS_BATCH_NAMES[@]} -eq ${#NYANPASS_BATCH_OPTIMIZES[@]} && ${#NYANPASS_BATCH_NAMES[@]} -eq ${#NYANPASS_BATCH_INPUTS[@]} ]] || fail "Nyanpass 批量参数不完整"
+
+    for ((index = 0; index < ${#NYANPASS_BATCH_NAMES[@]}; index++)); do
+        install_nyanpass_once \
+            "${NYANPASS_BATCH_INPUTS[$index]}" \
+            "${NYANPASS_BATCH_NAMES[$index]}" \
+            "${NYANPASS_BATCH_OPTIMIZES[$index]}" \
+            "1"
     done
 }
 
@@ -558,7 +596,11 @@ install_all() {
     configure_ssh
     install_ddns_service
     install_deps
-    install_nyanpass_many
+    if [[ ${#NYANPASS_BATCH_NAMES[@]} -gt 0 ]]; then
+        install_nyanpass_batch
+    else
+        install_nyanpass_many
+    fi
     configure_bbr
     log INFO "全部安装完成"
     log INFO "查看 DDNS 日志：tail -f $LOG_FILE"
@@ -606,6 +648,11 @@ while [[ $# -gt 0 ]]; do
             TOKEN="$2"
             shift 2
             ;;
+        --root-password)
+            [[ $# -ge 2 ]] || fail "--root-password 缺少参数"
+            ROOT_PASSWORD="$2"
+            shift 2
+            ;;
         --nyanpass-command|--nyanpass-args)
             [[ $# -ge 2 ]] || fail "$1 缺少参数"
             NYANPASS_INPUT="$2"
@@ -615,6 +662,22 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || fail "--nyanpass-name 缺少参数"
             NYANPASS_NAME="$2"
             shift 2
+            ;;
+        --nyanpass-optimize)
+            [[ $# -ge 2 ]] || fail "--nyanpass-optimize 缺少参数"
+            NYANPASS_OPTIMIZE="$2"
+            shift 2
+            ;;
+        --nyanpass-unattended)
+            NYANPASS_UNATTENDED="1"
+            shift
+            ;;
+        --nyanpass-instance)
+            [[ $# -ge 4 ]] || fail "--nyanpass-instance 需要 NAME OPTIMIZE ARGS"
+            NYANPASS_BATCH_NAMES+=("$2")
+            NYANPASS_BATCH_OPTIMIZES+=("$3")
+            NYANPASS_BATCH_INPUTS+=("$4")
+            shift 4
             ;;
         *)
             fail "未知参数：$1"

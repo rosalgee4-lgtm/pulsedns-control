@@ -13,9 +13,9 @@ PulseDNS 把原仓库的多份 VPS Shell 脚本合并为一个 Web 主控和一�
 | `/opt/ddns-monitor/monitor.sh` + `ddns-monitor.service` | 保留 |
 | `/var/log/ddns-monitor.log` | 保留，卸载时不删除 |
 | locale 修复及 curl/coreutils 依赖 | 保留，支持 apt、yum、dnf、apk |
-| root 密码与 SSH root/password 登录配置 | 保留为菜单动作；密码安装时输入，不再写死到仓库 |
+| root 密码与 SSH root/password 登录配置 | 保留；菜单模式现场输入，Web 一键安装使用仅出现在一次性命令中的密码 |
 | 原 23 项 BBR/sysctl 配置 | 保留为菜单动作；执行前仍备份 `/etc/sysctl.conf` |
-| Nyanpass `rel_nodeclient` 安装 | 保留；可重复添加多个实例和多个面板 |
+| Nyanpass `rel_nodeclient` 安装 | 保留；创建探针时预配一个或多个实例，由同一条命令无人值守安装 |
 | `--run` / `--uninstall` | 保留；卸载范围仍仅为 DDNS 服务、安装目录和 IP 缓存 |
 
 原仓库部分文件末尾还拼接了一个不存在的 `vps3_all_in_one_install.sh`，会在已经完成安装或卸载后错误退出。这是失效代码而不是功能，合并版不再执行它。原仓库中的明文 root 密码、DDNS 密钥和 Nyanpass 令牌也不会复制到新程序，均改为运行时输入。
@@ -69,7 +69,9 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 5. 配置 BBR/sysctl
 6. 卸载 DDNS
 
-Web 中“添加探针节点”生成的也是同一条完整安装链，而不是只安装 DDNS：SSH → DDNS → 一个或多个 Nyanpass → BBR。执行到 Nyanpass 时，按提示粘贴面板生成的官方命令；安装完一个实例后可继续添加下一个。
+Web 中“添加探针节点”会先要求填写一次性 root 密码，并预配一个或多个 Nyanpass 服务名、官方命令及原脚本的 `OPTIMIZE` 选项。主控把它们全部嵌入同一条完整安装命令：SSH → DDNS → 全部 Nyanpass → BBR。VPS 只需粘贴一次，执行过程中不再要求粘贴 Nyanpass 命令或确认；每个实例通过原安装器支持的 `S` 与 `OPTIMIZE` 环境变量自动安装。
+
+root 密码、Nyanpass Token、完整官方命令和解析后的安装参数都不会写入数据库或事件日志，只存在于生成后显示一次的安装命令中。数据库只登记服务名、所属探针、面板地址及入口/出口角色。
 
 完整安装会修改 root 密码、SSH 登录策略并覆盖 `/etc/sysctl.conf`（原文件会带时间戳备份），与原脚本行为一致。卸载 DDNS 不会回滚这些系统设置，也不会卸载 Nyanpass。
 
@@ -95,7 +97,7 @@ Web 中添加实例时粘贴 Nyanpass 面板生成的原始命令。程序只检
 - 参数中存在独立的 `-o`：出口。
 - 参数中不存在 `-o`：入口。
 
-不会根据 Token、面板 URL、IP 或端口猜测。主控只保存实例名、所属节点、面板地址和由命令得到的入口/出口，不保存 Nyanpass Token 或完整命令。每次生成的安装命令只显示一次。
+不会根据 Token、面板 URL、IP 或端口猜测。创建探针时可一次添加多个面板/实例，它们随探针命令自动安装。探针创建后单独追加实例时，生成的命令同样直接安装且不再二次确认。主控只保存实例名、所属节点、面板地址和由命令得到的入口/出口，不保存 Nyanpass Token 或完整命令。每次生成的安装命令只显示一次。
 
 ## DDNS API
 
