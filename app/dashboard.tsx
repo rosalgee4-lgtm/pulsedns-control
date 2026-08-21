@@ -47,7 +47,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
   const apiPath = (path: string) => `${basePath}${path}`;
   const [activeView, setActiveView] = useState<ViewId>('overview');
   const [nodes, setNodes] = useState(initialNodes);
-  const [events] = useState(initialEvents);
+  const [events, setEvents] = useState(initialEvents);
   const [nyanpass, setNyanpass] = useState(initialNyanpass);
   const [showCreate, setShowCreate] = useState(false);
   const [showNyanpass, setShowNyanpass] = useState(false);
@@ -56,6 +56,8 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
   const [nodeNyanpass, setNodeNyanpass] = useState<NyanpassDraft[]>([emptyNyanpassDraft()]);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [removingNodeId, setRemovingNodeId] = useState<string | null>(null);
+  const [nodeDeleteError, setNodeDeleteError] = useState('');
   const [copyFeedback, setCopyFeedback] = useState<'idle' | 'copying' | 'success' | 'error'>('idle');
   const [now, setNow] = useState(0);
   const reported = nodes.filter((node) => Boolean(node.lastSeenAt)).length;
@@ -123,6 +125,22 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
     if (response.ok) setNyanpass((current) => current.filter((item) => item.id !== instance.id));
   }
 
+  async function removeNode(node: NodeRow) {
+    if (!window.confirm(`删除节点“${node.name}”及其事件和 Nyanpass 登记？这不会卸载 VPS 上的 DDNS 或 Nyanpass 服务。`)) return;
+    setRemovingNodeId(node.id);
+    setNodeDeleteError('');
+    const response = await fetch(apiPath(`/api/admin/nodes?id=${encodeURIComponent(node.id)}`), { method: 'DELETE' });
+    const result = await response.json().catch(() => ({ error: '主控返回了无效响应' })) as { error?: string };
+    setRemovingNodeId(null);
+    if (!response.ok) {
+      setNodeDeleteError(result.error ?? '删除节点失败');
+      return;
+    }
+    setNodes((current) => current.filter((item) => item.id !== node.id));
+    setNyanpass((current) => current.filter((instance) => instance.nodeId !== node.id));
+    setEvents((current) => current.filter((event) => event.nodeId !== node.id));
+  }
+
   function updateNodeNyanpass(index: number, field: keyof NyanpassDraft, value: string | boolean) {
     setNodeNyanpass((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, [field]: value } : item));
   }
@@ -148,7 +166,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
             onClick={() => setActiveView(item.id)}
           ><span aria-hidden="true">{item.icon}</span>{item.label}</a>)}
         </nav>
-        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.7.5 · {nodes.length} 个探针</small></div>
+        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.7.6 · {nodes.length} 个探针</small></div>
       </aside>
 
       <section className="workspace">
@@ -167,14 +185,14 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
               <article><span className="metric-icon amber">!</span><div><small>已有地址上报</small><strong>{reported} <em>/ {nodes.length}</em></strong></div><mark className={nodes.length - reported ? 'warning' : ''}>{!nodes.length ? '暂无节点' : nodes.length - reported ? '等待首次上报' : '均已上报'}</mark></article>
             </section>
             <section className="grid-layout">
-              <NodesPanel nodes={nodes} now={now} onCreate={() => setShowCreate(true)} />
+              <NodesPanel nodes={nodes} now={now} onCreate={() => setShowCreate(true)} onRemove={removeNode} removingNodeId={removingNodeId} deleteError={nodeDeleteError} />
               <ActivityPanel events={events} now={now} limit={5} />
             </section>
           </>}
 
           {activeView === 'nodes' && <section className="view-page" aria-labelledby="nodes-view-title">
             <ViewIntro eyebrow="探针管理" title="所有探针节点" id="nodes-view-title" description="查看公网地址、阿里云 DNS 映射和最近一次地址上报。原脚本只在地址首次出现或变化时上报。" />
-            <NodesPanel nodes={nodes} now={now} onCreate={() => setShowCreate(true)} />
+            <NodesPanel nodes={nodes} now={now} onCreate={() => setShowCreate(true)} onRemove={removeNode} removingNodeId={removingNodeId} deleteError={nodeDeleteError} />
           </section>}
 
           {activeView === 'records' && <section className="view-page" aria-labelledby="records-view-title">
@@ -239,13 +257,15 @@ function ViewIntro({ eyebrow, title, id, description }: { eyebrow: string; title
   </header>;
 }
 
-function NodesPanel({ nodes, now, onCreate }: { nodes: NodeRow[]; now: number; onCreate: () => void }) {
+function NodesPanel({ nodes, now, onCreate, onRemove, removingNodeId, deleteError }: { nodes: NodeRow[]; now: number; onCreate: () => void; onRemove: (node: NodeRow) => void; removingNodeId: string | null; deleteError: string }) {
   return <article className="panel nodes-panel">
     <div className="panel-heading"><div><h3>地址上报</h3><p>原探针仅在公网地址首次出现或变化时发送</p></div><button type="button" className="text-button" onClick={onCreate}>添加探针 →</button></div>
+    {deleteError && <p className="panel-error" role="alert">{deleteError}</p>}
     <div className="table-wrap">
-      {nodes.length ? <table><thead><tr><th>节点</th><th>公网地址 / DNS</th><th>最近地址上报</th><th>状态</th></tr></thead><tbody>{nodes.map((node) => {
+      {nodes.length ? <table><thead><tr><th>节点</th><th>公网地址 / DNS</th><th>最近地址上报</th><th>状态</th><th>操作</th></tr></thead><tbody>{nodes.map((node) => {
         const hasReported = Boolean(node.lastSeenAt);
-        return <tr key={node.id}><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}</span><small>{node.region}</small></td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported ? 'badge online' : 'badge warning'}>{hasReported ? '已上报' : '等待首次上报'}</span></td></tr>;
+        const removing = removingNodeId === node.id;
+        return <tr key={node.id}><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}</span><small>{node.region}</small></td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported ? 'badge online' : 'badge warning'}>{hasReported ? '已上报' : '等待首次上报'}</span></td><td><button type="button" className="danger-link" disabled={removing} onClick={() => onRemove(node)}>{removing ? '删除中…' : '删除节点'}</button></td></tr>;
       })}</tbody></table> : <EmptyState onCreate={onCreate} />}
     </div>
   </article>;
