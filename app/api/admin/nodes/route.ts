@@ -3,6 +3,7 @@ import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { events, nodes, nyanpassInstances } from '@/db/schema';
+import { buildNodeProvisionCommand } from '@/lib/install-command';
 import { parseOfficialNyanpassCommand } from '@/lib/nyanpass-command';
 import { publicOrigin } from '@/lib/public-origin';
 import { newAgentToken, sha256 } from '@/lib/security';
@@ -62,8 +63,7 @@ export async function POST(request: Request) {
   ]);
 
   const origin = publicOrigin(request);
-  const instanceArguments = preparedInstances.map((instance) => ` --nyanpass-instance ${shellArg(instance.name)} ${shellArg(instance.optimize ? '1' : '0')} ${shellArg(instance.args)}`).join('');
-  const installCommand = `( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL ${shellArg(`${origin}/install.sh`)} -o "$tmp" && bash "$tmp" all --server ${shellArg(origin)} --token ${shellArg(token)} --root-password ${shellArg(rootPassword)}${instanceArguments} )`;
+  const installCommand = buildNodeProvisionCommand({ origin, token, rootPassword, instances: preparedInstances });
   return Response.json({
     node: { id, name, region },
     token,
@@ -81,8 +81,4 @@ export async function DELETE(request: Request) {
   const db = await getDb();
   await db.delete(nodes).where(eq(nodes.id, id));
   return Response.json({ status: 'ok' });
-}
-
-function shellArg(value: string) {
-  return `'${value.replaceAll("'", "'\\''")}'`;
 }

@@ -6,7 +6,7 @@ set -euo pipefail
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.7.4"
+VERSION="0.7.5"
 CHECK_INTERVAL=10
 LOG_FILE="/var/log/ddns-monitor.log"
 CACHE_V4="/tmp/.ddns_last_ipv4"
