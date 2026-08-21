@@ -9,7 +9,7 @@ set -euo pipefail
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.6.2"
+VERSION="0.7.0"
 SERVER_URL="${SERVER_URL:-}"
 TOKEN="${TOKEN:-}"
 ROOT_PASSWORD="${ROOT_PASSWORD:-}"
@@ -407,10 +407,15 @@ get_ipv6() {
 }
 
 validate_ddns_config() {
-    local server_re='^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$' port=""
-    [[ "$SERVER_URL" =~ $server_re ]] || fail "SERVER_URL 必须是有效的 HTTPS 主控地址"
-    if [[ "${BASH_REMATCH[1]:-}" == :* ]]; then
-        port="${BASH_REMATCH[1]#:}"
+    local server_re='^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~-]{1,64})?/?$' port="" authority=""
+    [[ "$SERVER_URL" =~ $server_re ]] || fail "SERVER_URL 必须是有效的 HTTP/HTTPS 主控地址"
+    if [[ "$SERVER_URL" == http://* && ! "$SERVER_URL" =~ ^http://[A-Za-z0-9.-]+:[0-9]{1,5}/[a-f0-9]{32}/?$ ]]; then
+        fail "HTTP 主控地址必须包含端口和 32 位随机访问路径"
+    fi
+    authority="${SERVER_URL#*://}"
+    authority="${authority%%/*}"
+    if [[ "$authority" == *:* ]]; then
+        port="${authority##*:}"
         [[ $((10#$port)) -ge 1 && $((10#$port)) -le 65535 ]] || fail "SERVER_URL 端口必须是 1-65535"
     fi
     [[ "$TOKEN" =~ ^[A-Za-z0-9._~+/=-]+$ && ${#TOKEN} -ge 8 && ${#TOKEN} -le 512 ]] || fail "TOKEN 格式无效"
@@ -520,7 +525,7 @@ install_ddns_service() {
     local install_tmp=""
     install_tmp=$(mktemp "${INSTALL_DIR}/.monitor.sh.XXXXXX")
     info "正在从主控下载专用 DDNS 探针..."
-    if ! curl --proto '=https' --proto-redir '=https' -fLSs --max-time 30 "${SERVER_URL%/}/monitor.sh" -o "$install_tmp"; then
+    if ! curl --proto '=http,https' --proto-redir '=http,https' -fLSs --max-time 30 "${SERVER_URL%/}/monitor.sh" -o "$install_tmp"; then
         rm -f "$install_tmp"
         fail "从主控下载 DDNS 监控脚本失败"
     fi

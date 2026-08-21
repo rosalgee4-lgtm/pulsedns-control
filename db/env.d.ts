@@ -7,6 +7,9 @@ declare namespace Cloudflare {
     PULSEDNS_SELF_HOSTED?: string;
     PULSEDNS_DB_PATH?: string;
     PULSEDNS_PUBLIC_URL?: string;
+    PULSEDNS_BASE_PATH?: string;
+    NEXT_PUBLIC_PULSEDNS_BASE_PATH?: string;
+    PULSEDNS_PANEL_PORT?: string;
     PULSEDNS_ADMIN_USER?: string;
     PULSEDNS_ADMIN_PASSWORD?: string;
     PULSEDNS_ADMIN_EMAIL?: string;

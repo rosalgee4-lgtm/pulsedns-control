@@ -6,7 +6,7 @@ set -euo pipefail
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.6.2"
+VERSION="0.7.0"
 CHECK_INTERVAL=10
 LOG_FILE="/var/log/ddns-monitor.log"
 CACHE_V4="/tmp/.ddns_last_ipv4"
@@ -62,7 +62,7 @@ install_deps() {
 }
 
 load_config() {
-    local line="" seen_server=0 seen_token=0 port=""
+    local line="" seen_server=0 seen_token=0 port="" authority=""
     [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] || fail "DDNS 配置文件不存在或不可读"
     while IFS= read -r line || [[ -n "$line" ]]; do
         case "$line" in
@@ -81,9 +81,14 @@ load_config() {
     done < "$CONFIG_FILE"
 
     [[ $seen_server -eq 1 && $seen_token -eq 1 ]] || fail "DDNS 配置缺少 SERVER_URL 或 TOKEN"
-    [[ "$SERVER_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$ ]] || fail "SERVER_URL 必须是 HTTPS 主控地址"
-    if [[ "${BASH_REMATCH[1]:-}" == :* ]]; then
-        port="${BASH_REMATCH[1]#:}"
+    [[ "$SERVER_URL" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~-]{1,64})?/?$ ]] || fail "SERVER_URL 必须是 HTTP/HTTPS 主控地址"
+    if [[ "$SERVER_URL" == http://* && ! "$SERVER_URL" =~ ^http://[A-Za-z0-9.-]+:[0-9]{1,5}/[a-f0-9]{32}/?$ ]]; then
+        fail "HTTP 主控地址必须包含端口和 32 位随机访问路径"
+    fi
+    authority="${SERVER_URL#*://}"
+    authority="${authority%%/*}"
+    if [[ "$authority" == *:* ]]; then
+        port="${authority##*:}"
         [[ $((10#$port)) -ge 1 && $((10#$port)) -le 65535 ]] || fail "SERVER_URL 端口无效"
     fi
     [[ "$TOKEN" =~ ^[A-Za-z0-9._~+/=-]+$ && ${#TOKEN} -ge 8 && ${#TOKEN} -le 512 ]] || fail "TOKEN 格式无效"

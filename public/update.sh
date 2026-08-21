@@ -63,7 +63,7 @@ validate_install_dir() {
 }
 
 load_config() {
-    local line="" seen_server=0 seen_token=0 port="" uid="" gid="" mode="" links=""
+    local line="" seen_server=0 seen_token=0 port="" authority="" uid="" gid="" mode="" links=""
     [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] || fail "未找到 PulseDNS 配置，请先使用当前项目安装 DDNS"
     uid=$(stat -c '%u' "$CONFIG_FILE" 2>/dev/null || true)
     gid=$(stat -c '%g' "$CONFIG_FILE" 2>/dev/null || true)
@@ -88,9 +88,14 @@ load_config() {
     done < "$CONFIG_FILE"
 
     [[ $seen_server -eq 1 && $seen_token -eq 1 ]] || fail "DDNS 配置缺少 SERVER_URL 或 TOKEN"
-    [[ "$SERVER_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$ ]] || fail "安全升级只允许使用 HTTPS 主控地址"
-    if [[ "${BASH_REMATCH[1]:-}" == :* ]]; then
-        port="${BASH_REMATCH[1]#:}"
+    [[ "$SERVER_URL" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~-]{1,64})?/?$ ]] || fail "主控地址必须是有效的 HTTP/HTTPS 地址"
+    if [[ "$SERVER_URL" == http://* && ! "$SERVER_URL" =~ ^http://[A-Za-z0-9.-]+:[0-9]{1,5}/[a-f0-9]{32}/?$ ]]; then
+        fail "HTTP 主控地址必须包含端口和 32 位随机访问路径"
+    fi
+    authority="${SERVER_URL#*://}"
+    authority="${authority%%/*}"
+    if [[ "$authority" == *:* ]]; then
+        port="${authority##*:}"
         [[ $((10#$port)) -ge 1 && $((10#$port)) -le 65535 ]] || fail "主控地址端口无效"
     fi
     [[ "$TOKEN" =~ ^[A-Za-z0-9._~+/=-]+$ && ${#TOKEN} -ge 8 && ${#TOKEN} -le 512 ]] || fail "节点令牌格式无效"
@@ -170,8 +175,8 @@ lock_acquired=1
 printf '%s\n' "$$" > "$LOCK_DIR/pid"
 
 candidate=$(mktemp "${INSTALL_DIR}/.monitor.candidate.XXXXXX")
-info "正在从已配置的 HTTPS 主控下载专用 DDNS 探针..."
-curl --proto '=https' --proto-redir '=https' -fLSs --retry 2 --max-time 30 \
+info "正在从已配置的主控下载专用 DDNS 探针..."
+curl --proto '=http,https' --proto-redir '=http,https' -fLSs --retry 2 --max-time 30 \
     "${SERVER_URL}/monitor.sh" -o "$candidate" || fail "DDNS 探针下载失败"
 [[ -s "$candidate" ]] || fail "下载的 DDNS 探针为空"
 grep -Fq '# PulseDNS DDNS monitor payload' "$candidate" || fail "下载内容不是 PulseDNS DDNS 探针"

@@ -20,6 +20,9 @@ const viewTitles: Record<ViewId, string> = {
   activity: '事件日志',
 };
 
+const basePath = process.env.NEXT_PUBLIC_PULSEDNS_BASE_PATH ?? '';
+const apiPath = (path: string) => `${basePath}${path}`;
+
 function isViewId(value: string): value is ViewId {
   return navigation.some((item) => item.id === value);
 }
@@ -85,7 +88,7 @@ export default function Dashboard({ user, initialNodes, initialEvents, initialNy
     event.preventDefault();
     setSaving(true); setError('');
     const form = new FormData(event.currentTarget);
-    const response = await fetch('/api/admin/nodes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...Object.fromEntries(form), nyanpass: nodeNyanpass }) });
+    const response = await fetch(apiPath('/api/admin/nodes'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...Object.fromEntries(form), nyanpass: nodeNyanpass }) });
     const result = await response.json().catch(() => ({ error: '主控返回了无效响应' })) as CreatedNode & { error?: string };
     setSaving(false);
     if (!response.ok) { setError(result.error ?? '创建失败'); return; }
@@ -104,7 +107,7 @@ export default function Dashboard({ user, initialNodes, initialEvents, initialNy
     event.preventDefault();
     setSaving(true); setError('');
     const form = new FormData(event.currentTarget);
-    const response = await fetch('/api/admin/nyanpass', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.fromEntries(form)) });
+    const response = await fetch(apiPath('/api/admin/nyanpass'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.fromEntries(form)) });
     const result = await response.json().catch(() => ({ error: '主控返回了无效响应' })) as CreatedNyanpass & { error?: string };
     setSaving(false);
     if (!response.ok) { setError(result.error ?? '创建失败'); return; }
@@ -114,7 +117,7 @@ export default function Dashboard({ user, initialNodes, initialEvents, initialNy
 
   async function removeNyanpassInstance(instance: NyanpassRow) {
     if (!window.confirm(`只从控制台移除 ${instance.name} 的登记，不会卸载 VPS 上的服务。继续吗？`)) return;
-    const response = await fetch(`/api/admin/nyanpass?id=${encodeURIComponent(instance.id)}`, { method: 'DELETE' });
+    const response = await fetch(apiPath(`/api/admin/nyanpass?id=${encodeURIComponent(instance.id)}`), { method: 'DELETE' });
     if (response.ok) setNyanpass((current) => current.filter((item) => item.id !== instance.id));
   }
 
@@ -138,7 +141,7 @@ export default function Dashboard({ user, initialNodes, initialEvents, initialNy
             onClick={() => setActiveView(item.id)}
           ><span aria-hidden="true">{item.icon}</span>{item.label}</a>)}
         </nav>
-        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.6.2 · {nodes.length} 个探针</small></div>
+        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.7.0 · {nodes.length} 个探针</small></div>
       </aside>
 
       <section className="workspace">

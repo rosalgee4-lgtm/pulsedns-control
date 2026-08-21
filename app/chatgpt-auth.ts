@@ -55,9 +55,17 @@ export async function requireChatGPTUser(
   if (user) return user;
 
   if (process.env.PULSEDNS_ADMIN_USER && process.env.PULSEDNS_ADMIN_PASSWORD) {
-    redirect(`/api/auth/basic?return_to=${encodeURIComponent(safeRelativeReturnPath(returnTo))}`);
+    const basePath = selfHostedBasePath();
+    const safeReturnTo = safeRelativeReturnPath(returnTo);
+    const localReturnTo = `${basePath}${safeReturnTo === '/' ? '' : safeReturnTo}` || '/';
+    redirect(`/api/auth/basic?return_to=${encodeURIComponent(localReturnTo)}`);
   }
   redirect(chatGPTSignInPath(returnTo));
+}
+
+function selfHostedBasePath() {
+  const value = process.env.PULSEDNS_BASE_PATH?.trim() ?? '';
+  return /^\/[a-f0-9]{32}$/.test(value) ? value : '';
 }
 
 export function chatGPTSignInPath(returnTo: string): string {

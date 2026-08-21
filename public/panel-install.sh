@@ -2,7 +2,7 @@
 # PulseDNS Web 主控一键安装与管理脚本
 set -euo pipefail
 
-VERSION="0.6.2"
+VERSION="0.7.0"
 REPOSITORY="rosalgee4-lgtm/pulsedns-control"
 INSTALL_ROOT="/opt/pulsedns-control"
 RELEASES_DIR="${INSTALL_ROOT}/releases"
@@ -11,10 +11,11 @@ RUNTIME_DIR="${INSTALL_ROOT}/runtime"
 DATA_DIR="/var/lib/pulsedns-control"
 ENV_FILE="/etc/pulsedns-control.env"
 PANEL_SERVICE="pulsedns-control"
-CADDY_SERVICE="pulsedns-caddy"
-CADDY_CONFIG="/etc/pulsedns-control/Caddyfile"
-PANEL_PORT="3100"
-CADDY_VERSION="2.11.4"
+LEGACY_CADDY_SERVICE="pulsedns-caddy"
+PANEL_PORT="${PANEL_PORT:-3100}"
+PANEL_PUBLIC_IP="${PANEL_PUBLIC_IP:-}"
+PANEL_BASE_PATH=""
+PANEL_PUBLIC_URL=""
 PNPM_VERSION="10.28.2"
 
 blue='\033[1;34m'; green='\033[1;32m'; yellow='\033[1;33m'; red='\033[1;31m'; reset='\033[0m'
@@ -44,13 +45,12 @@ install_dependencies() {
         fail "不支持当前包管理器，请先安装 curl、tar、xz 和 ca-certificates"
     fi
     command -v sha256sum >/dev/null 2>&1 || fail "缺少 sha256sum"
-    command -v sha512sum >/dev/null 2>&1 || fail "缺少 sha512sum"
 }
 
 detect_arch() {
     case "$(uname -m)" in
-        x86_64|amd64) NODE_ARCH="x64"; CADDY_ARCH="amd64" ;;
-        aarch64|arm64) NODE_ARCH="arm64"; CADDY_ARCH="arm64" ;;
+        x86_64|amd64) NODE_ARCH="x64" ;;
+        aarch64|arm64) NODE_ARCH="arm64" ;;
         *) fail "仅支持 x86_64 和 arm64" ;;
     esac
 }
@@ -76,20 +76,6 @@ download_node() {
     ok "Node.js $(${RUNTIME_DIR}/node/bin/node --version) 已就绪"
 }
 
-download_caddy() {
-    local temp_dir="$1" filename archive sums expected
-    filename="caddy_${CADDY_VERSION}_linux_${CADDY_ARCH}.tar.gz"
-    archive="${temp_dir}/${filename}"
-    sums="${temp_dir}/caddy-checksums.txt"
-    curl --proto '=https' --proto-redir '=https' -fLSs "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/${filename}" -o "$archive"
-    curl --proto '=https' --proto-redir '=https' -fLSs "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_checksums.txt" -o "$sums"
-    expected=$(awk -v file="$filename" '$2 == file { print $1 }' "$sums")
-    [[ -n "$expected" && "$(sha512sum "$archive" | awk '{print $1}')" == "$expected" ]] || fail "Caddy 校验失败"
-    tar -xzf "$archive" -C "$temp_dir" caddy
-    install -m 0755 "${temp_dir}/caddy" /usr/local/bin/caddy
-    ok "Caddy v${CADDY_VERSION} 已就绪"
-}
-
 download_and_build_panel() {
     local temp_dir="$1" release_id release_dir source_archive
     release_id=$(date '+%Y%m%d%H%M%S')
@@ -105,6 +91,8 @@ download_and_build_panel() {
         cd "$release_dir"
         export PATH="${RUNTIME_DIR}/node/bin:${PATH}"
         export PULSEDNS_SELF_HOSTED=1
+        export PULSEDNS_BASE_PATH="${PANEL_BASE_PATH}"
+        export NEXT_PUBLIC_PULSEDNS_BASE_PATH="${PANEL_BASE_PATH}"
         corepack pnpm install --frozen-lockfile
         corepack pnpm build
     )
@@ -114,12 +102,11 @@ download_and_build_panel() {
 }
 
 prompt_install_config() {
-    local password_confirm=""
-    read -r -p "面板域名（请先把 A/AAAA 解析到本机）: " PANEL_DOMAIN
-    [[ "$PANEL_DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])$ && "$PANEL_DOMAIN" == *.* ]] || fail "域名格式无效"
-    PANEL_DOMAIN="${PANEL_DOMAIN,,}"
-    read -r -p "证书通知邮箱: " CERT_EMAIL
-    [[ "$CERT_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || fail "邮箱格式无效"
+    local password_confirm="" requested_port=""
+    read -r -p "HTTP 端口 [${PANEL_PORT}]: " requested_port
+    PANEL_PORT="${requested_port:-$PANEL_PORT}"
+    [[ "$PANEL_PORT" =~ ^[0-9]+$ ]] || fail "端口必须是数字"
+    [[ $((10#$PANEL_PORT)) -ge 1024 && $((10#$PANEL_PORT)) -le 65535 ]] || fail "HTTP 端口必须是 1024-65535"
     read -r -p "面板管理员用户名 [admin]: " ADMIN_USER
     ADMIN_USER="${ADMIN_USER:-admin}"
     [[ "$ADMIN_USER" =~ ^[A-Za-z0-9_.-]{3,32}$ ]] || fail "管理员用户名只能包含字母、数字、点、下划线和短横线"
@@ -133,16 +120,55 @@ prompt_install_config() {
     [[ "$ALIYUN_KEY_SECRET" =~ ^[A-Za-z0-9._~+/=-]{8,256}$ ]] || fail "AccessKey Secret 格式无效"
 }
 
+valid_ipv4() {
+    local ip="$1" octet=""
+    local -a octets=()
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS='.' read -r -a octets <<< "$ip"
+    for octet in "${octets[@]}"; do
+        [[ $((10#$octet)) -le 255 ]] || return 1
+    done
+}
+
+prepare_http_endpoint() {
+    local endpoint="" candidate="" secret=""
+    if [[ -z "$PANEL_PUBLIC_IP" ]]; then
+        for endpoint in https://api.ipify.org https://ifconfig.me/ip https://4.ipw.cn; do
+            candidate=$(curl -4 -fLSs --max-time 8 "$endpoint" 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1 || true)
+            if valid_ipv4 "$candidate"; then
+                PANEL_PUBLIC_IP="$candidate"
+                break
+            fi
+        done
+    fi
+    valid_ipv4 "$PANEL_PUBLIC_IP" || fail "无法自动识别公网 IPv4；可用 PANEL_PUBLIC_IP=你的IP 重新运行"
+    [[ -r /proc/sys/kernel/random/uuid ]] || fail "系统无法生成随机访问路径"
+    secret=$(tr -d '-' < /proc/sys/kernel/random/uuid)
+    [[ "$secret" =~ ^[a-f0-9]{32}$ ]] || fail "随机访问路径生成失败"
+    PANEL_BASE_PATH="/${secret}"
+    PANEL_PUBLIC_URL="http://${PANEL_PUBLIC_IP}:${PANEL_PORT}${PANEL_BASE_PATH}"
+}
+
+load_existing_http_config() {
+    PANEL_PUBLIC_URL=$(sed -n 's/^PULSEDNS_PUBLIC_URL=//p' "$ENV_FILE" | head -1)
+    PANEL_BASE_PATH=$(sed -n 's/^PULSEDNS_BASE_PATH=//p' "$ENV_FILE" | head -1)
+    PANEL_PORT=$(sed -n 's/^PULSEDNS_PANEL_PORT=//p' "$ENV_FILE" | head -1)
+    [[ "$PANEL_BASE_PATH" =~ ^/[a-f0-9]{32}$ && "$PANEL_PORT" =~ ^[0-9]+$ ]] || fail "当前安装不是 HTTP 加密路径版本；请卸载后重新安装"
+    [[ "$PANEL_PUBLIC_URL" == http://*"${PANEL_BASE_PATH}" ]] || fail "面板公开地址配置无效"
+}
+
 write_panel_config() {
     install -d -m 0750 /etc/pulsedns-control
     umask 077
     {
         printf 'PULSEDNS_SELF_HOSTED=1\n'
         printf 'PULSEDNS_DB_PATH=%s\n' "${DATA_DIR}/pulsedns.db"
-        printf 'PULSEDNS_PUBLIC_URL=https://%s\n' "$PANEL_DOMAIN"
+        printf 'PULSEDNS_PUBLIC_URL=%s\n' "$PANEL_PUBLIC_URL"
+        printf 'PULSEDNS_BASE_PATH=%s\n' "$PANEL_BASE_PATH"
+        printf 'NEXT_PUBLIC_PULSEDNS_BASE_PATH=%s\n' "$PANEL_BASE_PATH"
+        printf 'PULSEDNS_PANEL_PORT=%s\n' "$PANEL_PORT"
         printf 'PULSEDNS_ADMIN_USER=%s\n' "$ADMIN_USER"
         printf 'PULSEDNS_ADMIN_PASSWORD=%s\n' "$ADMIN_PASSWORD"
-        printf 'PULSEDNS_ADMIN_EMAIL=%s\n' "$CERT_EMAIL"
         printf 'ALIBABA_CLOUD_ACCESS_KEY_ID=%s\n' "$ALIYUN_KEY_ID"
         printf 'ALIBABA_CLOUD_ACCESS_KEY_SECRET=%s\n' "$ALIYUN_KEY_SECRET"
     } > "$ENV_FILE"
@@ -152,9 +178,7 @@ write_panel_config() {
 
 write_services() {
     id pulsedns >/dev/null 2>&1 || useradd --system --home "$DATA_DIR" --shell /usr/sbin/nologin pulsedns
-    id caddy >/dev/null 2>&1 || useradd --system --home /var/lib/pulsedns-caddy --shell /usr/sbin/nologin caddy
     install -d -o pulsedns -g pulsedns -m 0750 "$DATA_DIR"
-    install -d -o caddy -g caddy -m 0750 /var/lib/pulsedns-caddy /var/log/pulsedns-caddy
 
     cat > "/etc/systemd/system/${PANEL_SERVICE}.service" <<SERVICE_EOF
 [Unit]
@@ -169,7 +193,7 @@ Group=pulsedns
 WorkingDirectory=${CURRENT_LINK}
 EnvironmentFile=${ENV_FILE}
 Environment=NODE_ENV=production
-ExecStart=${RUNTIME_DIR}/node/bin/node ${CURRENT_LINK}/node_modules/vinext/dist/cli.js start --hostname 127.0.0.1 --port ${PANEL_PORT}
+ExecStart=${RUNTIME_DIR}/node/bin/node ${CURRENT_LINK}/node_modules/vinext/dist/cli.js start --hostname 0.0.0.0 --port ${PANEL_PORT}
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
@@ -181,46 +205,8 @@ ReadWritePaths=${DATA_DIR}
 WantedBy=multi-user.target
 SERVICE_EOF
 
-    cat > "$CADDY_CONFIG" <<CADDY_EOF
-{
-    email ${CERT_EMAIL}
-    admin off
-}
-
-${PANEL_DOMAIN} {
-    encode zstd gzip
-    reverse_proxy 127.0.0.1:${PANEL_PORT}
-}
-CADDY_EOF
-
-    cat > "/etc/systemd/system/${CADDY_SERVICE}.service" <<CADDY_SERVICE_EOF
-[Unit]
-Description=PulseDNS HTTPS Reverse Proxy
-After=network-online.target ${PANEL_SERVICE}.service
-Wants=network-online.target
-
-[Service]
-Type=notify
-User=caddy
-Group=caddy
-Environment=XDG_DATA_HOME=/var/lib/pulsedns-caddy
-ExecStart=/usr/local/bin/caddy run --environ --config ${CADDY_CONFIG}
-ExecReload=/usr/local/bin/caddy reload --config ${CADDY_CONFIG} --force
-TimeoutStopSec=5s
-LimitNOFILE=1048576
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-PrivateTmp=true
-ProtectSystem=strict
-ReadWritePaths=/var/lib/pulsedns-caddy /var/log/pulsedns-caddy
-
-[Install]
-WantedBy=multi-user.target
-CADDY_SERVICE_EOF
-
     systemctl daemon-reload
     systemctl enable --now "$PANEL_SERVICE"
-    systemctl enable --now "$CADDY_SERVICE"
 }
 
 install_panel() {
@@ -228,19 +214,19 @@ install_panel() {
     [[ ! -e "$ENV_FILE" ]] || fail "面板已安装；请使用 update 升级，或先卸载"
     prompt_install_config
     install_dependencies
+    prepare_http_endpoint
     detect_arch
     local temp_dir
     temp_dir=$(mktemp -d /tmp/pulsedns-panel.XXXXXX)
     trap 'rm -rf "$temp_dir"' EXIT
     mkdir -p "$INSTALL_ROOT" "$RELEASES_DIR"
     download_node "$temp_dir"
-    download_caddy "$temp_dir"
     download_and_build_panel "$temp_dir"
     write_panel_config
     write_services
     systemctl is-active --quiet "$PANEL_SERVICE" || fail "面板服务启动失败，请运行 journalctl -u ${PANEL_SERVICE}"
-    ok "安装完成：https://${PANEL_DOMAIN}"
-    warn "如果 HTTPS 尚未生效，请确认域名已解析到本机且 80/443 端口已放行"
+    ok "安装完成：${PANEL_PUBLIC_URL}"
+    warn "请只向你自己的来源 IP 放行 TCP ${PANEL_PORT}；HTTP 登录信息不会加密"
 }
 
 update_panel() {
@@ -248,6 +234,7 @@ update_panel() {
     [[ -f "$ENV_FILE" && -L "$CURRENT_LINK" ]] || fail "未检测到已安装面板"
     local previous_release
     previous_release=$(readlink -f "$CURRENT_LINK")
+    load_existing_http_config
     install_dependencies
     detect_arch
     local temp_dir
@@ -267,7 +254,7 @@ update_panel() {
 
 show_status() {
     need_root
-    systemctl --no-pager --full status "$PANEL_SERVICE" "$CADDY_SERVICE" || true
+    systemctl --no-pager --full status "$PANEL_SERVICE" || true
 }
 
 uninstall_panel() {
@@ -275,8 +262,8 @@ uninstall_panel() {
     local answer=""
     read -r -p "确认卸载面板程序？数据库会保留在 ${DATA_DIR} [y/N]: " answer
     [[ "$answer" =~ ^[Yy]$ ]] || return 0
-    systemctl disable --now "$CADDY_SERVICE" "$PANEL_SERVICE" 2>/dev/null || true
-    rm -f "/etc/systemd/system/${CADDY_SERVICE}.service" "/etc/systemd/system/${PANEL_SERVICE}.service"
+    systemctl disable --now "$LEGACY_CADDY_SERVICE" "$PANEL_SERVICE" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${LEGACY_CADDY_SERVICE}.service" "/etc/systemd/system/${PANEL_SERVICE}.service"
     rm -f "$ENV_FILE"
     rm -rf "$INSTALL_ROOT" /etc/pulsedns-control
     systemctl daemon-reload

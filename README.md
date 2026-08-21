@@ -51,13 +51,13 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 
 ### 一键安装 Web 主控面板
 
-准备一台使用 systemd 的 Linux VPS，并先把面板域名的 A/AAAA 记录解析到该 VPS，放行 80 与 443 端口。然后以 root 执行这一条命令，无需 GitHub Token：
+准备一台使用 systemd 的 Linux VPS。安装器会自动识别公网 IPv4、询问 HTTP 端口（默认 `3100`），并生成 32 位随机访问路径；不需要域名、证书邮箱或 GitHub Token。只需向自己的来源 IP 放行所选端口，然后以 root 执行：
 
 ```bash
 bash <(curl -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh) install
 ```
 
-脚本会询问面板域名、管理员账号、阿里云 AccessKey，随后自动安装经过校验的 Node.js 与 Caddy、构建 PulseDNS、创建本地 SQLite 数据库、配置管理员 Basic Auth、申请 HTTPS 证书并注册 systemd 服务。再次不带参数运行同一脚本会打开操作菜单：
+脚本会询问端口、管理员账号和阿里云 AccessKey，随后自动安装经过校验的 Node.js、构建 PulseDNS、创建本地 SQLite 数据库、配置管理员 Basic Auth 并注册 systemd 服务。Caddy、域名和 HTTPS 证书流程已完全移除。完成后会显示类似 `http://203.0.113.10:3100/32位随机路径` 的唯一入口；直接访问 IP 与端口根路径不能进入面板。再次不带参数运行同一脚本会打开操作菜单：
 
 1. 一键安装 Web 主控面板
 2. 升级面板
@@ -80,7 +80,7 @@ bash <(curl -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-cont
 (
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
-  curl -fLSs https://你的主控地址/install.sh -o "$tmp" &&
+  curl -fLSs http://主控IP:端口/随机访问路径/install.sh -o "$tmp" &&
   sudo bash "$tmp"
 )
 ```
@@ -108,12 +108,12 @@ root 密码、Nyanpass Token、完整官方命令和解析后的安装参数都�
 (
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
-  curl -fLSs https://你的主控地址/update.sh -o "$tmp" &&
+  curl -fLSs http://主控IP:端口/随机访问路径/update.sh -o "$tmp" &&
   sudo bash "$tmp"
 )
 ```
 
-DDNS 主控地址必须使用 HTTPS。升级器只从节点现有配置中的主控下载专用 `monitor.sh`，不会下载或执行完整安装器。它只替换 DDNS 探针，不接受新的主控地址或令牌，也不改 systemd 单元、配置、SSH、BBR 或 Nyanpass。配置、IP 缓存和日志不会被清空；运行中的服务会重启并继续正常检测，若公网 IP 此时已经变化，仍会按原逻辑上报并更新 DNS。停止的服务保持停止。新版启动失败时会恢复旧探针，并在 `/opt/ddns-monitor/monitor.sh.previous` 保留上一版本。
+升级器支持 HTTPS 地址，以及带端口和 32 位随机路径的 HTTP 主控地址。它只从节点现有配置中的主控下载专用 `monitor.sh`，不会下载或执行完整安装器。它只替换 DDNS 探针，不接受新的主控地址或令牌，也不改 systemd 单元、配置、SSH、BBR 或 Nyanpass。配置、IP 缓存和日志不会被清空；运行中的服务会重启并继续正常检测，若公网 IP 此时已经变化，仍会按原逻辑上报并更新 DNS。停止的服务保持停止。新版启动失败时会恢复旧探针，并在 `/opt/ddns-monitor/monitor.sh.previous` 保留上一版本。
 
 ## Nyanpass 入口与出口
 
