@@ -2,9 +2,9 @@
 # PulseDNS Web 主控一键安装与管理脚本
 set -euo pipefail
 
-VERSION="0.7.2"
+VERSION="0.7.3"
 REPOSITORY="rosalgee4-lgtm/pulsedns-control"
-SOURCE_REF="release-v0.7.2"
+SOURCE_REF="release-v0.7.3"
 SOURCE_LOCK_SHA256="1fb15db69bc20c25365426fcad11b15270cf535e94b0c9a320eaa8245227b782"
 SOURCE_OG_SHA256="3e0d82b4901fe73d4bc6a6209275283d39a0cf4084fea6625fba18d0e627de55"
 INSTALL_ROOT="/opt/pulsedns-control"
@@ -145,11 +145,13 @@ download_node() {
     curl --proto '=https' --proto-redir '=https' -fLSs "https://nodejs.org/dist/latest-v22.x/${filename}" -o "$archive"
     [[ "$(sha256sum "$archive" | awk '{print $1}')" == "$expected" ]] || fail "Node.js 校验失败"
 
-    mkdir -p "$RUNTIME_DIR"
+    install -d -m 0755 "$RUNTIME_DIR"
     extracted="${RUNTIME_DIR}/${filename%.tar.xz}"
     if [[ ! -x "${extracted}/bin/node" ]]; then
         tar -xJf "$archive" -C "$RUNTIME_DIR"
     fi
+    chmod -R a+rX "$extracted"
+    chmod 0755 "$RUNTIME_DIR" "$extracted"
     ln -sfn "$extracted" "${RUNTIME_DIR}/node"
     "${RUNTIME_DIR}/node/bin/node" --version >/dev/null 2>&1 || \
         fail "Node.js 无法运行；请确认系统为 glibc 2.28+ 的 x86_64 或 arm64 Linux"
@@ -168,7 +170,7 @@ download_and_build_panel() {
     source_archive="${temp_dir}/source.tar.gz"
     curl --proto '=https' --proto-redir '=https' -fLSs \
         "https://github.com/${REPOSITORY}/archive/refs/heads/${SOURCE_REF}.tar.gz" -o "$source_archive"
-    mkdir -p "$release_dir"
+    install -d -m 0755 "$release_dir"
     tar -xzf "$source_archive" --strip-components=1 -C "$release_dir"
 
     [[ -s "${release_dir}/package.json" && -s "${release_dir}/pnpm-lock.yaml" && \
@@ -199,6 +201,8 @@ download_and_build_panel() {
         "${RUNTIME_DIR}/node/bin/node" "${RUNTIME_DIR}/node/bin/corepack" pnpm install --frozen-lockfile
         "${RUNTIME_DIR}/node/bin/node" "${RUNTIME_DIR}/node/bin/corepack" pnpm build
     )
+    chmod -R a+rX "$release_dir"
+    chmod 0755 "$INSTALL_ROOT" "$RELEASES_DIR" "$release_dir"
     ok "PulseDNS 面板源码与生产构建已安装"
 }
 
@@ -333,6 +337,8 @@ write_services() {
         useradd --system --gid pulsedns --home "$DATA_DIR" --shell "$nologin_shell" pulsedns
     fi
     install -d -o pulsedns -g pulsedns -m 0750 "$DATA_DIR"
+    chown -R pulsedns:pulsedns "$DATA_DIR"
+    chmod 0750 "$DATA_DIR"
 
     cat > "/etc/systemd/system/${PANEL_SERVICE}.service" <<SERVICE_EOF
 [Unit]
@@ -363,6 +369,23 @@ SERVICE_EOF
     systemctl enable "$PANEL_SERVICE" >/dev/null
 }
 
+verify_service_access() {
+    command -v runuser >/dev/null 2>&1 || fail "缺少 runuser（util-linux）"
+    runuser -u pulsedns -- test -x "$INSTALL_ROOT" || fail "服务账号无法进入 ${INSTALL_ROOT}"
+    runuser -u pulsedns -- test -x "$RELEASES_DIR" || fail "服务账号无法进入 ${RELEASES_DIR}"
+    runuser -u pulsedns -- test -x "$CURRENT_LINK" || fail "服务账号无法进入当前版本目录"
+    runuser -u pulsedns -- sh -c 'cd "$1"' sh "$CURRENT_LINK" || fail "服务账号无法切换到工作目录"
+    runuser -u pulsedns -- test -r "${CURRENT_LINK}/node_modules/vinext/dist/cli.js" || \
+        fail "服务账号无法读取 Vinext 启动文件"
+    runuser -u pulsedns -- test -r "${CURRENT_LINK}/dist/server/index.js" || \
+        fail "服务账号无法读取生产构建"
+    runuser -u pulsedns -- test -x "${CURRENT_LINK}/dist/client" || \
+        fail "服务账号无法进入静态资源目录"
+    runuser -u pulsedns -- test -w "$DATA_DIR" || fail "服务账号无法写入 ${DATA_DIR}"
+    runuser -u pulsedns -- "${RUNTIME_DIR}/node/bin/node" --version >/dev/null || \
+        fail "服务账号无法执行 Node.js"
+}
+
 install_panel() {
     need_root
     [[ ! -e "$ENV_FILE" && ! -e "$CURRENT_LINK" ]] || fail "面板或未完成安装已存在；请使用 update，或先卸载后重装"
@@ -379,16 +402,17 @@ install_panel() {
     PREVIOUS_RELEASE=""
     trap cleanup_on_exit EXIT
     TEMP_DIR=$(mktemp -d /tmp/pulsedns-panel.XXXXXX)
-    mkdir -p "$INSTALL_ROOT"
+    install -d -m 0755 "$INSTALL_ROOT" "$RELEASES_DIR" "$RUNTIME_DIR"
+    chmod 0755 "$INSTALL_ROOT" "$RELEASES_DIR" "$RUNTIME_DIR"
     if [[ -d "$RELEASES_DIR" ]]; then
         find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -exec rm -rf -- {} +
     fi
-    mkdir -p "$RELEASES_DIR"
     download_node "$TEMP_DIR"
     download_and_build_panel "$TEMP_DIR"
     activate_release "$NEW_RELEASE_DIR"
     write_panel_config
     write_services
+    verify_service_access
     systemctl restart "$PANEL_SERVICE" || fail "面板服务启动失败，请运行 journalctl -u ${PANEL_SERVICE}"
     wait_for_panel || fail "面板未能通过启动检查，请运行 journalctl -u ${PANEL_SERVICE}"
     TRANSACTION_ACTIVE=0
@@ -406,6 +430,8 @@ update_panel() {
     [[ -f "$ENV_FILE" && -L "$CURRENT_LINK" ]] || fail "未检测到已安装面板"
     PREVIOUS_RELEASE=$(readlink -f "$CURRENT_LINK")
     [[ -d "$PREVIOUS_RELEASE" ]] || fail "当前版本目录不存在，无法安全升级"
+    install -d -m 0755 "$INSTALL_ROOT" "$RELEASES_DIR" "$RUNTIME_DIR"
+    chmod 0755 "$INSTALL_ROOT" "$RELEASES_DIR" "$RUNTIME_DIR"
     load_existing_http_config
     detect_arch
     check_build_resources
@@ -418,6 +444,7 @@ update_panel() {
     download_and_build_panel "$TEMP_DIR"
     activate_release "$NEW_RELEASE_DIR"
     write_services
+    verify_service_access
     if ! systemctl restart "$PANEL_SERVICE" || ! wait_for_panel; then
         fail "新版未能通过启动检查；退出时将自动恢复上一版本"
     fi
