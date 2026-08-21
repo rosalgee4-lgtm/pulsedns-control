@@ -2,8 +2,11 @@
 # PulseDNS Web 主控一键安装与管理脚本
 set -euo pipefail
 
-VERSION="0.7.1"
+VERSION="0.7.2"
 REPOSITORY="rosalgee4-lgtm/pulsedns-control"
+SOURCE_REF="release-v0.7.2"
+SOURCE_LOCK_SHA256="1fb15db69bc20c25365426fcad11b15270cf535e94b0c9a320eaa8245227b782"
+SOURCE_OG_SHA256="3e0d82b4901fe73d4bc6a6209275283d39a0cf4084fea6625fba18d0e627de55"
 INSTALL_ROOT="/opt/pulsedns-control"
 RELEASES_DIR="${INSTALL_ROOT}/releases"
 CURRENT_LINK="${INSTALL_ROOT}/current"
@@ -18,6 +21,10 @@ PANEL_BASE_PATH=""
 PANEL_PUBLIC_URL=""
 PNPM_VERSION="10.28.2"
 TEMP_DIR=""
+NEW_RELEASE_DIR=""
+PREVIOUS_RELEASE=""
+TRANSACTION_MODE=""
+TRANSACTION_ACTIVE=0
 
 blue='\033[1;34m'; green='\033[1;32m'; yellow='\033[1;33m'; red='\033[1;31m'; reset='\033[0m'
 info() { printf "%b[INFO]%b %s\n" "$blue" "$reset" "$*"; }
@@ -35,27 +42,88 @@ cleanup_temp_dir() {
     TEMP_DIR=""
 }
 
+cleanup_on_exit() {
+    local status=$?
+    set +e
+    cleanup_temp_dir
+    if [[ "$TRANSACTION_ACTIVE" -eq 1 ]]; then
+        if [[ "$TRANSACTION_MODE" == "install" ]]; then
+            systemctl disable --now "$PANEL_SERVICE" >/dev/null 2>&1 || true
+            rm -f "/etc/systemd/system/${PANEL_SERVICE}.service" "$ENV_FILE"
+            if [[ -L "$CURRENT_LINK" ]]; then rm -f "$CURRENT_LINK"; fi
+        elif [[ "$TRANSACTION_MODE" == "update" && -n "$PREVIOUS_RELEASE" && -d "$PREVIOUS_RELEASE" ]]; then
+            activate_release "$PREVIOUS_RELEASE" >/dev/null 2>&1 || true
+            systemctl restart "$PANEL_SERVICE" >/dev/null 2>&1 || true
+            warn "升级未完成，已恢复上一版本"
+        fi
+        if [[ -n "$NEW_RELEASE_DIR" && "$NEW_RELEASE_DIR" == "${RELEASES_DIR}/"* ]]; then
+            rm -rf -- "$NEW_RELEASE_DIR"
+        fi
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    return "$status"
+}
+
 need_root() {
     [[ $(id -u) -eq 0 ]] || fail "请使用 root 或 sudo 运行"
     [[ "$(uname -s)" == "Linux" ]] || fail "面板安装器仅支持 Linux"
     command -v systemctl >/dev/null 2>&1 || fail "系统必须使用 systemd"
+    [[ -d /run/systemd/system ]] || fail "未检测到正在运行的 systemd；不支持 Docker、WSL 或 chroot 容器内安装"
+    systemctl show-environment >/dev/null 2>&1 || fail "无法连接 systemd 服务管理器"
+    command -v getconf >/dev/null 2>&1 || fail "缺少 getconf，无法检测 glibc"
+    local libc_name="" libc_version="" libc_major=0 libc_minor=0
+    read -r libc_name libc_version < <(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+    [[ "$libc_name" == "glibc" && "$libc_version" =~ ^([0-9]+)\.([0-9]+) ]] || \
+        fail "仅支持 glibc Linux；不支持 Alpine/musl"
+    libc_major="${BASH_REMATCH[1]}"; libc_minor="${BASH_REMATCH[2]}"
+    (( libc_major > 2 || (libc_major == 2 && libc_minor >= 28) )) || \
+        fail "glibc ${libc_version} 过旧；Node.js 22 要求 glibc 2.28 或更高版本"
 }
 
 install_dependencies() {
-    local packages=(curl tar xz-utils ca-certificates)
+    local packages=(curl tar xz-utils ca-certificates util-linux passwd)
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update -qq
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${packages[@]}"
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y -q curl tar xz ca-certificates
+        dnf install -y -q curl tar xz ca-certificates util-linux shadow-utils
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y -q curl tar xz ca-certificates
-    elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache curl tar xz ca-certificates shadow
+        yum install -y -q curl tar xz ca-certificates util-linux shadow-utils
     else
-        fail "不支持当前包管理器，请先安装 curl、tar、xz 和 ca-certificates"
+        fail "仅支持使用 apt、dnf 或 yum 的 glibc Linux"
     fi
     command -v sha256sum >/dev/null 2>&1 || fail "缺少 sha256sum"
+    command -v flock >/dev/null 2>&1 || fail "缺少 flock（util-linux）"
+    command -v useradd >/dev/null 2>&1 && command -v groupadd >/dev/null 2>&1 && \
+        command -v getent >/dev/null 2>&1 || fail "缺少系统用户管理工具"
+}
+
+acquire_lock() {
+    exec 9>"/run/lock/pulsedns-panel-installer.lock"
+    flock -n 9 || fail "另一个 PulseDNS 安装或升级任务正在运行"
+}
+
+check_build_resources() {
+    local disk_kb memory_kb
+    disk_kb=$(df -Pk /opt | awk 'NR==2 {print $4}')
+    [[ "$disk_kb" =~ ^[0-9]+$ && "$disk_kb" -ge 2097152 ]] || \
+        fail "/opt 所在磁盘至少需要 2 GiB 可用空间"
+    memory_kb=$(awk '/^MemAvailable:/ {m=$2} /^SwapFree:/ {s=$2} END {print m+s}' /proc/meminfo)
+    [[ "$memory_kb" =~ ^[0-9]+$ && "$memory_kb" -ge 786432 ]] || \
+        fail "构建至少需要 768 MiB 可用内存与交换空间；请先增加 swap"
+    if [[ "$memory_kb" -lt 1572864 ]]; then
+        warn "可用内存低于 1.5 GiB，构建速度可能较慢"
+    fi
+}
+
+port_is_listening() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -H -ltn 2>/dev/null | awk -v suffix=":${port}" \
+            '$4 ~ (suffix "$") { found=1 } END { exit !found }'
+    else
+        (exec 3<>"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1
+    fi
 }
 
 detect_arch() {
@@ -83,6 +151,8 @@ download_node() {
         tar -xJf "$archive" -C "$RUNTIME_DIR"
     fi
     ln -sfn "$extracted" "${RUNTIME_DIR}/node"
+    "${RUNTIME_DIR}/node/bin/node" --version >/dev/null 2>&1 || \
+        fail "Node.js 无法运行；请确认系统为 glibc 2.28+ 的 x86_64 或 arm64 Linux"
     PATH="${RUNTIME_DIR}/node/bin:${PATH}" \
         "${RUNTIME_DIR}/node/bin/node" "${RUNTIME_DIR}/node/bin/corepack" \
         prepare "pnpm@${PNPM_VERSION}" --activate >/dev/null
@@ -90,14 +160,34 @@ download_node() {
 }
 
 download_and_build_panel() {
-    local temp_dir="$1" release_id release_dir source_archive
+    local temp_dir="$1" release_id release_dir source_archive corrupt_file
     release_id=$(date '+%Y%m%d%H%M%S')
     release_dir="${RELEASES_DIR}/${release_id}"
+    [[ ! -e "$release_dir" ]] || release_dir="${RELEASES_DIR}/${release_id}-$$"
+    NEW_RELEASE_DIR="$release_dir"
     source_archive="${temp_dir}/source.tar.gz"
     curl --proto '=https' --proto-redir '=https' -fLSs \
-        "https://github.com/${REPOSITORY}/archive/refs/heads/main.tar.gz" -o "$source_archive"
+        "https://github.com/${REPOSITORY}/archive/refs/heads/${SOURCE_REF}.tar.gz" -o "$source_archive"
     mkdir -p "$release_dir"
     tar -xzf "$source_archive" --strip-components=1 -C "$release_dir"
+
+    [[ -s "${release_dir}/package.json" && -s "${release_dir}/pnpm-lock.yaml" && \
+        -s "${release_dir}/public/og.png" ]] || \
+        fail "下载的源码不完整：缺少必要文件"
+    corrupt_file=$(LC_ALL=C grep -Il -m1 -E \
+        'Warning: truncated output|original token count|[0-9]+ tokens truncated' \
+        "${release_dir}/pnpm-lock.yaml" "${release_dir}/public/og.png" \
+        2>/dev/null | head -1 || true)
+    [[ -z "$corrupt_file" ]] || fail "下载的源码已损坏：${corrupt_file#${release_dir}/}，请稍后重试"
+    grep -Eq "^lockfileVersion:[[:space:]]*['\"]?9" "${release_dir}/pnpm-lock.yaml" || \
+        fail "pnpm-lock.yaml 格式无效"
+    [[ "$(sha256sum "${release_dir}/pnpm-lock.yaml" | awk '{print $1}')" == "$SOURCE_LOCK_SHA256" ]] || \
+        fail "pnpm-lock.yaml 完整性校验失败"
+    [[ "$(sha256sum "${release_dir}/public/og.png" | awk '{print $1}')" == "$SOURCE_OG_SHA256" ]] || \
+        fail "静态资源完整性校验失败"
+    "${RUNTIME_DIR}/node/bin/node" -e \
+        'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' \
+        "${release_dir}/package.json" || fail "package.json 格式无效"
 
     info "安装依赖并构建 Web 面板..."
     (
@@ -109,9 +199,51 @@ download_and_build_panel() {
         "${RUNTIME_DIR}/node/bin/node" "${RUNTIME_DIR}/node/bin/corepack" pnpm install --frozen-lockfile
         "${RUNTIME_DIR}/node/bin/node" "${RUNTIME_DIR}/node/bin/corepack" pnpm build
     )
-    ln -sfn "$release_dir" "$CURRENT_LINK"
-    find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | tail -n +4 | cut -d' ' -f2- | xargs -r rm -rf
     ok "PulseDNS 面板源码与生产构建已安装"
+}
+
+activate_release() {
+    local release_dir="$1" next_link="${CURRENT_LINK}.next.$$"
+    [[ -d "$release_dir" ]] || return 1
+    [[ ! -e "$CURRENT_LINK" || -L "$CURRENT_LINK" ]] || fail "${CURRENT_LINK} 不是符号链接，拒绝覆盖"
+    rm -f "$next_link"
+    ln -s "$release_dir" "$next_link"
+    mv -Tf "$next_link" "$CURRENT_LINK"
+}
+
+wait_for_panel() {
+    local attempt code healthy=0
+    for attempt in {1..30}; do
+        if systemctl is-active --quiet "$PANEL_SERVICE"; then
+            code=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 2 \
+                "http://127.0.0.1:${PANEL_PORT}${PANEL_BASE_PATH}" 2>/dev/null || true)
+            case "$code" in
+                2??|3??|401|403)
+                    ((healthy += 1))
+                    (( healthy >= 3 )) && return 0
+                    ;;
+                *) healthy=0 ;;
+            esac
+        else
+            healthy=0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+cleanup_old_releases() {
+    local current item index=0
+    local -a releases=()
+    current=$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)
+    mapfile -t releases < <(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d \
+        -printf '%T@ %p\n' | sort -nr | cut -d' ' -f2-)
+    for item in "${releases[@]}"; do
+        ((index += 1))
+        if (( index > 3 )) && [[ "$item" != "$current" && "$item" != "$PREVIOUS_RELEASE" ]]; then
+            rm -rf -- "$item"
+        fi
+    done
 }
 
 prompt_install_config() {
@@ -171,7 +303,9 @@ load_existing_http_config() {
 }
 
 write_panel_config() {
+    local previous_umask
     install -d -m 0750 /etc/pulsedns-control
+    previous_umask=$(umask)
     umask 077
     {
         printf 'PULSEDNS_SELF_HOSTED=1\n'
@@ -186,11 +320,18 @@ write_panel_config() {
         printf 'ALIBABA_CLOUD_ACCESS_KEY_SECRET=%s\n' "$ALIYUN_KEY_SECRET"
     } > "$ENV_FILE"
     chmod 0600 "$ENV_FILE"
+    umask "$previous_umask"
     ADMIN_PASSWORD=""; ALIYUN_KEY_SECRET=""
 }
 
 write_services() {
-    id pulsedns >/dev/null 2>&1 || useradd --system --home "$DATA_DIR" --shell /usr/sbin/nologin pulsedns
+    local nologin_shell
+    nologin_shell=$(command -v nologin || true)
+    [[ -n "$nologin_shell" ]] || fail "系统缺少 nologin"
+    getent group pulsedns >/dev/null 2>&1 || groupadd --system pulsedns
+    if ! id pulsedns >/dev/null 2>&1; then
+        useradd --system --gid pulsedns --home "$DATA_DIR" --shell "$nologin_shell" pulsedns
+    fi
     install -d -o pulsedns -g pulsedns -m 0750 "$DATA_DIR"
 
     cat > "/etc/systemd/system/${PANEL_SERVICE}.service" <<SERVICE_EOF
@@ -219,24 +360,39 @@ WantedBy=multi-user.target
 SERVICE_EOF
 
     systemctl daemon-reload
-    systemctl enable --now "$PANEL_SERVICE"
+    systemctl enable "$PANEL_SERVICE" >/dev/null
 }
 
 install_panel() {
     need_root
-    [[ ! -e "$ENV_FILE" ]] || fail "面板已安装；请使用 update 升级，或先卸载"
-    prompt_install_config
+    [[ ! -e "$ENV_FILE" && ! -e "$CURRENT_LINK" ]] || fail "面板或未完成安装已存在；请使用 update，或先卸载后重装"
     install_dependencies
+    acquire_lock
+    prompt_install_config
     prepare_http_endpoint
     detect_arch
+    check_build_resources
+    port_is_listening "$PANEL_PORT" && fail "TCP 端口 ${PANEL_PORT} 已被占用，请选择其他端口"
+    TRANSACTION_MODE="install"
+    TRANSACTION_ACTIVE=1
+    NEW_RELEASE_DIR=""
+    PREVIOUS_RELEASE=""
+    trap cleanup_on_exit EXIT
     TEMP_DIR=$(mktemp -d /tmp/pulsedns-panel.XXXXXX)
-    trap cleanup_temp_dir EXIT
-    mkdir -p "$INSTALL_ROOT" "$RELEASES_DIR"
+    mkdir -p "$INSTALL_ROOT"
+    if [[ -d "$RELEASES_DIR" ]]; then
+        find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -exec rm -rf -- {} +
+    fi
+    mkdir -p "$RELEASES_DIR"
     download_node "$TEMP_DIR"
     download_and_build_panel "$TEMP_DIR"
+    activate_release "$NEW_RELEASE_DIR"
     write_panel_config
     write_services
-    systemctl is-active --quiet "$PANEL_SERVICE" || fail "面板服务启动失败，请运行 journalctl -u ${PANEL_SERVICE}"
+    systemctl restart "$PANEL_SERVICE" || fail "面板服务启动失败，请运行 journalctl -u ${PANEL_SERVICE}"
+    wait_for_panel || fail "面板未能通过启动检查，请运行 journalctl -u ${PANEL_SERVICE}"
+    TRANSACTION_ACTIVE=0
+    cleanup_old_releases || warn "旧版本清理未完成，可稍后手动处理 ${RELEASES_DIR}"
     cleanup_temp_dir
     trap - EXIT
     ok "安装完成：${PANEL_PUBLIC_URL}"
@@ -245,23 +401,28 @@ install_panel() {
 
 update_panel() {
     need_root
-    [[ -f "$ENV_FILE" && -L "$CURRENT_LINK" ]] || fail "未检测到已安装面板"
-    local previous_release
-    previous_release=$(readlink -f "$CURRENT_LINK")
-    load_existing_http_config
     install_dependencies
+    acquire_lock
+    [[ -f "$ENV_FILE" && -L "$CURRENT_LINK" ]] || fail "未检测到已安装面板"
+    PREVIOUS_RELEASE=$(readlink -f "$CURRENT_LINK")
+    [[ -d "$PREVIOUS_RELEASE" ]] || fail "当前版本目录不存在，无法安全升级"
+    load_existing_http_config
     detect_arch
+    check_build_resources
+    TRANSACTION_MODE="update"
+    TRANSACTION_ACTIVE=1
+    NEW_RELEASE_DIR=""
+    trap cleanup_on_exit EXIT
     TEMP_DIR=$(mktemp -d /tmp/pulsedns-panel-update.XXXXXX)
-    trap cleanup_temp_dir EXIT
     download_node "$TEMP_DIR"
     download_and_build_panel "$TEMP_DIR"
-    systemctl restart "$PANEL_SERVICE"
-    if ! systemctl is-active --quiet "$PANEL_SERVICE"; then
-        warn "新版启动失败，正在恢复上一版本"
-        ln -sfn "$previous_release" "$CURRENT_LINK"
-        systemctl restart "$PANEL_SERVICE" || true
-        fail "升级失败，已恢复上一版本；请检查日志"
+    activate_release "$NEW_RELEASE_DIR"
+    write_services
+    if ! systemctl restart "$PANEL_SERVICE" || ! wait_for_panel; then
+        fail "新版未能通过启动检查；退出时将自动恢复上一版本"
     fi
+    TRANSACTION_ACTIVE=0
+    cleanup_old_releases || warn "旧版本清理未完成，可稍后手动处理 ${RELEASES_DIR}"
     cleanup_temp_dir
     trap - EXIT
     ok "面板升级完成，数据库和配置未改变"
