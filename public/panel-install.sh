@@ -2,7 +2,7 @@
 # PulseDNS Web 主控一键安装与管理脚本
 set -euo pipefail
 
-VERSION="0.7.0"
+VERSION="0.7.1"
 REPOSITORY="rosalgee4-lgtm/pulsedns-control"
 INSTALL_ROOT="/opt/pulsedns-control"
 RELEASES_DIR="${INSTALL_ROOT}/releases"
@@ -17,12 +17,23 @@ PANEL_PUBLIC_IP="${PANEL_PUBLIC_IP:-}"
 PANEL_BASE_PATH=""
 PANEL_PUBLIC_URL=""
 PNPM_VERSION="10.28.2"
+TEMP_DIR=""
 
 blue='\033[1;34m'; green='\033[1;32m'; yellow='\033[1;33m'; red='\033[1;31m'; reset='\033[0m'
 info() { printf "%b[INFO]%b %s\n" "$blue" "$reset" "$*"; }
 ok() { printf "%b[ OK ]%b %s\n" "$green" "$reset" "$*"; }
 warn() { printf "%b[WARN]%b %s\n" "$yellow" "$reset" "$*"; }
 fail() { printf "%b[FAIL]%b %s\n" "$red" "$reset" "$*" >&2; exit 1; }
+
+cleanup_temp_dir() {
+    local candidate="${TEMP_DIR:-}"
+    [[ -n "$candidate" ]] || return 0
+    case "$candidate" in
+        /tmp/pulsedns-panel.*|/tmp/pulsedns-panel-update.*) rm -rf -- "$candidate" ;;
+        *) warn "跳过清理异常临时目录：${candidate}" ;;
+    esac
+    TEMP_DIR=""
+}
 
 need_root() {
     [[ $(id -u) -eq 0 ]] || fail "请使用 root 或 sudo 运行"
@@ -72,7 +83,9 @@ download_node() {
         tar -xJf "$archive" -C "$RUNTIME_DIR"
     fi
     ln -sfn "$extracted" "${RUNTIME_DIR}/node"
-    "${RUNTIME_DIR}/node/bin/corepack" prepare "pnpm@${PNPM_VERSION}" --activate >/dev/null
+    PATH="${RUNTIME_DIR}/node/bin:${PATH}" \
+        "${RUNTIME_DIR}/node/bin/node" "${RUNTIME_DIR}/node/bin/corepack" \
+        prepare "pnpm@${PNPM_VERSION}" --activate >/dev/null
     ok "Node.js $(${RUNTIME_DIR}/node/bin/node --version) 已就绪"
 }
 
@@ -93,8 +106,8 @@ download_and_build_panel() {
         export PULSEDNS_SELF_HOSTED=1
         export PULSEDNS_BASE_PATH="${PANEL_BASE_PATH}"
         export NEXT_PUBLIC_PULSEDNS_BASE_PATH="${PANEL_BASE_PATH}"
-        corepack pnpm install --frozen-lockfile
-        corepack pnpm build
+        "${RUNTIME_DIR}/node/bin/node" "${RUNTIME_DIR}/node/bin/corepack" pnpm install --frozen-lockfile
+        "${RUNTIME_DIR}/node/bin/node" "${RUNTIME_DIR}/node/bin/corepack" pnpm build
     )
     ln -sfn "$release_dir" "$CURRENT_LINK"
     find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | tail -n +4 | cut -d' ' -f2- | xargs -r rm -rf
@@ -216,15 +229,16 @@ install_panel() {
     install_dependencies
     prepare_http_endpoint
     detect_arch
-    local temp_dir
-    temp_dir=$(mktemp -d /tmp/pulsedns-panel.XXXXXX)
-    trap 'rm -rf "$temp_dir"' EXIT
+    TEMP_DIR=$(mktemp -d /tmp/pulsedns-panel.XXXXXX)
+    trap cleanup_temp_dir EXIT
     mkdir -p "$INSTALL_ROOT" "$RELEASES_DIR"
-    download_node "$temp_dir"
-    download_and_build_panel "$temp_dir"
+    download_node "$TEMP_DIR"
+    download_and_build_panel "$TEMP_DIR"
     write_panel_config
     write_services
     systemctl is-active --quiet "$PANEL_SERVICE" || fail "面板服务启动失败，请运行 journalctl -u ${PANEL_SERVICE}"
+    cleanup_temp_dir
+    trap - EXIT
     ok "安装完成：${PANEL_PUBLIC_URL}"
     warn "请只向你自己的来源 IP 放行 TCP ${PANEL_PORT}；HTTP 登录信息不会加密"
 }
@@ -237,11 +251,10 @@ update_panel() {
     load_existing_http_config
     install_dependencies
     detect_arch
-    local temp_dir
-    temp_dir=$(mktemp -d /tmp/pulsedns-panel-update.XXXXXX)
-    trap 'rm -rf "$temp_dir"' EXIT
-    download_node "$temp_dir"
-    download_and_build_panel "$temp_dir"
+    TEMP_DIR=$(mktemp -d /tmp/pulsedns-panel-update.XXXXXX)
+    trap cleanup_temp_dir EXIT
+    download_node "$TEMP_DIR"
+    download_and_build_panel "$TEMP_DIR"
     systemctl restart "$PANEL_SERVICE"
     if ! systemctl is-active --quiet "$PANEL_SERVICE"; then
         warn "新版启动失败，正在恢复上一版本"
@@ -249,6 +262,8 @@ update_panel() {
         systemctl restart "$PANEL_SERVICE" || true
         fail "升级失败，已恢复上一版本；请检查日志"
     fi
+    cleanup_temp_dir
+    trap - EXIT
     ok "面板升级完成，数据库和配置未改变"
 }
 
