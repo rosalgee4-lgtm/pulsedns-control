@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useState } from 'react';
+import { copyText } from '@/lib/copy-text';
 
 type ViewId = 'overview' | 'nodes' | 'records' | 'nyanpass' | 'activity';
 
@@ -55,6 +56,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
   const [nodeNyanpass, setNodeNyanpass] = useState<NyanpassDraft[]>([emptyNyanpassDraft()]);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [copyFeedback, setCopyFeedback] = useState<'idle' | 'copying' | 'success' | 'error'>('idle');
   const [now, setNow] = useState(0);
   const reported = nodes.filter((node) => Boolean(node.lastSeenAt)).length;
   const records = nodes.reduce((sum, node) => sum + Number(Boolean(node.recordV4)) + Number(Boolean(node.recordV6)), 0);
@@ -91,6 +93,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
     setSaving(false);
     if (!response.ok) { setError(result.error ?? '创建失败'); return; }
     setCreated(result);
+    setCopyFeedback('idle');
     setNyanpass((current) => [...result.instances, ...current]);
     setNodes((current) => [{
       id: result.node.id, name: result.node.name, region: result.node.region, ipv4: null, ipv6: null,
@@ -110,6 +113,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
     setSaving(false);
     if (!response.ok) { setError(result.error ?? '创建失败'); return; }
     setCreatedNyanpass(result);
+    setCopyFeedback('idle');
     setNyanpass((current) => [result.instance, ...current]);
   }
 
@@ -123,8 +127,13 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
     setNodeNyanpass((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, [field]: value } : item));
   }
 
-  function closeModal() { setShowCreate(false); setCreated(null); setNodeNyanpass([emptyNyanpassDraft()]); setError(''); }
-  function closeNyanpassModal() { setShowNyanpass(false); setCreatedNyanpass(null); setError(''); }
+  async function copyInstallCommand(command: string) {
+    setCopyFeedback('copying');
+    setCopyFeedback(await copyText(command) ? 'success' : 'error');
+  }
+
+  function closeModal() { setShowCreate(false); setCreated(null); setNodeNyanpass([emptyNyanpassDraft()]); setError(''); setCopyFeedback('idle'); }
+  function closeNyanpassModal() { setShowNyanpass(false); setCreatedNyanpass(null); setError(''); setCopyFeedback('idle'); }
 
   return (
     <main className="app-shell">
@@ -139,7 +148,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
             onClick={() => setActiveView(item.id)}
           ><span aria-hidden="true">{item.icon}</span>{item.label}</a>)}
         </nav>
-        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.7.4 · {nodes.length} 个探针</small></div>
+        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.7.5 · {nodes.length} 个探针</small></div>
       </aside>
 
       <section className="workspace">
@@ -188,7 +197,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
       {showCreate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="create-title">
           <button className="modal-close" onClick={closeModal} aria-label="关闭">×</button>
-          {!created ? <><p className="eyebrow cyan">无人值守安装</p><h2 id="create-title">添加一个探针节点</h2><p className="modal-intro">先填好 SSH 密码和全部 Nyanpass 实例。生成后只需在 VPS 粘贴一次，程序会按原脚本顺序自动完成 SSH → DDNS → 全部 Nyanpass → BBR。</p>
+          {!created ? <><p className="eyebrow cyan">无人值守安装</p><h2 id="create-title">添加一个探针节点</h2><p className="modal-intro">先填好 SSH 密码和全部 Nyanpass 实例。生成后只需在 VPS 粘贴一次，程序会自动完成 SSH → DDNS 验收 → 全部 Nyanpass → BBR；探针未正常运行时不会继续安装 Nyanpass。</p>
             <form onSubmit={createNode} className="node-form">
               <label>节点名称<input name="name" required placeholder="例如：东京 · jp-01" /></label>
               <label>区域<input name="region" placeholder="ap-northeast" /></label>
@@ -206,7 +215,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
               <p className="form-hint">命令中的独立 -o 表示出口，没有 -o 表示入口。Token 和完整命令不会存入数据库。</p>
               {error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '创建中…' : '创建节点并生成一键命令'}</button>
             </form></>
-          : <><p className="eyebrow cyan">节点已创建</p><h2>复制一次，自动完成</h2><p className="modal-intro">请立即在目标 VPS 执行这条一次性命令。它会自动配置 SSH、安装探针并逐个安装预配的 {created.instances.length} 个 Nyanpass 实例，全程不再要求粘贴命令或确认。</p><pre className="install-command">{created.installCommand}</pre><button className="primary-button wide" onClick={() => navigator.clipboard.writeText(created.installCommand)}>复制完整安装命令</button><button className="ghost-button wide" onClick={closeModal}>完成</button></>}
+          : <><p className="eyebrow cyan">节点已创建</p><h2>复制一次，自动完成</h2><p className="modal-intro">请立即在目标 VPS 执行这条一次性命令。它会先验证探针服务持续运行，再逐个安装预配的 {created.instances.length} 个 Nyanpass 实例。HTTP 面板也会确认复制结果，不会静默保留旧剪贴板内容。</p><pre className="install-command">{created.installCommand}</pre><button type="button" className="primary-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(created.installCommand)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制完整命令' : '复制完整安装命令'}</button>{copyFeedback === 'success' && <p className="form-success" role="status">复制成功，请直接粘贴到目标 VPS。</p>}{copyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整命令复制；剪贴板内容没有更新。</p>}<button type="button" className="ghost-button wide" onClick={closeModal}>完成</button></>}
         </section>
       </div>}
 
@@ -215,7 +224,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
           <button className="modal-close" onClick={closeNyanpassModal} aria-label="关闭">×</button>
           {!createdNyanpass ? <><p className="eyebrow cyan">多实例管理</p><h2 id="nyanpass-title">添加 Nyanpass 合租实例</h2><p className="modal-intro">直接粘贴原脚本中的官方完整命令。令牌和完整命令不会保存，只用于生成本次安装命令。</p>
             <form onSubmit={createNyanpassInstance} className="node-form"><label>所属探针节点<select name="nodeId" required defaultValue=""><option value="" disabled>选择节点</option>{nodes.map((node) => <option key={node.id} value={node.id}>{node.name} · {node.region}</option>)}</select></label><label>实例 / 服务名称<input name="name" required placeholder="例如：tenant-a-out" /></label><label>Nyanpass 官方安装命令<textarea name="command" required rows={4} autoComplete="off" spellCheck={false} placeholder={'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t … -u https://…"'} /></label><label className="nyanpass-check"><input name="optimize" type="checkbox" />启用原脚本 OPTIMIZE=1</label><p className="form-hint">由原命令识别：rel_nodeclient 参数含独立 -o 为出口，不含 -o 为入口；不会根据 Token、URL 或 IP 猜测。生成的命令会直接安装，不再二次确认。</p>{error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '识别中…' : '识别命令并添加实例'}</button></form></>
-          : <><p className="eyebrow cyan">实例已登记</p><h2>复制自动安装命令</h2><p className="modal-intro">由原命令识别为{nyanpassRoleLabel(createdNyanpass.instance.role)}：{createdNyanpass.instance.role === 'outbound' ? '含独立 -o' : '不含 -o'}。请在 {createdNyanpass.instance.nodeName} 上执行；不会再要求确认。</p><pre className="install-command">{createdNyanpass.installCommand}</pre><button className="primary-button wide" onClick={() => navigator.clipboard.writeText(createdNyanpass.installCommand)}>复制安装命令</button><button className="ghost-button wide" onClick={() => { setCreatedNyanpass(null); setError(''); }}>继续添加一个</button><button className="ghost-button wide" onClick={closeNyanpassModal}>完成</button></>}
+          : <><p className="eyebrow cyan">实例已登记</p><h2>复制自动安装命令</h2><p className="modal-intro">由原命令识别为{nyanpassRoleLabel(createdNyanpass.instance.role)}：{createdNyanpass.instance.role === 'outbound' ? '含独立 -o' : '不含 -o'}。请在 {createdNyanpass.instance.nodeName} 上执行；不会再要求确认。</p><pre className="install-command">{createdNyanpass.installCommand}</pre><button type="button" className="primary-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(createdNyanpass.installCommand)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制安装命令' : '复制安装命令'}</button>{copyFeedback === 'success' && <p className="form-success" role="status">复制成功，请直接粘贴到目标 VPS。</p>}{copyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整命令复制；剪贴板内容没有更新。</p>}<button type="button" className="ghost-button wide" onClick={() => { setCreatedNyanpass(null); setError(''); setCopyFeedback('idle'); }}>继续添加一个</button><button type="button" className="ghost-button wide" onClick={closeNyanpassModal}>完成</button></>}
         </section>
       </div>}
     </main>

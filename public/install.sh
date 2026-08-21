@@ -9,7 +9,7 @@ set -euo pipefail
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.7.4"
+VERSION="0.7.5"
 SERVER_URL="${SERVER_URL:-}"
 TOKEN="${TOKEN:-}"
 ROOT_PASSWORD="${ROOT_PASSWORD:-}"
@@ -21,6 +21,7 @@ INSTALL_DIR="/opt/ddns-monitor"
 INSTALL_PATH="${INSTALL_DIR}/monitor.sh"
 CONFIG_FILE="/etc/ddns-monitor.conf"
 SERVICE_NAME="ddns-monitor"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 NYANPASS_INSTALL_URL="https://dl.nyafw.com/download/nyanpass-install.sh"
 NYANPASS_TIMEOUT=600
@@ -467,6 +468,29 @@ SERVICE_EOF
     chmod 0644 "$target"
 }
 
+ddns_verification_failed() {
+    local reason="$1"
+    warn "DDNS 探针验收失败：$reason"
+    systemctl status "$SERVICE_NAME" --no-pager -l 2>/dev/null || true
+    journalctl -u "$SERVICE_NAME" -n 40 --no-pager 2>/dev/null || true
+    fail "DDNS 探针未正常运行，已停止后续 Nyanpass 安装"
+}
+
+verify_ddns_service() {
+    local attempt=0
+    [[ -f "$INSTALL_PATH" && ! -L "$INSTALL_PATH" && -x "$INSTALL_PATH" ]] || ddns_verification_failed "监控脚本不存在或不可执行"
+    [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] || ddns_verification_failed "配置文件不存在或不可读"
+    [[ -f "$SERVICE_FILE" && ! -L "$SERVICE_FILE" ]] || ddns_verification_failed "systemd 单元不存在"
+    grep -Fqx "ExecStart=/bin/bash ${INSTALL_PATH} --run" "$SERVICE_FILE" || ddns_verification_failed "systemd 启动命令不正确"
+    systemctl is-enabled --quiet "$SERVICE_NAME" || ddns_verification_failed "systemd 服务未启用"
+
+    for attempt in 1 2 3; do
+        sleep 2
+        systemctl is-active --quiet "$SERVICE_NAME" || ddns_verification_failed "systemd 服务未保持运行"
+    done
+    log INFO "DDNS 探针验收通过：脚本、配置和 systemd 服务均正常"
+}
+
 load_ddns_config() {
     local line="" seen_server=0 seen_token=0
     [[ -r "$CONFIG_FILE" ]] || return 0
@@ -542,11 +566,15 @@ install_ddns_service() {
     mv -f "$install_tmp" "$INSTALL_PATH"
     write_ddns_config
 
-    write_ddns_service_unit "/etc/systemd/system/${SERVICE_NAME}.service"
+    write_ddns_service_unit "$SERVICE_FILE"
+
+    # 重新配置到新节点或新令牌时必须强制首次上报，不能沿用旧 IP 缓存。
+    rm -f "$CACHE_V4" "$CACHE_V6"
 
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
     systemctl restart "$SERVICE_NAME"
+    verify_ddns_service
     log INFO "DDNS 服务安装完成：systemctl status $SERVICE_NAME"
 }
 
@@ -592,6 +620,41 @@ confirm_uninstall_ddns() {
     local answer=""
     read -r -p "确认只卸载 DDNS 监控服务？[y/N]: " answer
     [[ "$answer" =~ ^[Yy]$ ]] && uninstall_ddns
+}
+
+validate_provision_request() {
+    local index=0 name="" optimize="" input=""
+    [[ -n "$SERVER_URL" && -n "$TOKEN" ]] || fail "Web 一键安装缺少主控地址或探针令牌"
+    [[ ${#ROOT_PASSWORD} -ge 8 && ${#ROOT_PASSWORD} -le 128 ]] || fail "Web 一键安装的 root 密码长度必须为 8-128 个字符"
+    [[ "$ROOT_PASSWORD" != *$'\n'* && "$ROOT_PASSWORD" != *$'\r'* ]] || fail "Web 一键安装的 root 密码不能包含换行"
+    [[ ${#NYANPASS_BATCH_NAMES[@]} -ge 1 && ${#NYANPASS_BATCH_NAMES[@]} -le 16 ]] || fail "Web 一键安装需要 1-16 个 Nyanpass 实例"
+    [[ ${#NYANPASS_BATCH_NAMES[@]} -eq ${#NYANPASS_BATCH_OPTIMIZES[@]} && ${#NYANPASS_BATCH_NAMES[@]} -eq ${#NYANPASS_BATCH_INPUTS[@]} ]] || fail "Web 一键安装的 Nyanpass 批量参数不完整"
+    validate_ddns_config
+
+    for ((index = 0; index < ${#NYANPASS_BATCH_NAMES[@]}; index++)); do
+        name="${NYANPASS_BATCH_NAMES[$index]}"
+        optimize="${NYANPASS_BATCH_OPTIMIZES[$index]}"
+        input="${NYANPASS_BATCH_INPUTS[$index]}"
+        [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$ ]] || fail "Nyanpass 服务名称无效：$name"
+        [[ "$optimize" == "0" || "$optimize" == "1" ]] || fail "Nyanpass OPTIMIZE 只能为 0 或 1"
+        parse_nyanpass_input "$input" || fail "Nyanpass 命令无效：$name"
+    done
+    PARSED_NYANPASS_ARGS=""
+    PARSED_NYANPASS_ROLE=""
+}
+
+provision_node() {
+    need_root
+    validate_provision_request
+    log INFO "开始 Web 一键安装；DDNS 验收通过前不会安装 Nyanpass..."
+    fix_locale
+    configure_ssh
+    install_ddns_service
+    install_deps
+    install_nyanpass_batch
+    configure_bbr
+    verify_ddns_service
+    log INFO "Web 一键安装全部完成"
 }
 
 install_all() {
@@ -693,6 +756,7 @@ done
 case "$ACTION" in
     menu) menu ;;
     all|install) install_all ;;
+    provision) provision_node ;;
     ddns) install_ddns_service ;;
     nyanpass) install_nyanpass_many ;;
     ssh) configure_ssh ;;
