@@ -2,7 +2,7 @@
 # PulseDNS Web 主控一键安装与管理脚本
 set -euo pipefail
 
-VERSION="0.6.1"
+VERSION="0.6.2"
 REPOSITORY="rosalgee4-lgtm/pulsedns-control"
 INSTALL_ROOT="/opt/pulsedns-control"
 RELEASES_DIR="${INSTALL_ROOT}/releases"
