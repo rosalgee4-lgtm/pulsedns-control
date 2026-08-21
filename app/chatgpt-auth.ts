@@ -20,9 +20,7 @@ const CALLBACK_PATH = '/callback';
 
 export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
   const requestHeaders = await headers();
-  const userId = requestHeaders.get(USER_ID_HEADER);
-  const email = requestHeaders.get(USER_EMAIL_HEADER);
-  if (!userId || !email) {
+  if (process.env.PULSEDNS_SELF_HOSTED === '1') {
     const localUser = process.env.PULSEDNS_ADMIN_USER;
     const localPassword = process.env.PULSEDNS_ADMIN_PASSWORD;
     const authorization = requestHeaders.get('authorization');
@@ -32,6 +30,10 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
     const localEmail = process.env.PULSEDNS_ADMIN_EMAIL || `${localUser}@localhost`;
     return { userId: `self-hosted:${localUser}`, displayName: localUser, email: localEmail, fullName: localUser };
   }
+
+  const userId = requestHeaders.get(USER_ID_HEADER);
+  const email = requestHeaders.get(USER_EMAIL_HEADER);
+  if (!userId || !email) return null;
 
   const encodedFullName = requestHeaders.get(USER_FULL_NAME_HEADER);
   const fullName =

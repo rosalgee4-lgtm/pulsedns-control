@@ -13,6 +13,8 @@ export default function Home() {
 
 async function AuthenticatedDashboard() {
   const user = await requireChatGPTUser('/');
+  const configuredBasePath = process.env.PULSEDNS_BASE_PATH?.trim() ?? '';
+  const basePath = /^\/[a-f0-9]{32}$/.test(configuredBasePath) ? configuredBasePath : '';
   await ensureSchema();
   const db = await getDb();
   const nodeRows = await db.select().from(nodes).orderBy(desc(nodes.createdAt));
@@ -35,6 +37,7 @@ async function AuthenticatedDashboard() {
   }).from(nyanpassInstances).leftJoin(nodes, eq(nyanpassInstances.nodeId, nodes.id)).orderBy(desc(nyanpassInstances.createdAt));
 
   return <Dashboard
+    basePath={basePath}
     user={{ name: user.displayName, email: user.email }}
     initialNodes={nodeRows.map((node) => ({ ...node, lastSeenAt: node.lastSeenAt?.toISOString() ?? null, createdAt: node.createdAt.toISOString(), updatedAt: node.updatedAt.toISOString() }))}
     initialEvents={eventRows.map((event) => ({ ...event, createdAt: event.createdAt.toISOString(), nodeName: event.nodeName ?? '已删除节点' }))}

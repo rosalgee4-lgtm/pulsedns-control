@@ -41,7 +41,7 @@ export async function POST(request: Request) {
   ]);
 
   const origin = publicOrigin(request);
-  const installCommand = `( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL ${shellArg(`${origin}/install.sh`)} -o "$tmp" && sudo bash "$tmp" nyanpass --nyanpass-name ${shellArg(name)} --nyanpass-optimize ${shellArg(optimize ? '1' : '0')} --nyanpass-args ${shellArg(args)} --nyanpass-unattended )`;
+  const installCommand = `( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL ${shellArg(`${origin}/install.sh`)} -o "$tmp" && bash "$tmp" nyanpass --nyanpass-name ${shellArg(name)} --nyanpass-optimize ${shellArg(optimize ? '1' : '0')} --nyanpass-args ${shellArg(args)} --nyanpass-unattended )`;
 
   return Response.json({
     instance: { id, nodeId, nodeName: node.name, name, role, panelUrl },

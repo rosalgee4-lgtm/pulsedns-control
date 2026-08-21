@@ -2,12 +2,13 @@ import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle as drizzleProxy } from 'drizzle-orm/sqlite-proxy';
+import type { AsyncBatchRemoteCallback, RemoteCallback } from 'drizzle-orm/sqlite-proxy';
 import * as schema from './schema';
 
 type AppDb = ReturnType<typeof drizzleD1<typeof schema>>;
 type LocalSqlite = import('node:sqlite').DatabaseSync;
-type ProxyMethod = 'run' | 'all' | 'values' | 'get';
-type ProxyResult = { rows: unknown };
+type SqliteInputValue = import('node:sqlite').SQLInputValue;
+type RemoteResult = Awaited<ReturnType<RemoteCallback>>;
 
 let cachedDb: AppDb | null = null;
 let localSqlite: LocalSqlite | null = null;
@@ -21,20 +22,22 @@ export async function getDb(): Promise<AppDb> {
 
   if (isSelfHosted()) {
     const sqlite = await getLocalSqlite();
-    const execute = (query: string, params: unknown[], method: ProxyMethod): ProxyResult => {
+    const execute: RemoteCallback = async (query, params, method) => {
       const statement = sqlite.prepare(query);
+      const sqliteParams = params as SqliteInputValue[];
       if (method === 'run') {
-        const result = statement.run(...params);
-        return { rows: { changes: result.changes, lastInsertRowid: result.lastInsertRowid } };
+        const result = statement.run(...sqliteParams);
+        return { rows: { changes: result.changes, lastInsertRowid: result.lastInsertRowid } } as unknown as RemoteResult;
       }
       statement.setReturnArrays(true);
-      if (method === 'get') return { rows: statement.get(...params) };
-      return { rows: statement.all(...params) };
+      if (method === 'get') return { rows: statement.get(...sqliteParams) } as unknown as RemoteResult;
+      return { rows: statement.all(...sqliteParams) } as RemoteResult;
     };
-    const executeBatch = (queries: Array<{ sql: string; params: unknown[]; method: ProxyMethod }>) => {
+    const executeBatch: AsyncBatchRemoteCallback = async (queries) => {
       sqlite.exec('BEGIN IMMEDIATE');
       try {
-        const results = queries.map((query) => execute(query.sql, query.params, query.method));
+        const results: RemoteResult[] = [];
+        for (const query of queries) results.push(await execute(query.sql, query.params, query.method));
         sqlite.exec('COMMIT');
         return results;
       } catch (error) {

@@ -2,9 +2,9 @@
 # PulseDNS Web 主控一键安装与管理脚本
 set -euo pipefail
 
-VERSION="0.7.3"
+VERSION="0.7.4"
 REPOSITORY="rosalgee4-lgtm/pulsedns-control"
-SOURCE_REF="release-v0.7.3"
+SOURCE_REF="release-v0.7.4"
 SOURCE_LOCK_SHA256="1fb15db69bc20c25365426fcad11b15270cf535e94b0c9a320eaa8245227b782"
 SOURCE_OG_SHA256="3e0d82b4901fe73d4bc6a6209275283d39a0cf4084fea6625fba18d0e627de55"
 INSTALL_ROOT="/opt/pulsedns-control"
@@ -216,23 +216,62 @@ activate_release() {
 }
 
 wait_for_panel() {
-    local attempt code healthy=0
+    local attempt unauth_code auth_code asset_code asset assets_ok
+    local healthy=0 health_user health_password
+    local html_file="${TEMP_DIR}/health.html"
+    local asset_file="${TEMP_DIR}/health.asset"
+    local panel_url="http://127.0.0.1:${PANEL_PORT}${PANEL_BASE_PATH}"
+    local -a assets=()
+
+    health_user=$(sed -n 's/^PULSEDNS_ADMIN_USER=//p' "$ENV_FILE" | head -1)
+    health_password=$(sed -n 's/^PULSEDNS_ADMIN_PASSWORD=//p' "$ENV_FILE" | head -1)
+    [[ "$health_user" =~ ^[A-Za-z0-9_.-]{3,32}$ ]] || return 1
+    [[ ${#health_password} -ge 12 && ${#health_password} -le 128 && \
+        "$health_password" =~ ^[A-Za-z0-9._~!@#%+=,-]+$ ]] || return 1
     for attempt in {1..30}; do
         if systemctl is-active --quiet "$PANEL_SERVICE"; then
-            code=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 2 \
-                "http://127.0.0.1:${PANEL_PORT}${PANEL_BASE_PATH}" 2>/dev/null || true)
-            case "$code" in
-                2??|3??|401|403)
+            unauth_code=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 2 \
+                "$panel_url" 2>/dev/null || true)
+            auth_code=""
+            if [[ "$unauth_code" == "401" ]]; then
+                auth_code=$(printf 'user = "%s:%s"\n' "$health_user" "$health_password" | \
+                    curl --config - --noproxy '*' -sS -o "$html_file" -w '%{http_code}' \
+                        --max-time 4 "$panel_url" 2>/dev/null || true)
+            fi
+            if [[ "$auth_code" == "200" ]] && \
+                grep -Fq "\\\"basePath\\\":\\\"${PANEL_BASE_PATH}\\\"" "$html_file"; then
+                mapfile -t assets < <(LC_ALL=C grep -aoE \
+                    "${PANEL_BASE_PATH}/_next/static/[A-Za-z0-9._~/-]+" "$html_file" | sort -u)
+                assets_ok=1
+                (( ${#assets[@]} >= 3 )) || assets_ok=0
+                for asset in "${assets[@]}"; do
+                    asset_code=$(curl --noproxy '*' -sS -o "$asset_file" -w '%{http_code}' \
+                        --max-time 4 "http://127.0.0.1:${PANEL_PORT}${asset}" 2>/dev/null || true)
+                    if [[ "$asset_code" != "200" ]]; then
+                        assets_ok=0
+                        break
+                    fi
+                done
+                if [[ "$assets_ok" -eq 1 ]]; then
                     ((healthy += 1))
-                    (( healthy >= 3 )) && return 0
-                    ;;
-                *) healthy=0 ;;
-            esac
+                    if (( healthy >= 3 )); then
+                        rm -f "$html_file" "$asset_file"
+                        health_password=""
+                        return 0
+                    fi
+                else
+                    healthy=0
+                fi
+            else
+                healthy=0
+            fi
         else
             healthy=0
         fi
         sleep 1
     done
+    rm -f "$html_file" "$asset_file"
+    health_password=""
     return 1
 }
 

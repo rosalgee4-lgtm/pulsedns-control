@@ -1,4 +1,3 @@
-import { env } from 'cloudflare:workers';
 import { signAliyunRpcRequest } from '@/lib/aliyun-signature';
 
 type DnsType = 'A' | 'AAAA';
@@ -20,13 +19,20 @@ type AliDnsResponse = {
 const HOST = 'alidns.aliyuncs.com';
 const VERSION = '2015-01-09';
 
+type AliDnsCredentials = {
+  accessKeyId: string | undefined;
+  accessKeySecret: string | undefined;
+  securityToken: string | undefined;
+};
+
 export async function syncAliDnsRecord(domainName: string, rr: string, type: DnsType, value: string) {
-  if (!env.ALIBABA_CLOUD_ACCESS_KEY_ID || !env.ALIBABA_CLOUD_ACCESS_KEY_SECRET) {
+  const credentials = await aliDnsCredentials();
+  if (!credentials.accessKeyId || !credentials.accessKeySecret) {
     return { ok: false, skipped: true, error: '未配置阿里云 AccessKey' } as const;
   }
 
   try {
-    const listed = await callAliDns('DescribeDomainRecords', {
+    const listed = await callAliDns(credentials, 'DescribeDomainRecords', {
       DomainName: domainName,
       RRKeyWord: rr,
       TypeKeyWord: type,
@@ -46,7 +52,7 @@ export async function syncAliDnsRecord(domainName: string, rr: string, type: Dns
     }
 
     if (!matching.length) {
-      await callAliDns('AddDomainRecord', {
+      await callAliDns(credentials, 'AddDomainRecord', {
         DomainName: domainName,
         RR: rr,
         Type: type,
@@ -60,7 +66,7 @@ export async function syncAliDnsRecord(domainName: string, rr: string, type: Dns
     const current = matching[0];
     if (current.Value === value) return { ok: true, unchanged: true } as const;
 
-    await callAliDns('UpdateDomainRecord', {
+    await callAliDns(credentials, 'UpdateDomainRecord', {
       RecordId: current.RecordId,
       RR: rr,
       Type: type,
@@ -75,14 +81,12 @@ export async function syncAliDnsRecord(domainName: string, rr: string, type: Dns
   }
 }
 
-async function callAliDns(action: string, parameters: Record<string, string>) {
-  const accessKeyId = env.ALIBABA_CLOUD_ACCESS_KEY_ID;
-  const accessKeySecret = env.ALIBABA_CLOUD_ACCESS_KEY_SECRET;
+async function callAliDns(credentials: AliDnsCredentials, action: string, parameters: Record<string, string>) {
+  const { accessKeyId, accessKeySecret, securityToken } = credentials;
   if (!accessKeyId || !accessKeySecret) throw new Error('未配置阿里云 AccessKey');
 
   const date = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
   const nonce = crypto.randomUUID();
-  const securityToken = env.ALIBABA_CLOUD_SECURITY_TOKEN;
   const signed = await signAliyunRpcRequest({
     accessKeyId,
     accessKeySecret,
@@ -117,4 +121,20 @@ async function callAliDns(action: string, parameters: Record<string, string>) {
     throw new Error(detail || `阿里云 DNS 返回 HTTP ${response.status}`);
   }
   return result;
+}
+
+async function aliDnsCredentials(): Promise<AliDnsCredentials> {
+  if (process.env.PULSEDNS_SELF_HOSTED === '1') {
+    return {
+      accessKeyId: process.env.ALIBABA_CLOUD_ACCESS_KEY_ID,
+      accessKeySecret: process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET,
+      securityToken: process.env.ALIBABA_CLOUD_SECURITY_TOKEN,
+    };
+  }
+  const { env } = await import('cloudflare:workers');
+  return {
+    accessKeyId: env.ALIBABA_CLOUD_ACCESS_KEY_ID,
+    accessKeySecret: env.ALIBABA_CLOUD_ACCESS_KEY_SECRET,
+    securityToken: env.ALIBABA_CLOUD_SECURITY_TOKEN,
+  };
 }

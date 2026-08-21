@@ -54,7 +54,7 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 准备一台使用 systemd、glibc 2.28 或更高版本的 x86_64/arm64 Linux VPS，并确保至少有 2 GiB 可用磁盘及 768 MiB 可用内存与 swap；Alpine/musl、Docker、WSL 和 chroot 不受支持。安装器会自动识别公网 IPv4、询问 HTTP 端口（默认 `3100`），并生成 32 位随机访问路径；不需要域名、证书邮箱或 GitHub Token。只需向自己的来源 IP 放行所选端口，然后以 root 执行：
 
 ```bash
-bash <(curl -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.7.3') install
+bash <(curl -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.7.4') install
 ```
 
 脚本会询问端口、管理员账号和阿里云 AccessKey，随后自动安装经过校验的 Node.js、构建 PulseDNS、创建本地 SQLite 数据库、配置管理员 Basic Auth 并注册 systemd 服务。Caddy、域名和 HTTPS 证书流程已完全移除。完成后会显示类似 `http://203.0.113.10:3100/32位随机路径` 的唯一入口；直接访问 IP 与端口根路径不能进入面板。再次不带参数运行同一脚本会打开操作菜单：
@@ -67,7 +67,7 @@ bash <(curl -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-con
 一键升级命令：
 
 ```bash
-bash <(curl -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.7.3') update
+bash <(curl -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.7.4') update
 ```
 
 面板数据保存在 `/var/lib/pulsedns-control/pulsedns.db`；管理员密码和阿里云凭据保存在权限为 `0600` 的 `/etc/pulsedns-control.env`。卸载面板时数据库默认保留。
@@ -81,7 +81,7 @@ bash <(curl -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-con
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
   curl -fLSs http://主控IP:端口/随机访问路径/install.sh -o "$tmp" &&
-  sudo bash "$tmp"
+  bash "$tmp"
 )
 ```
 
@@ -109,7 +109,7 @@ root 密码、Nyanpass Token、完整官方命令和解析后的安装参数都�
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
   curl -fLSs http://主控IP:端口/随机访问路径/update.sh -o "$tmp" &&
-  sudo bash "$tmp"
+  bash "$tmp"
 )
 ```
 

@@ -20,9 +20,6 @@ const viewTitles: Record<ViewId, string> = {
   activity: '事件日志',
 };
 
-const basePath = process.env.NEXT_PUBLIC_PULSEDNS_BASE_PATH ?? '';
-const apiPath = (path: string) => `${basePath}${path}`;
-
 function isViewId(value: string): value is ViewId {
   return navigation.some((item) => item.id === value);
 }
@@ -45,7 +42,8 @@ function emptyNyanpassDraft(): NyanpassDraft {
   return { name: '', command: '', optimize: false };
 }
 
-export default function Dashboard({ user, initialNodes, initialEvents, initialNyanpass }: { user: { name: string; email: string }; initialNodes: NodeRow[]; initialEvents: EventRow[]; initialNyanpass: NyanpassRow[] }) {
+export default function Dashboard({ basePath, user, initialNodes, initialEvents, initialNyanpass }: { basePath: string; user: { name: string; email: string }; initialNodes: NodeRow[]; initialEvents: EventRow[]; initialNyanpass: NyanpassRow[] }) {
+  const apiPath = (path: string) => `${basePath}${path}`;
   const [activeView, setActiveView] = useState<ViewId>('overview');
   const [nodes, setNodes] = useState(initialNodes);
   const [events] = useState(initialEvents);
@@ -141,7 +139,7 @@ export default function Dashboard({ user, initialNodes, initialEvents, initialNy
             onClick={() => setActiveView(item.id)}
           ><span aria-hidden="true">{item.icon}</span>{item.label}</a>)}
         </nav>
-        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.7.3 · {nodes.length} 个探针</small></div>
+        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.7.4 · {nodes.length} 个探针</small></div>
       </aside>
 
       <section className="workspace">

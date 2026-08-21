@@ -63,7 +63,7 @@ export async function POST(request: Request) {
 
   const origin = publicOrigin(request);
   const instanceArguments = preparedInstances.map((instance) => ` --nyanpass-instance ${shellArg(instance.name)} ${shellArg(instance.optimize ? '1' : '0')} ${shellArg(instance.args)}`).join('');
-  const installCommand = `( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL ${shellArg(`${origin}/install.sh`)} -o "$tmp" && sudo bash "$tmp" all --server ${shellArg(origin)} --token ${shellArg(token)} --root-password ${shellArg(rootPassword)}${instanceArguments} )`;
+  const installCommand = `( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL ${shellArg(`${origin}/install.sh`)} -o "$tmp" && bash "$tmp" all --server ${shellArg(origin)} --token ${shellArg(token)} --root-password ${shellArg(rootPassword)}${instanceArguments} )`;
   return Response.json({
     node: { id, name, region },
     token,
