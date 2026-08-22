@@ -54,7 +54,7 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 准备一台使用 systemd、glibc 2.28 或更高版本的 x86_64/arm64 Linux VPS，并确保至少有 2 GiB 可用磁盘及 768 MiB 可用内存与 swap；Alpine/musl、Docker、WSL 和 chroot 不受支持。安装器会自动识别公网 IPv4、询问 HTTP 端口（默认 `3100`），并生成 32 位随机访问路径；不需要域名、证书邮箱或 GitHub Token。只需向自己的来源 IP 放行所选端口，然后以 root 执行：
 
 ```bash
-bash <(curl -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.7.6') install
+bash <(curl -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.7.7') install
 ```
 
 脚本会询问端口、管理员账号和阿里云 AccessKey，随后自动安装经过校验的 Node.js、构建 PulseDNS、创建本地 SQLite 数据库、配置管理员 Basic Auth 并注册 systemd 服务。Caddy、域名和 HTTPS 证书流程已完全移除。完成后会显示类似 `http://203.0.113.10:3100/32位随机路径` 的唯一入口；直接访问 IP 与端口根路径不能进入面板。再次不带参数运行同一脚本会打开操作菜单：
@@ -67,14 +67,14 @@ bash <(curl -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-con
 一键升级命令：
 
 ```bash
-bash <(curl -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.7.6') update
+bash <(curl -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.7.7') update
 ```
 
 面板数据保存在 `/var/lib/pulsedns-control/pulsedns.db`；管理员密码和阿里云凭据保存在权限为 `0600` 的 `/etc/pulsedns-control.env`。卸载面板时数据库默认保留。
 
 ### 探针安装与菜单
 
-在 Web 控制台创建节点后会得到一次性令牌和安装命令。直接打开操作菜单：
+在 Web 控制台创建节点后会得到包含一次性凭据的完整 Bash 开机安装脚本。脚本可直接用于云厂商 user-data/cloud-init：它会等待网络和主控、把过程写入 `/var/log/pulsedns-bootstrap.log`、使用开机锁避免并发，并只在全部步骤成功后写入该节点专属的完成标记；后续重启只启动现有 DDNS 服务，不会覆盖令牌或重复安装 Nyanpass。直接打开交互式操作菜单：
 
 ```bash
 (
@@ -94,7 +94,7 @@ bash <(curl -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-con
 5. 配置 BBR/sysctl
 6. 卸载 DDNS
 
-Web 中“添加探针节点”会先要求填写一次性 root 密码，并预配一个或多个 Nyanpass 服务名、官方命令及原脚本的 `OPTIMIZE` 选项。主控把它们全部嵌入同一条 Web 专用安装命令：预校验 → SSH → DDNS 验收 → 全部 Nyanpass → BBR → DDNS 复检。只有监控脚本、配置、systemd 单元及持续运行状态全部通过后才会开始安装 Nyanpass；重新配置时会清除旧 IP 缓存，强制向新节点首次上报。VPS 只需粘贴一次，执行过程中不再要求粘贴 Nyanpass 命令或确认；每个实例通过原安装器支持的 `S` 与 `OPTIMIZE` 环境变量自动安装。
+Web 中“添加探针节点”会先要求填写一次性 root 密码，并预配一个或多个 Nyanpass 服务名、官方命令及原脚本的 `OPTIMIZE` 选项。主控把它们全部嵌入同一份 Web 专用开机脚本：主控令牌预校验 → SSH → DDNS 安装 → 首次地址上报验收 → 全部 Nyanpass → BBR → DDNS 复检。只有主控确认令牌有效，并接受至少一次公网地址上报后才会开始安装 Nyanpass；重新配置时会清除旧 IP 缓存。执行过程中不再要求粘贴 Nyanpass 命令或确认；每个实例通过原安装器支持的 `S` 与 `OPTIMIZE` 环境变量自动安装。
 
 HTTP 面板上的复制按钮包含兼容回退，并明确显示“复制成功”或“复制失败”。没有成功提示时不要粘贴，避免执行剪贴板中残留的旧 Nyanpass 命令。
 

@@ -1,6 +1,6 @@
 {
   "name": "sites-project",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -9,7 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "node --experimental-strip-types --test tests/install-command.test.mjs tests/install-script-contract.test.mjs tests/copy-command-contract.test.mjs tests/node-delete-contract.test.mjs",
+    "test": "node --experimental-strip-types --test tests/install-command.test.mjs tests/install-script-contract.test.mjs tests/copy-command-contract.test.mjs tests/node-delete-contract.test.mjs tests/report-auth-contract.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },

@@ -9,7 +9,7 @@ set -euo pipefail
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.7.6"
+VERSION="0.7.7"
 SERVER_URL="${SERVER_URL:-}"
 TOKEN="${TOKEN:-}"
 ROOT_PASSWORD="${ROOT_PASSWORD:-}"
@@ -22,6 +22,7 @@ INSTALL_PATH="${INSTALL_DIR}/monitor.sh"
 CONFIG_FILE="/etc/ddns-monitor.conf"
 SERVICE_NAME="ddns-monitor"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+DDNS_CREDENTIALS_VERIFIED=0
 
 NYANPASS_INSTALL_URL="https://dl.nyafw.com/download/nyanpass-install.sh"
 NYANPASS_TIMEOUT=600
@@ -434,6 +435,21 @@ prompt_ddns_config() {
     validate_ddns_config
 }
 
+validate_ddns_credentials_remote() {
+    local response=""
+    [[ "$DDNS_CREDENTIALS_VERIFIED" -eq 0 ]] || return 0
+    response=$(curl -sS --connect-timeout 5 --max-time 20 \
+        -H "X-Secret-Token: $TOKEN" \
+        -H "Authorization: Bearer $TOKEN" \
+        "${SERVER_URL%/}/api/v1/report" 2>/dev/null || true)
+    if printf '%s' "$response" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'; then
+        DDNS_CREDENTIALS_VERIFIED=1
+        log INFO "主控已确认探针令牌有效"
+        return 0
+    fi
+    fail "主控未接受探针令牌；请确认节点未被删除，并且命令来自同一个主控面板"
+}
+
 write_ddns_config() {
     local config_tmp
     config_tmp=$(mktemp /etc/ddns-monitor.conf.XXXXXX)
@@ -453,14 +469,14 @@ write_ddns_service_unit() {
 Description=DDNS IP Monitor
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
 ExecStart=/bin/bash ${INSTALL_PATH} --run
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=120
-StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target
@@ -488,7 +504,16 @@ verify_ddns_service() {
         sleep 2
         systemctl is-active --quiet "$SERVICE_NAME" || ddns_verification_failed "systemd 服务未保持运行"
     done
-    log INFO "DDNS 探针验收通过：脚本、配置和 systemd 服务均正常"
+
+    for attempt in {1..30}; do
+        sleep 2
+        systemctl is-active --quiet "$SERVICE_NAME" || ddns_verification_failed "等待首次上报时服务已停止"
+        if [[ -s "$CACHE_V4" || -s "$CACHE_V6" ]]; then
+            log INFO "DDNS 探针验收通过：主控已接受首次地址上报"
+            return 0
+        fi
+    done
+    ddns_verification_failed "60 秒内未完成首次地址上报；请检查主控、令牌和公网连通性"
 }
 
 load_ddns_config() {
@@ -536,8 +561,9 @@ notify_server() {
 install_ddns_service() {
     need_root
     prompt_ddns_config
-    fix_locale
     install_deps
+    validate_ddns_credentials_remote
+    fix_locale
     log INFO "安装 DDNS 监控 systemd 服务..."
 
     if [[ -L "$INSTALL_DIR" || ( -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR" ) ]]; then
@@ -568,7 +594,8 @@ install_ddns_service() {
 
     write_ddns_service_unit "$SERVICE_FILE"
 
-    # 重新配置到新节点或新令牌时必须强制首次上报，不能沿用旧 IP 缓存。
+    # 必须先停止旧探针再清缓存，防止旧进程在 restart 前写回旧节点的成功结果。
+    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
     rm -f "$CACHE_V4" "$CACHE_V6"
 
     systemctl daemon-reload
@@ -646,6 +673,8 @@ validate_provision_request() {
 provision_node() {
     need_root
     validate_provision_request
+    install_deps
+    validate_ddns_credentials_remote
     log INFO "开始 Web 一键安装；DDNS 验收通过前不会安装 Nyanpass..."
     fix_locale
     configure_ssh

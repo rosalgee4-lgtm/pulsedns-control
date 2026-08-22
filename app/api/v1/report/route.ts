@@ -17,6 +17,17 @@ type ReportBody = {
 
 type AddressReport = { type: AddressType; ip: string };
 
+export async function GET(request: Request) {
+  const token = request.headers.get('x-secret-token')?.trim() || bearerToken(request.headers.get('authorization'));
+  if (!token) return Response.json({ status: 'error', error: '无效的探针凭据' }, { status: 401 });
+
+  await ensureSchema();
+  const db = await getDb();
+  const [node] = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.tokenHash, await sha256(token))).limit(1);
+  if (!node) return Response.json({ status: 'error', error: '未知探针' }, { status: 401 });
+  return Response.json({ status: 'ok' });
+}
+
 export async function POST(request: Request) {
   const token = request.headers.get('x-secret-token')?.trim() || bearerToken(request.headers.get('authorization'));
   if (!token) return Response.json({ status: 'error', error: '无效的探针凭据' }, { status: 401 });

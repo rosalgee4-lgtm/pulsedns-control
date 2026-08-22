@@ -3,7 +3,7 @@ import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { events, nodes, nyanpassInstances } from '@/db/schema';
-import { buildNodeProvisionCommand } from '@/lib/install-command';
+import { buildNodeStartupScript } from '@/lib/install-command';
 import { parseOfficialNyanpassCommand } from '@/lib/nyanpass-command';
 import { publicOrigin } from '@/lib/public-origin';
 import { newAgentToken, sha256 } from '@/lib/security';
@@ -63,7 +63,7 @@ export async function POST(request: Request) {
   ]);
 
   const origin = publicOrigin(request);
-  const installCommand = buildNodeProvisionCommand({ origin, token, rootPassword, instances: preparedInstances });
+  const installCommand = buildNodeStartupScript({ nodeId: id, origin, token, rootPassword, instances: preparedInstances });
   return Response.json({
     node: { id, name, region },
     token,

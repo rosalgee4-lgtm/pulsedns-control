@@ -12,6 +12,7 @@ function body(name) {
 
 test('DDNS installation clears stale IP state and verifies the service', () => {
   const install = body('install_ddns_service');
+  assert.ok(install.indexOf('systemctl stop "$SERVICE_NAME"') < install.indexOf('rm -f "$CACHE_V4" "$CACHE_V6"'));
   assert.ok(install.indexOf('rm -f "$CACHE_V4" "$CACHE_V6"') < install.indexOf('systemctl restart "$SERVICE_NAME"'));
   assert.ok(install.indexOf('systemctl restart "$SERVICE_NAME"') < install.indexOf('verify_ddns_service'));
 });
@@ -27,6 +28,28 @@ test('DDNS verification checks artifacts, enablement, and sustained activity', (
     'for attempt in 1 2 3',
     'systemctl is-active --quiet "$SERVICE_NAME"',
   ]) assert.equal(verify.includes(required), true, `missing verification: ${required}`);
+  assert.match(verify, /for attempt in \{1\.\.30\}/);
+  assert.match(verify, /-s "\$CACHE_V4" \|\| -s "\$CACHE_V6"/);
+  assert.match(verify, /主控已接受首次地址上报/);
+});
+
+test('installer validates the token with the master before changing the VPS', () => {
+  const validate = body('validate_ddns_credentials_remote');
+  const provision = body('provision_node');
+  assert.match(validate, /\/api\/v1\/report/);
+  assert.match(validate, /X-Secret-Token/);
+  assert.match(validate, /主控未接受探针令牌/);
+  assert.ok(provision.indexOf('install_deps') < provision.indexOf('validate_ddns_credentials_remote'));
+  assert.ok(provision.indexOf('validate_ddns_credentials_remote') < provision.indexOf('configure_ssh'));
+});
+
+test('systemd start-limit directives are in Unit rather than Service', () => {
+  const unit = body('write_ddns_service_unit');
+  const unitSection = unit.slice(unit.indexOf('[Unit]'), unit.indexOf('[Service]'));
+  const serviceSection = unit.slice(unit.indexOf('[Service]'), unit.indexOf('[Install]'));
+  assert.match(unitSection, /StartLimitIntervalSec=120/);
+  assert.match(unitSection, /StartLimitBurst=5/);
+  assert.doesNotMatch(serviceSection, /StartLimit/);
 });
 
 test('Web provision validates first and never reaches Nyanpass before DDNS verification', () => {

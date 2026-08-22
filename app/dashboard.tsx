@@ -166,7 +166,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
             onClick={() => setActiveView(item.id)}
           ><span aria-hidden="true">{item.icon}</span>{item.label}</a>)}
         </nav>
-        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.7.6 · {nodes.length} 个探针</small></div>
+        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.7.7 · {nodes.length} 个探针</small></div>
       </aside>
 
       <section className="workspace">
@@ -215,7 +215,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
       {showCreate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="create-title">
           <button className="modal-close" onClick={closeModal} aria-label="关闭">×</button>
-          {!created ? <><p className="eyebrow cyan">无人值守安装</p><h2 id="create-title">添加一个探针节点</h2><p className="modal-intro">先填好 SSH 密码和全部 Nyanpass 实例。生成后只需在 VPS 粘贴一次，程序会自动完成 SSH → DDNS 验收 → 全部 Nyanpass → BBR；探针未正常运行时不会继续安装 Nyanpass。</p>
+          {!created ? <><p className="eyebrow cyan">开机自动安装</p><h2 id="create-title">添加一个探针节点</h2><p className="modal-intro">先填好 SSH 密码和全部 Nyanpass 实例。生成的 Bash 脚本可直接放入云厂商开机脚本：它会等待网络、记录日志且只在首次成功时完成 SSH → DDNS 验收 → 全部 Nyanpass → BBR。</p>
             <form onSubmit={createNode} className="node-form">
               <label>节点名称<input name="name" required placeholder="例如：东京 · jp-01" /></label>
               <label>区域<input name="region" placeholder="ap-northeast" /></label>
@@ -233,7 +233,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
               <p className="form-hint">命令中的独立 -o 表示出口，没有 -o 表示入口。Token 和完整命令不会存入数据库。</p>
               {error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '创建中…' : '创建节点并生成一键命令'}</button>
             </form></>
-          : <><p className="eyebrow cyan">节点已创建</p><h2>复制一次，自动完成</h2><p className="modal-intro">请立即在目标 VPS 执行这条一次性命令。它会先验证探针服务持续运行，再逐个安装预配的 {created.instances.length} 个 Nyanpass 实例。HTTP 面板也会确认复制结果，不会静默保留旧剪贴板内容。</p><pre className="install-command">{created.installCommand}</pre><button type="button" className="primary-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(created.installCommand)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制完整命令' : '复制完整安装命令'}</button>{copyFeedback === 'success' && <p className="form-success" role="status">复制成功，请直接粘贴到目标 VPS。</p>}{copyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整命令复制；剪贴板内容没有更新。</p>}<button type="button" className="ghost-button wide" onClick={closeModal}>完成</button></>}
+          : <><p className="eyebrow cyan">节点已创建</p><h2>复制开机安装脚本</h2><p className="modal-intro">把下面完整内容直接放入云厂商的 Bash／cloud-init 开机脚本，不要再添加手工 SSH 命令。脚本会等待主控可用，日志写入 /var/log/pulsedns-bootstrap.log；安装全部成功后写入唯一标记，后续重启不会覆盖令牌或重装 Nyanpass。若中途失败，会保留 started 标记阻止盲目重复安装，并在日志中给出处理提示。</p><pre className="install-command">{created.installCommand}</pre><button type="button" className="primary-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(created.installCommand)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制开机脚本' : '复制完整开机脚本'}</button>{copyFeedback === 'success' && <p className="form-success" role="status">复制成功，请直接粘贴到云厂商开机脚本。</p>}{copyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整脚本复制；剪贴板内容没有更新。</p>}<button type="button" className="ghost-button wide" onClick={closeModal}>完成</button></>}
         </section>
       </div>}
 
