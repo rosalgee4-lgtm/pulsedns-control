@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const source = await readFile(new URL('../public/install.sh', import.meta.url), 'utf8');
+const panelSource = await readFile(new URL('../public/panel-install.sh', import.meta.url), 'utf8');
+const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
 
 function body(name) {
   const match = source.match(new RegExp(`^${name}\\(\\) \\{\\n([\\s\\S]*?)^\\}\\n`, 'm'));
@@ -105,4 +108,16 @@ test('DDNS uninstall removes persisted task leases but leaves Nyanpass itself al
   const uninstall = body('uninstall_ddns');
   assert.match(uninstall, /rm -rf "\$TASK_STATE_DIR"/);
   assert.doesNotMatch(uninstall, /nyanpass\.uninstall|systemctl.*nyanpass/i);
+});
+
+test('panel installer uses immutable source and README verifies the downloaded entrypoint', () => {
+  const sourceCommit = panelSource.match(/^SOURCE_COMMIT="([a-f0-9]{40})"$/m)?.[1];
+  assert.ok(sourceCommit, 'panel source must be pinned to a full commit');
+  assert.match(panelSource, /archive\/\$\{SOURCE_COMMIT\}\.tar\.gz/);
+  assert.doesNotMatch(panelSource, /archive\/refs\/heads|SOURCE_REF=/);
+
+  const panelHash = createHash('sha256').update(panelSource).digest('hex');
+  assert.equal(readme.includes(panelHash), true, 'README panel command must pin the entrypoint digest');
+  assert.match(readme, /panel-install\.sh\?v=0\.8\.0[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" install/);
+  assert.match(readme, /panel-install\.sh\?v=0\.8\.0[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" update/);
 });

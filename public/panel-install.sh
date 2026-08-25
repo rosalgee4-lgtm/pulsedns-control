@@ -4,7 +4,7 @@ set -euo pipefail
 
 VERSION="0.8.0"
 REPOSITORY="rosalgee4-lgtm/pulsedns-control"
-SOURCE_REF="release-v0.8.0"
+SOURCE_COMMIT="21802f13c467b227891f348253b24c26107a2a84"
 SOURCE_LOCK_SHA256="1fb15db69bc20c25365426fcad11b15270cf535e94b0c9a320eaa8245227b782"
 SOURCE_OG_SHA256="3e0d82b4901fe73d4bc6a6209275283d39a0cf4084fea6625fba18d0e627de55"
 INSTALL_ROOT="/opt/pulsedns-control"
@@ -171,13 +171,14 @@ download_node() {
 
 download_and_build_panel() {
     local temp_dir="$1" release_id release_dir source_archive corrupt_file
+    [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "面板源码提交锁格式无效"
     release_id=$(date '+%Y%m%d%H%M%S')
     release_dir="${RELEASES_DIR}/${release_id}"
     [[ ! -e "$release_dir" ]] || release_dir="${RELEASES_DIR}/${release_id}-$$"
     NEW_RELEASE_DIR="$release_dir"
     source_archive="${temp_dir}/source.tar.gz"
     curl --proto '=https' --proto-redir '=https' -fLSs \
-        "https://github.com/${REPOSITORY}/archive/refs/heads/${SOURCE_REF}.tar.gz" -o "$source_archive"
+        "https://github.com/${REPOSITORY}/archive/${SOURCE_COMMIT}.tar.gz" -o "$source_archive"
     install -d -m 0755 "$release_dir"
     tar -xzf "$source_archive" --strip-components=1 -C "$release_dir"
 
