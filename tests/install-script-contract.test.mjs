@@ -61,5 +61,48 @@ test('Web provision validates first and never reaches Nyanpass before DDNS verif
   const bbr = provision.indexOf('configure_bbr');
   const finalVerification = provision.lastIndexOf('verify_ddns_service');
   assert.ok(validation >= 0 && validation < ssh && ssh < ddns && ddns < nyanpass && nyanpass < bbr && bbr < finalVerification);
+  assert.match(provision, /\[\[ "\$APPLY_BBR" == "1" \]\] && configure_bbr/);
+  assert.match(source, /--bbr\)[\s\S]*APPLY_BBR="\$2"/);
+  assert.match(source, /--provision-config\)[\s\S]*load_provision_config "\$2"/);
+  assert.match(source, /load_provision_config\(\)[\s\S]*PULSEDNS_PROVISION_V1/);
+  assert.match(source, /load_provision_config\(\)[\s\S]*600:0/);
+  assert.match(source, /Web 一键安装必须显式传入原脚本 BBR 参数/);
   assert.match(source, /^    provision\) provision_node ;;/m);
+});
+
+test('all 23 original BBR and fq sysctl parameters are preserved', () => {
+  const bbr = body('configure_bbr');
+  const parameters = [
+    'fs.file-max = 6815744',
+    'net.ipv4.tcp_no_metrics_save=1',
+    'net.ipv4.tcp_ecn=0',
+    'net.ipv4.tcp_frto=0',
+    'net.ipv4.tcp_mtu_probing=0',
+    'net.ipv4.tcp_rfc1337=0',
+    'net.ipv4.tcp_sack=1',
+    'net.ipv4.tcp_fack=1',
+    'net.ipv4.tcp_window_scaling=1',
+    'net.ipv4.tcp_adv_win_scale=1',
+    'net.ipv4.tcp_moderate_rcvbuf=1',
+    'net.core.rmem_max=10000000',
+    'net.core.wmem_max=10000000',
+    'net.ipv4.tcp_rmem=4096 131072 10000000',
+    'net.ipv4.tcp_wmem=4096 131072 10000000',
+    'net.ipv4.udp_rmem_min=8192',
+    'net.ipv4.udp_wmem_min=8192',
+    'net.ipv4.ip_forward=1',
+    'net.ipv4.conf.all.route_localnet=1',
+    'net.ipv4.conf.all.forwarding=1',
+    'net.ipv4.conf.default.forwarding=1',
+    'net.core.default_qdisc=fq',
+    'net.ipv4.tcp_congestion_control=bbr',
+  ];
+  assert.equal(parameters.length, 23);
+  for (const parameter of parameters) assert.ok(bbr.includes(parameter), `missing original BBR parameter: ${parameter}`);
+});
+
+test('DDNS uninstall removes persisted task leases but leaves Nyanpass itself alone', () => {
+  const uninstall = body('uninstall_ddns');
+  assert.match(uninstall, /rm -rf "\$TASK_STATE_DIR"/);
+  assert.doesNotMatch(uninstall, /nyanpass\.uninstall|systemctl.*nyanpass/i);
 });

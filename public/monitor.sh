@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 # PulseDNS DDNS monitor payload
-# 仅负责按原脚本逻辑检测 IPv4/IPv6，并在地址变化时通知主控。
+# 负责检测 IPv4/IPv6，并领取固定类型的 Nyanpass 安装任务；不会执行主控下发的 Shell 命令。
 set -euo pipefail
 
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.7.8"
+VERSION="0.8.0"
 CHECK_INTERVAL=10
 LOG_FILE="/var/log/ddns-monitor.log"
 CACHE_V4="/tmp/.ddns_last_ipv4"
 CACHE_V6="/tmp/.ddns_last_ipv6"
 CONFIG_FILE="/etc/ddns-monitor.conf"
+TASK_STATE_DIR="/var/lib/ddns-monitor/tasks"
+TASK_LOCK_FILE="/run/ddns-monitor-nyanpass.lock"
+PROVISION_OUTCOME_DIR="/var/lib/ddns-monitor/provision-outcomes"
+NYANPASS_INSTALL_URL="https://dl.nyafw.com/download/nyanpass-install.sh"
+NYANPASS_TIMEOUT=600
 SERVER_URL=""
 TOKEN=""
 
@@ -45,20 +50,27 @@ fail() {
 }
 
 install_deps() {
-    command -v curl >/dev/null 2>&1 && return 0
-    log WARN "curl 未安装，自动安装..."
+    local -a missing=()
+    command -v curl >/dev/null 2>&1 || missing+=("curl")
+    command -v jq >/dev/null 2>&1 || missing+=("jq")
+    command -v timeout >/dev/null 2>&1 || missing+=("coreutils")
+    command -v flock >/dev/null 2>&1 || missing+=("util-linux")
+    [[ ${#missing[@]} -eq 0 ]] && return 0
+    log WARN "安装探针依赖：${missing[*]}"
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update -qq
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}"
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y -q curl
+        yum install -y -q "${missing[@]}"
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y -q curl
+        dnf install -y -q "${missing[@]}"
     elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache curl
+        apk add --no-cache "${missing[@]}"
+    else
+        fail "无法安装 curl、jq、coreutils 和 util-linux"
     fi
-    command -v curl >/dev/null 2>&1 || fail "curl 安装失败"
-    log INFO "依赖安装完成"
+    command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 || fail "探针依赖安装失败"
+    log INFO "探针依赖安装完成"
 }
 
 load_config() {
@@ -98,8 +110,7 @@ load_config() {
 get_ipv4() {
     local ip="" url=""
     for url in "${IPV4_SERVICES[@]}"; do
-        ip=$(curl -4 -s --max-time 5 --retry 2 "$url" 2>/dev/null \
-            | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1 || true)
+        ip=$(curl -4 -s --max-time 5 --retry 2 "$url" 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1 || true)
         [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && echo "$ip" && return 0
     done
     echo ""
@@ -108,8 +119,7 @@ get_ipv4() {
 get_ipv6() {
     local ip="" url=""
     for url in "${IPV6_SERVICES[@]}"; do
-        ip=$(curl -6 -s --max-time 5 --retry 2 "$url" 2>/dev/null \
-            | grep -oE '([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}' | head -1 || true)
+        ip=$(curl -6 -s --max-time 5 --retry 2 "$url" 2>/dev/null | grep -oE '([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}' | head -1 || true)
         [[ -n "$ip" ]] && echo "$ip" && return 0
     done
     echo ""
@@ -117,25 +127,293 @@ get_ipv6() {
 
 notify_server() {
     local ip="$1" type="$2" resp=""
-    resp=$(curl -s --max-time 10 \
-        -X POST "${SERVER_URL}/api/v1/report" \
+    resp=$(curl -s --max-time 10 -X POST "${SERVER_URL}/api/v1/report" \
         -H "Content-Type: application/json" \
         -H "X-Secret-Token: $TOKEN" \
-        -d "{\"ip\":\"$ip\",\"type\":\"$type\"}" || true)
-
+        -d "{\"ip\":\"$ip\",\"type\":\"$type\",\"agentVersion\":\"$VERSION\"}" || true)
     if echo "$resp" | grep -q '"status":"ok"'; then
         log INFO "[$type] 主控通知成功 -> $ip"
         return 0
     fi
-    log ERROR "[$type] 主控通知失败，响应：$resp"
+    log ERROR "[$type] 主控通知失败"
     return 1
+}
+
+valid_task_uuid() {
+    [[ "$1" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
+}
+
+valid_task_lease() {
+    [[ "$1" =~ ^pd_[a-f0-9]{64}$ ]]
+}
+
+valid_ack_payload() {
+    local job_id="$1" lease_token="$2" outcome="$3" error_code="${4:-}"
+    valid_task_uuid "$job_id" && valid_task_lease "$lease_token" || return 1
+    case "$outcome:$error_code" in
+        succeeded:|failed:installer_download|failed:installer_invalid|failed:validation_failed|uncertain:install_failed|uncertain:install_timeout|uncertain:local_state) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+ack_nyanpass_job() {
+    local job_id="$1" lease_token="$2" outcome="$3" error_code="${4:-}" body="" response="" response_body="" http_code="" attempt=0
+    valid_ack_payload "$job_id" "$lease_token" "$outcome" "$error_code" || return 2
+    body=$(jq -cn --arg jobId "$job_id" --arg leaseToken "$lease_token" --arg outcome "$outcome" --arg errorCode "$error_code" \
+        '{jobId:$jobId,leaseToken:$leaseToken,outcome:$outcome} + (if $errorCode == "" then {} else {errorCode:$errorCode} end)')
+    for attempt in 1 2 3 4 5 6 7 8; do
+        response=$(curl -sS --connect-timeout 5 --max-time 20 -X POST "${SERVER_URL}/api/v1/tasks" \
+            -H "Content-Type: application/json" -H "X-Secret-Token: $TOKEN" -H "X-Agent-Version: $VERSION" -d "$body" -w $'\n%{http_code}' 2>/dev/null || true)
+        http_code="${response##*$'\n'}"
+        response_body="${response%$'\n'*}"
+        if [[ "$http_code" == "200" ]] && printf '%s' "$response_body" | jq -e '.status == "ok"' >/dev/null 2>&1; then
+            return 0
+        fi
+        if [[ "$http_code" =~ ^4[0-9][0-9]$ && "$http_code" != "408" && "$http_code" != "429" ]]; then
+            return 2
+        fi
+        sleep $((attempt * 2))
+    done
+    return 1
+}
+
+write_pending_ack() {
+    local job_id="$1" lease_token="$2" outcome="$3" error_code="${4:-}" pending_tmp=""
+    valid_ack_payload "$job_id" "$lease_token" "$outcome" "$error_code" || return 1
+    pending_tmp=$(mktemp "${TASK_STATE_DIR}/.${job_id}.ack.XXXXXX")
+    printf '%s\n%s\n%s\n%s\n' "$job_id" "$lease_token" "$outcome" "$error_code" > "$pending_tmp"
+    chmod 0600 "$pending_tmp"
+    mv -f "$pending_tmp" "${TASK_STATE_DIR}/${job_id}.ack"
+}
+
+retry_provision_outcome() {
+    local outcome_file="" filename="" generation="" attempt_id="" outcome="" body="" response="" disposition=""
+    [[ -d "$PROVISION_OUTCOME_DIR" && ! -L "$PROVISION_OUTCOME_DIR" ]] || return 0
+    shopt -s nullglob
+    for outcome_file in "$PROVISION_OUTCOME_DIR"/*.json; do
+        [[ -f "$outcome_file" && ! -L "$outcome_file" ]] || continue
+        filename="${outcome_file##*/}"
+        if [[ ! "$filename" =~ ^([1-9][0-9]*)\.([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(succeeded|failed)\.json$ ]]; then
+            continue
+        fi
+        generation="${BASH_REMATCH[1]}"; attempt_id="${BASH_REMATCH[2]}"; outcome="${BASH_REMATCH[3]}"
+        body=$(<"$outcome_file")
+        if ! printf '%s' "$body" | jq -e --argjson generation "$generation" --arg attemptId "$attempt_id" --arg outcome "$outcome" '
+            type == "object" and (keys | sort) == (["attemptId","generation","outcome","phase","protocol"] | sort) and
+            .protocol == 1 and .phase == "finish" and .generation == $generation and
+            .attemptId == $attemptId and .outcome == $outcome' >/dev/null 2>&1; then
+            continue
+        fi
+        response=$(curl -sS --connect-timeout 5 --max-time 20 -X POST "${SERVER_URL}/api/v1/provision" \
+            -H "Content-Type: application/json" -H "X-Secret-Token: $TOKEN" -H "X-Agent-Version: $VERSION" -d "$body" 2>/dev/null || true)
+        disposition=$(printf '%s' "$response" | jq -r 'if .status == "ok" then .disposition // "" else "" end' 2>/dev/null || true)
+        if [[ "$disposition" == "accepted" || "$disposition" == "duplicate" || "$disposition" == "stale" ]]; then
+            rm -f "$outcome_file"
+        elif [[ "$disposition" == "conflict" ]]; then
+            mv -f "$outcome_file" "${outcome_file}.rejected"
+            log ERROR "开机安装回执 ${filename} 与主控终态冲突，已停止自动重试"
+        fi
+    done
+    shopt -u nullglob
+}
+
+retry_pending_acks() {
+    local ack_file="" job_id="" lease_token="" outcome="" error_code="" ack_status=0
+    local -a values=()
+    [[ -d "$TASK_STATE_DIR" ]] || return 0
+    shopt -s nullglob
+    for ack_file in "$TASK_STATE_DIR"/*.ack; do
+        mapfile -t values < "$ack_file"
+        [[ ${#values[@]} -ge 3 ]] || continue
+        job_id="${values[0]}"; lease_token="${values[1]}"; outcome="${values[2]}"; error_code="${values[3]:-}"
+        valid_ack_payload "$job_id" "$lease_token" "$outcome" "$error_code" || continue
+        if ack_nyanpass_job "$job_id" "$lease_token" "$outcome" "$error_code"; then
+            rm -f "$ack_file" "${TASK_STATE_DIR}/${job_id}.started" "${TASK_STATE_DIR}/${job_id}.done"
+        else
+            ack_status=$?
+            if [[ $ack_status -eq 2 ]]; then
+                mv -f "$ack_file" "${TASK_STATE_DIR}/${job_id}.rejected"
+                log ERROR "任务 ${job_id} 的回执被主控终态拒绝，已停止自动重试"
+            fi
+        fi
+    done
+    shopt -u nullglob
+}
+
+recover_local_task_state() {
+    local started_file="" job_id="" lease_token="" revision=""
+    local -a values=()
+    [[ -d "$TASK_STATE_DIR" ]] || return 0
+    shopt -s nullglob
+    for started_file in "$TASK_STATE_DIR"/*.started; do
+        job_id="${started_file##*/}"; job_id="${job_id%.started}"
+        [[ -e "${TASK_STATE_DIR}/${job_id}.ack" || -e "${TASK_STATE_DIR}/${job_id}.rejected" ]] && continue
+        mapfile -t values < "$started_file"
+        [[ ${#values[@]} -ge 3 ]] || continue
+        lease_token="${values[1]}"; revision="${values[2]}"
+        [[ "${values[0]}" == "$job_id" ]] && valid_task_uuid "$job_id" && valid_task_lease "$lease_token" && [[ "$revision" =~ ^[1-9][0-9]*$ ]] || continue
+        if [[ -e "${TASK_STATE_DIR}/${job_id}.done" ]]; then
+            write_pending_ack "$job_id" "$lease_token" succeeded
+        else
+            write_pending_ack "$job_id" "$lease_token" uncertain local_state
+        fi
+    done
+    shopt -u nullglob
+}
+
+validate_nyanpass_payload() {
+    local service_name="$1" role="$2" panel_url="$3" client_token="$4" optimize="$5" authority="" port=""
+    [[ "$service_name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$ ]] || return 1
+    [[ "$role" == "inbound" || "$role" == "outbound" ]] || return 1
+    [[ "$client_token" =~ ^[A-Za-z0-9._:-]{8,512}$ ]] || return 1
+    [[ "$optimize" == "0" || "$optimize" == "1" ]] || return 1
+    [[ "$panel_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~:/@%+=,-]*)?$ ]] || return 1
+    authority="${panel_url#https://}"
+    authority="${authority%%/*}"
+    if [[ "$authority" == *:* ]]; then
+        port="${authority##*:}"
+        [[ $((10#$port)) -ge 1 && $((10#$port)) -le 65535 ]] || return 1
+    fi
+}
+
+poll_nyanpass_job() {
+    local response="" status="" job_id="" action="" revision="" lease_token="" instance_id=""
+    local service_name="" role="" panel_url="" client_token="" optimize="" args="" installer="" installer_log="" error_code=""
+    retry_provision_outcome
+    recover_local_task_state
+    retry_pending_acks
+    response=$(curl -sS --connect-timeout 5 --max-time 20 "${SERVER_URL}/api/v1/tasks" \
+        -H "X-Secret-Token: $TOKEN" -H "X-Agent-Version: $VERSION" 2>/dev/null || true)
+    status=$(printf '%s' "$response" | jq -r '.status // empty' 2>/dev/null || true)
+    [[ "$status" == "job" ]] || return 0
+    if ! printf '%s' "$response" | jq -e '
+        .protocol == 1 and .job.action == "nyanpass_apply_v1" and
+        (.job.id | type == "string") and (.job.revision | type == "number") and
+        (.job.leaseToken | type == "string") and (.job.payload.instanceId | type == "string") and
+        (.job.payload.serviceName | type == "string") and
+        (.job.payload.role == "inbound" or .job.payload.role == "outbound") and
+        (.job.payload.panelUrl | type == "string") and (.job.payload.clientToken | type == "string") and
+        (.job.payload.optimize | type == "boolean")' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    job_id=$(printf '%s' "$response" | jq -r '.job.id')
+    action=$(printf '%s' "$response" | jq -r '.job.action')
+    revision=$(printf '%s' "$response" | jq -r '.job.revision')
+    lease_token=$(printf '%s' "$response" | jq -r '.job.leaseToken')
+    instance_id=$(printf '%s' "$response" | jq -r '.job.payload.instanceId')
+    service_name=$(printf '%s' "$response" | jq -r '.job.payload.serviceName')
+    role=$(printf '%s' "$response" | jq -r '.job.payload.role')
+    panel_url=$(printf '%s' "$response" | jq -r '.job.payload.panelUrl')
+    client_token=$(printf '%s' "$response" | jq -r '.job.payload.clientToken')
+    optimize=$(printf '%s' "$response" | jq -r 'if .job.payload.optimize then "1" else "0" end')
+
+    if ! valid_task_uuid "$job_id" || ! valid_task_lease "$lease_token"; then
+        log ERROR "主控返回了不安全的任务标识，已拒绝且不会写入本地状态"
+        return 0
+    fi
+    if [[ "$action" != "nyanpass_apply_v1" ]] || ! valid_task_uuid "$instance_id" || [[ ! "$revision" =~ ^[1-9][0-9]*$ ]] || \
+        ! validate_nyanpass_payload "$service_name" "$role" "$panel_url" "$client_token" "$optimize"; then
+        # The lease is already active. Persist the failure before attempting the
+        # acknowledgement so a temporary control-plane outage cannot strand the
+        # task in running state until its lease expires.
+        umask 077
+        mkdir -p "$TASK_STATE_DIR"
+        chmod 0700 "$(dirname "$TASK_STATE_DIR")" "$TASK_STATE_DIR" 2>/dev/null || true
+        write_pending_ack "$job_id" "$lease_token" failed validation_failed
+        if ack_nyanpass_job "$job_id" "$lease_token" failed validation_failed; then
+            rm -f "${TASK_STATE_DIR}/${job_id}.ack"
+        fi
+        return 0
+    fi
+
+    umask 077
+    mkdir -p "$TASK_STATE_DIR"
+    chmod 0700 "$(dirname "$TASK_STATE_DIR")" "$TASK_STATE_DIR" 2>/dev/null || true
+    if [[ -e "${TASK_STATE_DIR}/${job_id}.done" ]]; then
+        write_pending_ack "$job_id" "$lease_token" succeeded
+        retry_pending_acks
+        return 0
+    fi
+    if [[ -e "${TASK_STATE_DIR}/${job_id}.started" ]]; then
+        write_pending_ack "$job_id" "$lease_token" uncertain local_state
+        retry_pending_acks
+        return 0
+    fi
+    printf '%s\n%s\n%s\n' "$job_id" "$lease_token" "$revision" > "${TASK_STATE_DIR}/${job_id}.started"
+    installer=$(mktemp /tmp/nyanpass-remote.XXXXXX.sh)
+    installer_log=$(mktemp /tmp/nyanpass-remote.XXXXXX.log)
+    trap 'rm -f -- "${installer:-}" "${installer_log:-}"' EXIT
+    if ! curl --proto '=https' --proto-redir '=https' -fLSs --max-time 60 "$NYANPASS_INSTALL_URL" -o "$installer"; then
+        error_code="installer_download"
+    elif ! bash -n "$installer"; then
+        error_code="installer_invalid"
+    else
+        args="-t ${client_token} -u ${panel_url}"
+        [[ "$role" == "outbound" ]] && args="-o ${args}"
+        set +e
+        env "S=$service_name" "OPTIMIZE=$optimize" timeout --kill-after=30s "$NYANPASS_TIMEOUT" bash "$installer" rel_nodeclient "$args" >"$installer_log" 2>&1
+        local install_status=$?
+        set -e
+        if [[ $install_status -eq 0 ]]; then
+            printf '%s\n' "$revision" > "${TASK_STATE_DIR}/${job_id}.done"
+            write_pending_ack "$job_id" "$lease_token" succeeded
+            if ack_nyanpass_job "$job_id" "$lease_token" succeeded; then
+                log INFO "Nyanpass 实例 ${service_name} 已同步安装"
+                rm -f "${TASK_STATE_DIR}/${job_id}.ack" "${TASK_STATE_DIR}/${job_id}.started" "${TASK_STATE_DIR}/${job_id}.done"
+            else
+                log ERROR "Nyanpass 实例 ${service_name} 已安装，但主控回执失败"
+            fi
+            rm -f "$installer" "$installer_log"
+            client_token="" args="" response=""
+            return 0
+        elif [[ $install_status -eq 124 || $install_status -eq 137 ]]; then
+            error_code="install_timeout"
+        else
+            error_code="install_failed"
+        fi
+    fi
+
+    local outcome="failed"
+    [[ "$error_code" == "install_timeout" || "$error_code" == "install_failed" || "$error_code" == "local_state" ]] && outcome="uncertain"
+    write_pending_ack "$job_id" "$lease_token" "$outcome" "$error_code"
+    if ack_nyanpass_job "$job_id" "$lease_token" "$outcome" "$error_code"; then
+        rm -f "${TASK_STATE_DIR}/${job_id}.ack" "${TASK_STATE_DIR}/${job_id}.started"
+    fi
+    log ERROR "Nyanpass 实例 ${service_name} 同步失败（${error_code}）"
+    rm -f "$installer" "$installer_log"
+    client_token="" args="" response=""
+}
+
+run_nyanpass_task_loop() {
+    local worker_status=0
+    while true; do
+        # Capture the worker exit code without calling the worker from an if/||
+        # test. Bash suppresses errexit inside functions used as conditions,
+        # which would let a failed atomic state write continue toward an ACK.
+        set +e
+        (
+            set -e
+            flock -n 9 || exit 0
+            poll_nyanpass_job
+        ) 9>"$TASK_LOCK_FILE"
+        worker_status=$?
+        set -e
+        if [[ $worker_status -ne 0 ]]; then
+            log ERROR "Nyanpass 任务轮询异常，将在下个周期重试"
+        fi
+        sleep "$CHECK_INTERVAL"
+    done
 }
 
 run_loop() {
     load_config
     install_deps
-    log INFO "DDNS 监控启动，间隔 ${CHECK_INTERVAL}s，主控：$SERVER_URL"
-
+    log INFO "DDNS 监控启动，间隔 ${CHECK_INTERVAL}s，主控：$SERVER_URL，远程同步协议 v1"
+    # Keep the task heartbeat independent from public-IP providers. A slow or
+    # unreachable IPv4/IPv6 source must not make an otherwise healthy probe look
+    # offline to the remote-sync queue.
+    run_nyanpass_task_loop &
     local last_v4="" last_v6="" cur_v4="" cur_v6=""
     while true; do
         cur_v4=$(get_ipv4)
@@ -144,7 +422,6 @@ run_loop() {
             log INFO "[A] IP 变化：${last_v4:-首次} -> $cur_v4"
             notify_server "$cur_v4" "A" && echo "$cur_v4" > "$CACHE_V4"
         fi
-
         cur_v6=$(get_ipv6)
         [[ -f "$CACHE_V6" ]] && last_v6=$(<"$CACHE_V6") || last_v6=""
         if [[ -n "$cur_v6" && "$cur_v6" != "$last_v6" ]]; then
@@ -157,5 +434,5 @@ run_loop() {
 
 case "${1:---run}" in
     --run) run_loop ;;
-    *) fail "DDNS 探针只支持 --run" ;;
+    *) fail "未知参数" ;;
 esac

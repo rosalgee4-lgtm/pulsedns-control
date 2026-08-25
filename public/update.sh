@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # PulseDNS DDNS probe updater
-# 仅替换 /opt/ddns-monitor/monitor.sh；不执行完整安装器。
+# 安装新版探针所需依赖后，原子替换 /opt/ddns-monitor/monitor.sh。
 set -euo pipefail
 
 export LANG=C.UTF-8
@@ -12,6 +12,8 @@ INSTALL_PATH="${INSTALL_DIR}/monitor.sh"
 BACKUP_PATH="${INSTALL_DIR}/monitor.sh.previous"
 SERVICE_FILE="/etc/systemd/system/ddns-monitor.service"
 SERVICE_NAME="ddns-monitor"
+MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.0/public/monitor.sh"
+MONITOR_SHA256="ce9abbe2388ffb172837a80ad8afce2b73a4ba29d79adcc3fccb94d677a89026"
 LOCK_DIR="/run/pulsedns-ddns-upgrade.lock"
 SERVER_URL=""
 TOKEN=""
@@ -25,6 +27,29 @@ was_active=0
 info() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
 fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
+
+install_runtime_deps() {
+    local -a missing=()
+    command -v curl >/dev/null 2>&1 || missing+=("curl")
+    command -v jq >/dev/null 2>&1 || missing+=("jq")
+    command -v timeout >/dev/null 2>&1 || missing+=("coreutils")
+    command -v flock >/dev/null 2>&1 || missing+=("util-linux")
+    [[ ${#missing[@]} -eq 0 ]] && return 0
+    info "安装新版探针依赖：${missing[*]}"
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}"
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y -q "${missing[@]}"
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y -q "${missing[@]}"
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache "${missing[@]}"
+    else
+        fail "未找到支持的包管理器，请先安装：${missing[*]}"
+    fi
+    command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 || fail "新版探针依赖安装失败"
+}
 
 cleanup() {
     [[ -z "$candidate" ]] || rm -f -- "$candidate"
@@ -154,8 +179,8 @@ trap 'handle_signal 143' TERM
 
 [[ $# -eq 0 ]] || fail "升级脚本不接受参数；主控地址和节点令牌始终读取现有配置"
 [[ ${EUID:-$(id -u)} -eq 0 ]] || fail "请用 sudo/root 运行"
-command -v curl >/dev/null 2>&1 || fail "缺少 curl；升级不会自动安装系统软件"
 command -v systemctl >/dev/null 2>&1 || fail "当前系统不支持 systemd"
+install_runtime_deps
 validate_install_dir
 validate_root_file "$INSTALL_PATH"
 validate_root_file "$SERVICE_FILE"
@@ -175,12 +200,13 @@ lock_acquired=1
 printf '%s\n' "$$" > "$LOCK_DIR/pid"
 
 candidate=$(mktemp "${INSTALL_DIR}/.monitor.candidate.XXXXXX")
-info "正在从已配置的主控下载专用 DDNS 探针..."
-curl --proto '=http,https' --proto-redir '=http,https' -fLSs --retry 2 --max-time 30 \
-    "${SERVER_URL}/monitor.sh" -o "$candidate" || fail "DDNS 探针下载失败"
+info "正在从 GitHub HTTPS 发布通道下载并校验 DDNS 探针..."
+curl --proto '=https' --proto-redir '=https' -fLSs --retry 2 --max-time 30 \
+    "$MONITOR_DOWNLOAD_URL" -o "$candidate" || fail "DDNS 探针下载失败"
 [[ -s "$candidate" ]] || fail "下载的 DDNS 探针为空"
 grep -Fq '# PulseDNS DDNS monitor payload' "$candidate" || fail "下载内容不是 PulseDNS DDNS 探针"
 bash -n "$candidate" || fail "下载的 DDNS 探针语法校验失败"
+[[ "$(sha256sum "$candidate" | awk '{print $1}')" == "$MONITOR_SHA256" ]] || fail "下载的 DDNS 探针完整性校验失败"
 chmod 0755 "$candidate"
 
 new_version=$(sed -n 's/^VERSION="\([^"]*\)"$/\1/p' "$candidate" | head -1)
@@ -209,8 +235,10 @@ candidate=""
 
 if [[ $was_active -eq 1 ]]; then
     systemctl restart "$SERVICE_NAME" || fail_and_restore
-    sleep 2
-    systemctl is-active --quiet "$SERVICE_NAME" || fail_and_restore
+    for _ in 1 2 3; do
+        sleep 2
+        systemctl is-active --quiet "$SERVICE_NAME" || fail_and_restore
+    done
 fi
 swapped=0
 

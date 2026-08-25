@@ -22,7 +22,7 @@ export async function getDb(): Promise<AppDb> {
 
   if (isSelfHosted()) {
     const sqlite = await getLocalSqlite();
-    const execute: RemoteCallback = async (query, params, method) => {
+    const executeSync = (query: string, params: unknown[], method: 'run' | 'all' | 'values' | 'get'): RemoteResult => {
       const statement = sqlite.prepare(query);
       const sqliteParams = params as SqliteInputValue[];
       if (method === 'run') {
@@ -33,11 +33,15 @@ export async function getDb(): Promise<AppDb> {
       if (method === 'get') return { rows: statement.get(...sqliteParams) } as unknown as RemoteResult;
       return { rows: statement.all(...sqliteParams) } as RemoteResult;
     };
+    const execute: RemoteCallback = async (query, params, method) => executeSync(query, params, method);
     const executeBatch: AsyncBatchRemoteCallback = async (queries) => {
+      // DatabaseSync is intentionally executed without an await between BEGIN and
+      // COMMIT. Yielding here would let another request enter the same connection
+      // and accidentally participate in (or collide with) this transaction.
       sqlite.exec('BEGIN IMMEDIATE');
       try {
         const results: RemoteResult[] = [];
-        for (const query of queries) results.push(await execute(query.sql, query.params, query.method));
+        for (const query of queries) results.push(executeSync(query.sql, query.params, query.method));
         sqlite.exec('COMMIT');
         return results;
       } catch (error) {

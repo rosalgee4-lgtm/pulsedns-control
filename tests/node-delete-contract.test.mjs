@@ -23,5 +23,6 @@ test('server deletion remains authenticated and keyed by node id', () => {
   assert.match(route, /export async function DELETE/);
   assert.match(route, /if \(!user\).*status: 401/);
   assert.match(route, /searchParams\.get\('id'\)/);
-  assert.match(route, /db\.delete\(nodes\)\.where\(eq\(nodes\.id, id\)\)/);
+  assert.match(route, /db\.delete\(nodes\)\.where\(and\(eq\(nodes\.id, id\), eq\(nodes\.nyanpassStatus, node\.nyanpassStatus\), attemptCondition\)\)/);
+  assert.match(route, /requiresUncertainConfirmation: true/);
 });

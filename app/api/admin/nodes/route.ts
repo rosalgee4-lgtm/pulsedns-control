@@ -1,14 +1,18 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
-import { events, nodes, nyanpassInstances } from '@/db/schema';
+import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { syncAliDnsRecord } from '@/lib/alidns';
-import { buildNodeStartupScript } from '@/lib/install-command';
+import { buildNodeStartupScript, MAX_NODE_STARTUP_SCRIPT_BYTES } from '@/lib/install-command';
 import { parseOfficialNyanpassCommand } from '@/lib/nyanpass-command';
 import { publicOrigin } from '@/lib/public-origin';
-import { newAgentToken, sha256 } from '@/lib/security';
+import { newAgentToken, newBootstrapDownloadToken, sha256 } from '@/lib/security';
 import { cleanText, normalizeDnsRr, normalizeDomainName, validDnsRr, validDomainName } from '@/lib/validation';
+import { expireProvisionAttempts, isBootstrapLocked } from '@/lib/provision-lifecycle';
+import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
+import { nodeResponse } from '@/lib/node-response';
+import { encryptBootstrapPayload } from '@/lib/bootstrap-payload';
 
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
@@ -23,8 +27,8 @@ export async function POST(request: Request) {
   const rootPassword = typeof body?.rootPassword === 'string' ? body.rootPassword : '';
   const nyanpassInput = Array.isArray(body?.nyanpass) ? body.nyanpass : [];
   if (!name) return Response.json({ error: '节点名称不能为空' }, { status: 400 });
-  if (rootPassword.length < 8 || rootPassword.length > 128 || /[\r\n]/.test(rootPassword)) {
-    return Response.json({ error: 'root 密码必须为 8-128 个字符，且不能包含换行' }, { status: 400 });
+  if (rootPassword.length < 8 || rootPassword.length > 128 || /[\x00-\x1f\x7f]/.test(rootPassword)) {
+    return Response.json({ error: 'root 密码必须为 8-128 个字符，且不能包含控制字符' }, { status: 400 });
   }
   if (!nyanpassInput.length || nyanpassInput.length > 16) {
     return Response.json({ error: '请预先配置 1-16 个 Nyanpass 实例' }, { status: 400 });
@@ -52,25 +56,49 @@ export async function POST(request: Request) {
     preparedInstances.push({ id: crypto.randomUUID(), name: instanceName, args: parsed.args, panelUrl: parsed.panelUrl, role: parsed.role, optimize: entry.optimize === true });
   }
 
+  const token = newAgentToken();
+  const downloadToken = newBootstrapDownloadToken();
+  const id = crypto.randomUUID();
+  const provisionGeneration = 1;
+  const origin = publicOrigin(request);
+  const installCommand = buildNodeStartupScript({ nodeId: id, generation: provisionGeneration, origin, token, rootPassword, instances: preparedInstances });
+  if (new TextEncoder().encode(installCommand).byteLength > MAX_NODE_STARTUP_SCRIPT_BYTES) {
+    return Response.json({ error: '开机脚本超过 AWS user-data 的 15 KiB 安全上限；请减少首次预配实例，节点上线后再用远程同步添加' }, { status: 400 });
+  }
+  let bootstrapPayloadCiphertext = '';
+  try {
+    bootstrapPayloadCiphertext = await encryptBootstrapPayload({
+      protocol: 1,
+      agentToken: token,
+      rootPassword,
+      instances: preparedInstances.map(({ name: instanceName, optimize, args }) => ({ name: instanceName, optimize, args })),
+    }, { nodeId: id, generation: provisionGeneration });
+  } catch (error) {
+    return Response.json({ error: safeBootstrapEncryptionError(error) }, { status: 503 });
+  }
+  const [tokenHash, bootstrapDownloadTokenHash] = await Promise.all([sha256(token), sha256(downloadToken)]);
+  const installUrl = `${origin}/api/v1/bootstrap/${id}/${downloadToken}`;
+
   await ensureSchema();
   const db = await getDb();
-  const token = newAgentToken();
   const now = new Date();
-  const id = crypto.randomUUID();
   await db.batch([
-    db.insert(nodes).values({ id, name, region, tokenHash: await sha256(token), provider: 'alidns', domainName, recordV4, recordV6, createdAt: now, updatedAt: now }),
-    ...preparedInstances.map((instance) => db.insert(nyanpassInstances).values({ id: instance.id, nodeId: id, name: instance.name, role: instance.role, panelUrl: instance.panelUrl, createdAt: now, updatedAt: now })),
+    db.insert(nodes).values({ id, name, region, tokenHash, provider: 'alidns', domainName, recordV4, recordV6, nyanpassStatus: 'awaiting', provisionGeneration, bootstrapPayloadCiphertext, bootstrapDownloadTokenHash, createdAt: now, updatedAt: now }),
+    ...preparedInstances.map((instance) => db.insert(nyanpassInstances).values({ id: instance.id, nodeId: id, name: instance.name, role: instance.role, panelUrl: instance.panelUrl, status: 'bootstrap', bootstrapGeneration: provisionGeneration, optimize: instance.optimize, createdAt: now, updatedAt: now })),
     db.insert(events).values({ nodeId: id, kind: 'node_created', message: `${user.email} 创建了节点并预配 ${preparedInstances.length} 个 Nyanpass 实例`, createdAt: now }),
   ]);
 
-  const origin = publicOrigin(request);
-  const installCommand = buildNodeStartupScript({ nodeId: id, origin, token, rootPassword, instances: preparedInstances });
   return Response.json({
     node: { id, name, region },
-    token,
-    installCommand,
-    instances: preparedInstances.map((instance) => ({ id: instance.id, nodeId: id, nodeName: name, name: instance.name, role: instance.role, panelUrl: instance.panelUrl })),
-  }, { status: 201 });
+    installUrl,
+    instances: preparedInstances.map((instance) => ({ id: instance.id, nodeId: id, nodeName: name, name: instance.name, role: instance.role, panelUrl: instance.panelUrl, optimize: instance.optimize, status: 'bootstrap', hasCredential: false, lastReportedAt: null, syncError: null, activeTaskId: null, configRevision: 0, taskStatus: null, taskCreatedAt: null, taskClaimedAt: null, taskLeaseExpiresAt: null })),
+  }, { status: 201, headers: { 'Cache-Control': 'no-store' } });
+}
+
+function safeBootstrapEncryptionError(error: unknown) {
+  return error instanceof Error && error.message.includes('PULSEDNS_TASK_ENCRYPTION_KEY')
+    ? error.message
+    : '开机脚本凭据加密失败，请检查主控密钥配置';
 }
 
 export async function PATCH(request: Request) {
@@ -95,8 +123,12 @@ export async function PATCH(request: Request) {
 
   await ensureSchema();
   const db = await getDb();
-  const [current] = await db.select().from(nodes).where(eq(nodes.id, id)).limit(1);
-  if (!current) return Response.json({ error: '节点不存在' }, { status: 404 });
+  const operationId = await acquireNodeOperationLock(db, id);
+  if (operationId === undefined) return Response.json({ error: '节点不存在' }, { status: 404 });
+  if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试修改' }, { status: 409 });
+  try {
+    const [current] = await db.select().from(nodes).where(eq(nodes.id, id)).limit(1);
+    if (!current) return Response.json({ error: '节点不存在' }, { status: 404 });
 
   const now = new Date();
   await db.update(nodes).set({ name, region, domainName, recordV4, recordV6, syncEnabled, updatedAt: now }).where(eq(nodes.id, id));
@@ -116,9 +148,12 @@ export async function PATCH(request: Request) {
     warnings.push('旧的阿里云 DNS 记录不会自动删除，如已不再使用请到阿里云控制台清理');
   }
 
+  // Re-read addresses after publishing the new mapping. A probe report may
+  // have committed a newer IP between the initial read and this update.
+  const [addressState] = await db.select({ ipv4: nodes.ipv4, ipv6: nodes.ipv6 }).from(nodes).where(eq(nodes.id, id)).limit(1);
   const targets = [
-    { type: 'A' as const, record: recordV4, ip: current.ipv4 },
-    { type: 'AAAA' as const, record: recordV6, ip: current.ipv6 },
+    { type: 'A' as const, record: recordV4, ip: addressState?.ipv4 ?? null },
+    { type: 'AAAA' as const, record: recordV6, ip: addressState?.ipv6 ?? null },
   ];
   if (syncEnabled && domainName) {
     for (const target of targets) {
@@ -138,20 +173,55 @@ export async function PATCH(request: Request) {
     }
   }
 
-  return Response.json({
-    node: { ...current, name, region, domainName, recordV4, recordV6, syncEnabled, updatedAt: now },
-    events: returnedEvents,
-    warnings,
-  });
+  const [latestNode] = await db.select().from(nodes).where(eq(nodes.id, id)).limit(1);
+    return Response.json({
+      node: nodeResponse(latestNode ?? { ...current, name, region, domainName, recordV4, recordV6, syncEnabled, updatedAt: now }),
+      events: returnedEvents,
+      warnings,
+    });
+  } finally {
+    await releaseNodeOperationLock(db, id, operationId);
+  }
 }
 
 export async function DELETE(request: Request) {
   const user = await getChatGPTUser();
   if (!user) return Response.json({ error: '需要管理员登录' }, { status: 401 });
-  const id = new URL(request.url).searchParams.get('id');
+  const searchParams = new URL(request.url).searchParams;
+  const id = searchParams.get('id');
   if (!id) return Response.json({ error: '缺少节点 ID' }, { status: 400 });
   await ensureSchema();
   const db = await getDb();
-  await db.delete(nodes).where(eq(nodes.id, id));
-  return Response.json({ status: 'ok' });
+  const operationId = await acquireNodeOperationLock(db, id);
+  if (operationId === undefined) return Response.json({ error: '节点不存在' }, { status: 404 });
+  if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试删除' }, { status: 409 });
+  try {
+    await expireProvisionAttempts(db, new Date(), id);
+    const [node] = await db.select({ nyanpassStatus: nodes.nyanpassStatus, provisionAttemptId: nodes.provisionAttemptId }).from(nodes).where(eq(nodes.id, id)).limit(1);
+    if (!node) return Response.json({ error: '节点不存在' }, { status: 404 });
+    if (isBootstrapLocked(node.nyanpassStatus) && searchParams.get('confirmProvisioning') !== 'checked') {
+      return Response.json({ error: '节点尚未安全完成开机预配；明确确认脚本未执行或安装进程已停止后才能删除' }, { status: 409 });
+    }
+    const [activeTask] = await db.select({ id: agentTasks.id }).from(agentTasks)
+      .where(and(eq(agentTasks.nodeId, id), inArray(agentTasks.status, ['queued', 'running']))).limit(1);
+    if (activeTask) return Response.json({ error: '节点还有排队或执行中的同步任务；请先取消尚未领取的排队，机器开始安装后不能删除节点' }, { status: 409 });
+    const [[uncertainInstance], [uncertainTask]] = await Promise.all([
+      db.select({ id: nyanpassInstances.id }).from(nyanpassInstances)
+        .where(and(eq(nyanpassInstances.nodeId, id), eq(nyanpassInstances.status, 'uncertain'))).limit(1),
+      db.select({ id: agentTasks.id }).from(agentTasks)
+        .where(and(eq(agentTasks.nodeId, id), eq(agentTasks.status, 'uncertain'))).limit(1),
+    ]);
+    if ((node.nyanpassStatus === 'failed' || uncertainInstance || uncertainTask) && searchParams.get('confirmUncertain') !== 'checked') {
+      return Response.json({
+        error: '节点存在结果未知的开机安装或远程任务；请先核查 VPS，明确确认后才能删除登记',
+        requiresUncertainConfirmation: true,
+      }, { status: 409 });
+    }
+    const attemptCondition = node.provisionAttemptId === null ? isNull(nodes.provisionAttemptId) : eq(nodes.provisionAttemptId, node.provisionAttemptId);
+    const deleted = await db.delete(nodes).where(and(eq(nodes.id, id), eq(nodes.nyanpassStatus, node.nyanpassStatus), attemptCondition)).returning({ id: nodes.id });
+    if (!deleted.length) return Response.json({ error: '节点开机安装状态已经变化，请刷新后重试' }, { status: 409 });
+    return Response.json({ status: 'ok' });
+  } finally {
+    await releaseNodeOperationLock(db, id, operationId);
+  }
 }

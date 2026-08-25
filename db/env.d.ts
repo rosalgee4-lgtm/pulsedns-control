@@ -13,5 +13,6 @@ declare namespace Cloudflare {
     PULSEDNS_ADMIN_USER?: string;
     PULSEDNS_ADMIN_PASSWORD?: string;
     PULSEDNS_ADMIN_EMAIL?: string;
+    PULSEDNS_TASK_ENCRYPTION_KEY?: string;
   }
 }

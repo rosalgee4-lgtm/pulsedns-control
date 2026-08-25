@@ -114,6 +114,7 @@ async function callAliDns(credentials: AliDnsCredentials, action: string, parame
     method: 'POST',
     headers,
     body: '',
+    signal: AbortSignal.timeout(20_000),
   });
   const result = await response.json().catch(() => null) as AliDnsResponse | null;
   if (!response.ok || !result || result.Code) {

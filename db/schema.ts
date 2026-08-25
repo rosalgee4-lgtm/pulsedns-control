@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 export const nodes = sqliteTable('nodes', {
@@ -14,12 +15,22 @@ export const nodes = sqliteTable('nodes', {
   ipv6: text('ipv6'),
   agentVersion: text('agent_version'),
   nyanpassStatus: text('nyanpass_status').notNull().default('未安装'),
+  provisionGeneration: integer('provision_generation').notNull().default(0),
+  provisionAttemptId: text('provision_attempt_id'),
+  provisionLeaseExpiresAt: integer('provision_lease_expires_at', { mode: 'timestamp_ms' }),
+  bootstrapPayloadCiphertext: text('bootstrap_payload_ciphertext'),
+  bootstrapDownloadTokenHash: text('bootstrap_download_token_hash'),
+  dnsOperationId: text('dns_operation_id'),
+  dnsOperationExpiresAt: integer('dns_operation_expires_at', { mode: 'timestamp_ms' }),
   lastSeenAt: integer('last_seen_at', { mode: 'timestamp_ms' }),
+  lastTaskPollAt: integer('last_task_poll_at', { mode: 'timestamp_ms' }),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
 }, (table) => [
   uniqueIndex('idx_nodes_token_hash').on(table.tokenHash),
   index('idx_nodes_last_seen_at').on(table.lastSeenAt),
+  index('idx_nodes_provision_lease').on(table.nyanpassStatus, table.provisionLeaseExpiresAt),
+  uniqueIndex('idx_nodes_bootstrap_download_token_hash').on(table.bootstrapDownloadTokenHash),
 ]);
 
 export const events = sqliteTable('events', {
@@ -43,7 +54,13 @@ export const nyanpassInstances = sqliteTable('nyanpass_instances', {
   role: text('role', { enum: ['inbound', 'outbound'] }).notNull().default('outbound'),
   panelUrl: text('panel_url').notNull(),
   wsPort: integer('ws_port'),
-  status: text('status').notNull().default('等待安装'),
+  status: text('status', { enum: ['ready', 'pending', 'running', 'success', 'failed', 'uncertain', 'bootstrap', 'legacy', '等待安装'] }).notNull().default('legacy'),
+  optimize: integer('optimize', { mode: 'boolean' }).notNull().default(false),
+  credentialCiphertext: text('credential_ciphertext'),
+  configRevision: integer('config_revision').notNull().default(0),
+  bootstrapGeneration: integer('bootstrap_generation'),
+  activeTaskId: text('active_task_id'),
+  syncError: text('sync_error'),
   lastReportedAt: integer('last_reported_at', { mode: 'timestamp_ms' }),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
@@ -51,4 +68,28 @@ export const nyanpassInstances = sqliteTable('nyanpass_instances', {
   uniqueIndex('idx_nyanpass_node_name').on(table.nodeId, table.name),
   uniqueIndex('idx_nyanpass_node_ws_port').on(table.nodeId, table.wsPort),
   index('idx_nyanpass_node_status').on(table.nodeId, table.status),
+  index('idx_nyanpass_active_task').on(table.activeTaskId),
+]);
+
+export const agentTasks = sqliteTable('agent_tasks', {
+  id: text('id').primaryKey(),
+  nodeId: text('node_id').notNull().references(() => nodes.id, { onDelete: 'cascade' }),
+  instanceId: text('instance_id').notNull().references(() => nyanpassInstances.id, { onDelete: 'cascade' }),
+  kind: text('kind').notNull().default('nyanpass_apply_v1'),
+  revision: integer('revision').notNull(),
+  status: text('status').notNull().default('queued'),
+  leaseTokenHash: text('lease_token_hash'),
+  leaseExpiresAt: integer('lease_expires_at', { mode: 'timestamp_ms' }),
+  attempts: integer('attempts').notNull().default(0),
+  errorCode: text('error_code'),
+  errorMessage: text('error_message'),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  claimedAt: integer('claimed_at', { mode: 'timestamp_ms' }),
+  finishedAt: integer('finished_at', { mode: 'timestamp_ms' }),
+}, (table) => [
+  uniqueIndex('idx_agent_tasks_instance_revision').on(table.instanceId, table.revision),
+  uniqueIndex('idx_agent_tasks_one_running_per_node').on(table.nodeId).where(sql`${table.status} = 'running'`),
+  index('idx_agent_tasks_node_status_created').on(table.nodeId, table.status, table.createdAt),
+  index('idx_agent_tasks_instance_status').on(table.instanceId, table.status),
 ]);

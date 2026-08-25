@@ -9,10 +9,11 @@ set -euo pipefail
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.7.8"
+VERSION="0.8.0"
 SERVER_URL="${SERVER_URL:-}"
 TOKEN="${TOKEN:-}"
 ROOT_PASSWORD="${ROOT_PASSWORD:-}"
+APPLY_BBR=""
 CHECK_INTERVAL=10
 LOG_FILE="/var/log/ddns-monitor.log"
 CACHE_V4="/tmp/.ddns_last_ipv4"
@@ -22,9 +23,16 @@ INSTALL_PATH="${INSTALL_DIR}/monitor.sh"
 CONFIG_FILE="/etc/ddns-monitor.conf"
 SERVICE_NAME="ddns-monitor"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+TASK_STATE_DIR="/var/lib/ddns-monitor/tasks"
+PROVISION_OUTCOME_DIR="/var/lib/ddns-monitor/provision-outcomes"
 DDNS_CREDENTIALS_VERIFIED=0
+CONFIG_TMP=""
+NYANPASS_TMP=""
+MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.0/public/monitor.sh"
+MONITOR_SHA256="ce9abbe2388ffb172837a80ad8afce2b73a4ba29d79adcc3fccb94d677a89026"
 
 NYANPASS_INSTALL_URL="https://dl.nyafw.com/download/nyanpass-install.sh"
+TASK_LOCK_FILE="/run/ddns-monitor-nyanpass.lock"
 NYANPASS_TIMEOUT=600
 NYANPASS_INPUT=""
 NYANPASS_NAME=""
@@ -71,6 +79,12 @@ ok() { printf "%b[ OK ]%b %s\n" "$green" "$reset" "$*"; }
 warn() { printf "%b[WARN]%b %s\n" "$yellow" "$reset" "$*"; }
 fail() { printf "%b[FAIL]%b %s\n" "$red" "$reset" "$*" >&2; exit 1; }
 
+cleanup_sensitive_temps() {
+    case "${CONFIG_TMP:-}" in /etc/ddns-monitor.conf.*) rm -f -- "$CONFIG_TMP" ;; esac
+    case "${NYANPASS_TMP:-}" in /tmp/nyanpass-install.*.sh) rm -f -- "$NYANPASS_TMP" ;; esac
+}
+trap cleanup_sensitive_temps EXIT
+
 need_root() {
     if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
         fail "请用 sudo/root 运行"
@@ -93,7 +107,9 @@ fix_locale() {
 install_deps() {
     local missing=()
     command -v curl >/dev/null 2>&1 || missing+=("curl")
+    command -v jq >/dev/null 2>&1 || missing+=("jq")
     command -v timeout >/dev/null 2>&1 || missing+=("coreutils")
+    command -v flock >/dev/null 2>&1 || missing+=("util-linux")
 
     [[ ${#missing[@]} -eq 0 ]] && return 0
 
@@ -307,8 +323,10 @@ install_nyanpass_once() {
     [[ "$unattended" == "0" || "$unattended" == "1" ]] || fail "Nyanpass 无人值守标记无效"
 
     installer=$(mktemp /tmp/nyanpass-install.XXXXXX.sh)
-    if ! curl -fLSs "$NYANPASS_INSTALL_URL" -o "$installer"; then
+    NYANPASS_TMP="$installer"
+    if ! curl --proto '=https' --proto-redir '=https' -fLSs "$NYANPASS_INSTALL_URL" -o "$installer"; then
         rm -f "$installer"
+        NYANPASS_TMP=""
         fail "Nyanpass 官方安装器下载失败"
     fi
 
@@ -321,6 +339,7 @@ install_nyanpass_once() {
         read -r -p "确认继续？[y/N]: " answer
         if [[ ! "$answer" =~ ^[Yy]$ ]]; then
             rm -f "$installer"
+            NYANPASS_TMP=""
             warn "已取消"
             return 0
         fi
@@ -339,9 +358,11 @@ install_nyanpass_once() {
         log INFO "Nyanpass ${PARSED_NYANPASS_ROLE}安装完成"
     else
         rm -f "$installer"
+        NYANPASS_TMP=""
         fail "Nyanpass 安装失败或超时"
     fi
     rm -f "$installer"
+    NYANPASS_TMP=""
     PARSED_NYANPASS_ARGS=""
     PARSED_NYANPASS_ROLE=""
     NYANPASS_NAME=""
@@ -451,15 +472,15 @@ validate_ddns_credentials_remote() {
 }
 
 write_ddns_config() {
-    local config_tmp
-    config_tmp=$(mktemp /etc/ddns-monitor.conf.XXXXXX)
+    CONFIG_TMP=$(mktemp /etc/ddns-monitor.conf.XXXXXX)
     {
         printf 'SERVER_URL=%s\n' "$SERVER_URL"
         printf 'TOKEN=%s\n' "$TOKEN"
-    } > "$config_tmp"
-    chown root:root "$config_tmp"
-    chmod 0600 "$config_tmp"
-    mv -f "$config_tmp" "$CONFIG_FILE"
+    } > "$CONFIG_TMP"
+    chown root:root "$CONFIG_TMP"
+    chmod 0600 "$CONFIG_TMP"
+    mv -f "$CONFIG_TMP" "$CONFIG_FILE"
+    CONFIG_TMP=""
 }
 
 write_ddns_service_unit() {
@@ -547,7 +568,7 @@ notify_server() {
         -H "Content-Type: application/json" \
         -H "X-Secret-Token: $TOKEN" \
         -H "Authorization: Bearer $TOKEN" \
-        -d "{\"ip\":\"$ip\",\"type\":\"$type\"}" || true)
+        -d "{\"ip\":\"$ip\",\"type\":\"$type\",\"agentVersion\":\"$VERSION\"}" || true)
 
     if echo "$resp" | grep -q '"status":"ok"'; then
         log INFO "[$type] 主控通知成功 -> $ip"
@@ -574,10 +595,10 @@ install_ddns_service() {
     chmod 0755 "$INSTALL_DIR"
     local install_tmp=""
     install_tmp=$(mktemp "${INSTALL_DIR}/.monitor.sh.XXXXXX")
-    info "正在从主控下载专用 DDNS 探针..."
-    if ! curl --proto '=http,https' --proto-redir '=http,https' -fLSs --max-time 30 "${SERVER_URL%/}/monitor.sh" -o "$install_tmp"; then
+    info "正在从 GitHub HTTPS 发布通道下载并校验 DDNS 探针..."
+    if ! curl --proto '=https' --proto-redir '=https' -fLSs --max-time 30 "$MONITOR_DOWNLOAD_URL" -o "$install_tmp"; then
         rm -f "$install_tmp"
-        fail "从主控下载 DDNS 监控脚本失败"
+        fail "下载 DDNS 监控脚本失败"
     fi
     if ! grep -Fq '# PulseDNS DDNS monitor payload' "$install_tmp"; then
         rm -f "$install_tmp"
@@ -586,6 +607,10 @@ install_ddns_service() {
     if ! bash -n "$install_tmp"; then
         rm -f "$install_tmp"
         fail "DDNS 监控脚本语法校验失败"
+    fi
+    if [[ "$(sha256sum "$install_tmp" | awk '{print $1}')" != "$MONITOR_SHA256" ]]; then
+        rm -f "$install_tmp"
+        fail "DDNS 监控脚本完整性校验失败"
     fi
     chown root:root "$install_tmp"
     chmod 0755 "$install_tmp"
@@ -603,6 +628,14 @@ install_ddns_service() {
     systemctl restart "$SERVICE_NAME"
     verify_ddns_service
     log INFO "DDNS 服务安装完成：systemctl status $SERVICE_NAME"
+}
+
+upgrade_ddns_agent() {
+    need_root
+    [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] || fail "未找到现有 DDNS 探针配置"
+    load_ddns_config
+    install_ddns_service
+    log INFO "探针已升级到 v${VERSION}，现在可以领取 Nyanpass 同步任务"
 }
 
 run_loop() {
@@ -639,8 +672,11 @@ uninstall_ddns() {
     rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
     rm -rf "$INSTALL_DIR"
     rm -f "$CACHE_V4" "$CACHE_V6" "$CONFIG_FILE"
+    rm -rf "$TASK_STATE_DIR"
+    rm -rf "$PROVISION_OUTCOME_DIR"
+    rmdir "$(dirname "$PROVISION_OUTCOME_DIR")" 2>/dev/null || true
     systemctl daemon-reload
-    log INFO "卸载完成；日志、BBR、SSH、Nyanpass 配置不会自动回滚"
+    log INFO "卸载完成；本地任务租约状态已清除，日志、BBR、SSH、Nyanpass 配置不会自动回滚"
 }
 
 confirm_uninstall_ddns() {
@@ -652,6 +688,7 @@ confirm_uninstall_ddns() {
 validate_provision_request() {
     local index=0 name="" optimize="" input=""
     [[ -n "$SERVER_URL" && -n "$TOKEN" ]] || fail "Web 一键安装缺少主控地址或探针令牌"
+    [[ "$APPLY_BBR" == "1" ]] || fail "Web 一键安装必须显式传入原脚本 BBR 参数：--bbr 1"
     [[ ${#ROOT_PASSWORD} -ge 8 && ${#ROOT_PASSWORD} -le 128 ]] || fail "Web 一键安装的 root 密码长度必须为 8-128 个字符"
     [[ "$ROOT_PASSWORD" != *$'\n'* && "$ROOT_PASSWORD" != *$'\r'* ]] || fail "Web 一键安装的 root 密码不能包含换行"
     [[ ${#NYANPASS_BATCH_NAMES[@]} -ge 1 && ${#NYANPASS_BATCH_NAMES[@]} -le 16 ]] || fail "Web 一键安装需要 1-16 个 Nyanpass 实例"
@@ -670,19 +707,56 @@ validate_provision_request() {
     PARSED_NYANPASS_ROLE=""
 }
 
+load_provision_config() {
+    local config_path="$1" metadata="" count="" expected="" index=0 offset=0
+    local -a values=()
+    [[ "$ACTION" == "provision" ]] || fail "--provision-config 只能用于 Web 一键安装"
+    [[ -f "$config_path" && ! -L "$config_path" ]] || fail "Web 一键安装配置文件无效"
+    metadata=$(stat -c '%a:%u' "$config_path" 2>/dev/null || true)
+    [[ "$metadata" == "600:0" ]] || fail "Web 一键安装配置文件必须由 root 持有且权限为 0600"
+    readarray -d '' -t values < "$config_path"
+    rm -f -- "$config_path"
+    [[ ${#values[@]} -ge 5 && "${values[0]}" == "PULSEDNS_PROVISION_V1" ]] || fail "Web 一键安装配置文件格式无效"
+    count="${values[4]}"
+    [[ "$count" =~ ^[1-9][0-9]*$ && "$count" -le 16 ]] || fail "Web 一键安装配置中的实例数量无效"
+    expected=$((5 + count * 3))
+    [[ ${#values[@]} -eq $expected ]] || fail "Web 一键安装配置文件字段不完整"
+    SERVER_URL="${values[1]}"
+    TOKEN="${values[2]}"
+    ROOT_PASSWORD="${values[3]}"
+    NYANPASS_BATCH_NAMES=()
+    NYANPASS_BATCH_OPTIMIZES=()
+    NYANPASS_BATCH_INPUTS=()
+    for ((index = 0; index < count; index++)); do
+        offset=$((5 + index * 3))
+        NYANPASS_BATCH_NAMES+=("${values[$offset]}")
+        NYANPASS_BATCH_OPTIMIZES+=("${values[$((offset + 1))]}")
+        NYANPASS_BATCH_INPUTS+=("${values[$((offset + 2))]}")
+    done
+    values=()
+}
+
 provision_node() {
+    local provision_lock_fd
     need_root
     validate_provision_request
     install_deps
     validate_ddns_credentials_remote
+    # The DDNS service starts its remote-task worker before the bootstrap
+    # Nyanpass batch runs. Hold the same machine-wide lock as that worker so a
+    # queued Web task cannot overlap either the first bootstrap or a manual
+    # retry after a partial failure.
+    exec {provision_lock_fd}>"$TASK_LOCK_FILE"
+    flock "$provision_lock_fd"
     log INFO "开始 Web 一键安装；DDNS 验收通过前不会安装 Nyanpass..."
     fix_locale
     configure_ssh
     install_ddns_service
     install_deps
     install_nyanpass_batch
-    configure_bbr
+    [[ "$APPLY_BBR" == "1" ]] && configure_bbr
     verify_ddns_service
+    exec {provision_lock_fd}>&-
     log INFO "Web 一键安装全部完成"
 }
 
@@ -713,8 +787,9 @@ menu() {
         printf '  4) 配置 root 密码和 SSH\n'
         printf '  5) 配置 BBR + fq\n'
         printf '  6) 仅卸载 DDNS\n'
+        printf '  7) 升级现有探针（启用远程同步）\n'
         printf '  0) 退出\n\n'
-        read -r -p "请选择 [0-6]: " choice
+        read -r -p "请选择 [0-7]: " choice
         case "$choice" in
             1) install_all ;;
             2) install_ddns_service ;;
@@ -722,6 +797,7 @@ menu() {
             4) configure_ssh ;;
             5) configure_bbr ;;
             6) confirm_uninstall_ddns ;;
+            7) upgrade_ddns_agent ;;
             0) return 0 ;;
             *) warn "无效选项" ;;
         esac
@@ -748,6 +824,17 @@ while [[ $# -gt 0 ]]; do
         --root-password)
             [[ $# -ge 2 ]] || fail "--root-password 缺少参数"
             ROOT_PASSWORD="$2"
+            shift 2
+            ;;
+        --bbr)
+            [[ $# -ge 2 ]] || fail "--bbr 缺少参数"
+            [[ "$2" == "1" ]] || fail "原脚本 Web 一键安装的 --bbr 只能为 1"
+            APPLY_BBR="$2"
+            shift 2
+            ;;
+        --provision-config)
+            [[ $# -ge 2 ]] || fail "--provision-config 缺少参数"
+            load_provision_config "$2"
             shift 2
             ;;
         --nyanpass-command|--nyanpass-args)
@@ -788,6 +875,7 @@ case "$ACTION" in
     provision) provision_node ;;
     ddns) install_ddns_service ;;
     nyanpass) install_nyanpass_many ;;
+    agent-upgrade) upgrade_ddns_agent ;;
     ssh) configure_ssh ;;
     bbr) configure_bbr ;;
     uninstall|--uninstall) uninstall_ddns ;;

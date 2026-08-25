@@ -2,9 +2,9 @@
 # PulseDNS Web 主控一键安装与管理脚本
 set -euo pipefail
 
-VERSION="0.7.8"
+VERSION="0.8.0"
 REPOSITORY="rosalgee4-lgtm/pulsedns-control"
-SOURCE_REF="release-v0.7.8"
+SOURCE_REF="release-v0.8.0"
 SOURCE_LOCK_SHA256="1fb15db69bc20c25365426fcad11b15270cf535e94b0c9a320eaa8245227b782"
 SOURCE_OG_SHA256="3e0d82b4901fe73d4bc6a6209275283d39a0cf4084fea6625fba18d0e627de55"
 INSTALL_ROOT="/opt/pulsedns-control"
@@ -12,6 +12,7 @@ RELEASES_DIR="${INSTALL_ROOT}/releases"
 CURRENT_LINK="${INSTALL_ROOT}/current"
 RUNTIME_DIR="${INSTALL_ROOT}/runtime"
 DATA_DIR="/var/lib/pulsedns-control"
+TASK_KEY_FILE="${DATA_DIR}/task-encryption.key"
 ENV_FILE="/etc/pulsedns-control.env"
 PANEL_SERVICE="pulsedns-control"
 LEGACY_CADDY_SERVICE="pulsedns-caddy"
@@ -25,6 +26,9 @@ NEW_RELEASE_DIR=""
 PREVIOUS_RELEASE=""
 TRANSACTION_MODE=""
 TRANSACTION_ACTIVE=0
+TASK_ENCRYPTION_KEY=""
+TASK_KEY_TMP=""
+ENV_TMP=""
 
 blue='\033[1;34m'; green='\033[1;32m'; yellow='\033[1;33m'; red='\033[1;31m'; reset='\033[0m'
 info() { printf "%b[INFO]%b %s\n" "$blue" "$reset" "$*"; }
@@ -45,6 +49,10 @@ cleanup_temp_dir() {
 cleanup_on_exit() {
     local status=$?
     set +e
+    case "${TASK_KEY_TMP:-}" in "${DATA_DIR}/.task-encryption-key."*) rm -f -- "$TASK_KEY_TMP" ;; esac
+    case "${ENV_TMP:-}" in /etc/.pulsedns-control.env.*) rm -f -- "$ENV_TMP" ;; esac
+    TASK_KEY_TMP=""
+    ENV_TMP=""
     cleanup_temp_dir
     if [[ "$TRANSACTION_ACTIVE" -eq 1 ]]; then
         if [[ "$TRANSACTION_MODE" == "install" ]]; then
@@ -337,6 +345,59 @@ prepare_http_endpoint() {
     PANEL_PUBLIC_URL="http://${PANEL_PUBLIC_IP}:${PANEL_PORT}${PANEL_BASE_PATH}"
 }
 
+generate_task_encryption_key() {
+    TASK_ENCRYPTION_KEY=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+    [[ "$TASK_ENCRYPTION_KEY" =~ ^[a-f0-9]{64}$ ]] || fail "远程任务加密密钥生成失败"
+}
+
+persist_task_encryption_key() {
+    local previous_umask=""
+    [[ "$TASK_ENCRYPTION_KEY" =~ ^[a-f0-9]{64}$ ]] || fail "远程任务加密密钥格式无效"
+    install -d -m 0750 "$DATA_DIR"
+    previous_umask=$(umask)
+    umask 077
+    TASK_KEY_TMP=$(mktemp "${DATA_DIR}/.task-encryption-key.XXXXXX")
+    printf '%s\n' "$TASK_ENCRYPTION_KEY" > "$TASK_KEY_TMP"
+    chown root:root "$TASK_KEY_TMP"
+    chmod 0600 "$TASK_KEY_TMP"
+    mv -f "$TASK_KEY_TMP" "$TASK_KEY_FILE"
+    TASK_KEY_TMP=""
+    umask "$previous_umask"
+}
+
+rewrite_env_task_encryption_key() {
+    local previous_umask=""
+    previous_umask=$(umask)
+    umask 077
+    ENV_TMP=$(mktemp /etc/.pulsedns-control.env.XXXXXX)
+    grep -v '^PULSEDNS_TASK_ENCRYPTION_KEY=' "$ENV_FILE" > "$ENV_TMP" || true
+    printf 'PULSEDNS_TASK_ENCRYPTION_KEY=%s\n' "$TASK_ENCRYPTION_KEY" >> "$ENV_TMP"
+    chown root:root "$ENV_TMP"
+    chmod 0600 "$ENV_TMP"
+    mv -f "$ENV_TMP" "$ENV_FILE"
+    ENV_TMP=""
+    umask "$previous_umask"
+}
+
+ensure_task_encryption_key() {
+    local existing="" persisted=""
+    existing=$(sed -n 's/^PULSEDNS_TASK_ENCRYPTION_KEY=//p' "$ENV_FILE" | tail -1)
+    if [[ -f "$TASK_KEY_FILE" && ! -L "$TASK_KEY_FILE" ]]; then
+        IFS= read -r persisted < "$TASK_KEY_FILE" || true
+    fi
+    if [[ "$existing" =~ ^[a-f0-9]{64}$ ]]; then
+        TASK_ENCRYPTION_KEY="$existing"
+    elif [[ "$persisted" =~ ^[a-f0-9]{64}$ ]]; then
+        TASK_ENCRYPTION_KEY="$persisted"
+    else
+        generate_task_encryption_key
+    fi
+    persist_task_encryption_key
+    rewrite_env_task_encryption_key
+    TASK_ENCRYPTION_KEY=""
+    info "Nyanpass 远程同步加密密钥已校验并持久保存"
+}
+
 load_existing_http_config() {
     PANEL_PUBLIC_URL=$(sed -n 's/^PULSEDNS_PUBLIC_URL=//p' "$ENV_FILE" | head -1)
     PANEL_BASE_PATH=$(sed -n 's/^PULSEDNS_BASE_PATH=//p' "$ENV_FILE" | head -1)
@@ -350,6 +411,11 @@ write_panel_config() {
     install -d -m 0750 /etc/pulsedns-control
     previous_umask=$(umask)
     umask 077
+    if [[ -f "$TASK_KEY_FILE" && ! -L "$TASK_KEY_FILE" ]]; then
+        IFS= read -r TASK_ENCRYPTION_KEY < "$TASK_KEY_FILE" || true
+    fi
+    [[ "$TASK_ENCRYPTION_KEY" =~ ^[a-f0-9]{64}$ ]] || generate_task_encryption_key
+    persist_task_encryption_key
     {
         printf 'PULSEDNS_SELF_HOSTED=1\n'
         printf 'PULSEDNS_DB_PATH=%s\n' "${DATA_DIR}/pulsedns.db"
@@ -361,10 +427,11 @@ write_panel_config() {
         printf 'PULSEDNS_ADMIN_PASSWORD=%s\n' "$ADMIN_PASSWORD"
         printf 'ALIBABA_CLOUD_ACCESS_KEY_ID=%s\n' "$ALIYUN_KEY_ID"
         printf 'ALIBABA_CLOUD_ACCESS_KEY_SECRET=%s\n' "$ALIYUN_KEY_SECRET"
+        printf 'PULSEDNS_TASK_ENCRYPTION_KEY=%s\n' "$TASK_ENCRYPTION_KEY"
     } > "$ENV_FILE"
     chmod 0600 "$ENV_FILE"
     umask "$previous_umask"
-    ADMIN_PASSWORD=""; ALIYUN_KEY_SECRET=""
+    ADMIN_PASSWORD=""; ALIYUN_KEY_SECRET=""; TASK_ENCRYPTION_KEY=""
 }
 
 write_services() {
@@ -378,6 +445,10 @@ write_services() {
     install -d -o pulsedns -g pulsedns -m 0750 "$DATA_DIR"
     chown -R pulsedns:pulsedns "$DATA_DIR"
     chmod 0750 "$DATA_DIR"
+    if [[ -f "$TASK_KEY_FILE" && ! -L "$TASK_KEY_FILE" ]]; then
+        chown root:root "$TASK_KEY_FILE"
+        chmod 0600 "$TASK_KEY_FILE"
+    fi
 
     cat > "/etc/systemd/system/${PANEL_SERVICE}.service" <<SERVICE_EOF
 [Unit]
@@ -459,25 +530,26 @@ install_panel() {
     cleanup_temp_dir
     trap - EXIT
     ok "安装完成：${PANEL_PUBLIC_URL}"
-    warn "请只向你自己的来源 IP 放行 TCP ${PANEL_PORT}；HTTP 登录信息不会加密"
+    warn "请只向你自己的来源 IP 放行 TCP ${PANEL_PORT}；HTTP 不会加密登录、探针或 Nyanpass 任务凭据"
 }
 
 update_panel() {
     need_root
     install_dependencies
     acquire_lock
+    trap cleanup_on_exit EXIT
     [[ -f "$ENV_FILE" && -L "$CURRENT_LINK" ]] || fail "未检测到已安装面板"
     PREVIOUS_RELEASE=$(readlink -f "$CURRENT_LINK")
     [[ -d "$PREVIOUS_RELEASE" ]] || fail "当前版本目录不存在，无法安全升级"
     install -d -m 0755 "$INSTALL_ROOT" "$RELEASES_DIR" "$RUNTIME_DIR"
     chmod 0755 "$INSTALL_ROOT" "$RELEASES_DIR" "$RUNTIME_DIR"
     load_existing_http_config
+    ensure_task_encryption_key
     detect_arch
     check_build_resources
     TRANSACTION_MODE="update"
     TRANSACTION_ACTIVE=1
     NEW_RELEASE_DIR=""
-    trap cleanup_on_exit EXIT
     TEMP_DIR=$(mktemp -d /tmp/pulsedns-panel-update.XXXXXX)
     download_node "$TEMP_DIR"
     download_and_build_panel "$TEMP_DIR"
@@ -509,7 +581,7 @@ uninstall_panel() {
     rm -f "$ENV_FILE"
     rm -rf "$INSTALL_ROOT" /etc/pulsedns-control
     systemctl daemon-reload
-    ok "面板程序已卸载；数据库仍保留在 ${DATA_DIR}"
+    ok "面板程序已卸载；数据库与远程任务加密密钥仍保留在 ${DATA_DIR}"
 }
 
 menu() {

@@ -14,9 +14,14 @@ test('HTTP deployments have a synchronous clipboard fallback', () => {
 });
 
 test('copy buttons await the result and expose success or failure', () => {
+  assert.match(dashboard, /节点专属[^。；<]{0,80}下载直链/);
+  assert.match(dashboard, /直链只显示一次/);
+  assert.match(dashboard, /复制[^<]{0,20}下载直链/);
+  assert.match(dashboard, /created\.installUrl/);
+  assert.doesNotMatch(dashboard, /created\.installCommand/);
   assert.match(dashboard, /setCopyFeedback\(await copyText\(command\) \? 'success' : 'error'\)/);
-  assert.match(dashboard, /复制成功，请直接粘贴到云厂商开机脚本/);
-  assert.match(dashboard, /剪贴板内容没有更新/);
+  assert.match(dashboard, /(?:复制成功|下载直链已复制)[\s\S]{0,80}云厂商/);
+  assert.match(dashboard, /剪贴板内容没有更新|手动选中[^。]{0,30}链接复制/);
   assert.doesNotMatch(dashboard, /onClick=\{\(\) => navigator\.clipboard\.writeText/);
 });
 

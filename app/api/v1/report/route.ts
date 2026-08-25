@@ -1,8 +1,9 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { events, nodes } from '@/db/schema';
 import { syncAliDnsRecord } from '@/lib/alidns';
+import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
 import { bearerToken, sha256 } from '@/lib/security';
 import { cleanText, validIPv4, validIPv6 } from '@/lib/validation';
 
@@ -34,8 +35,8 @@ export async function POST(request: Request) {
 
   await ensureSchema();
   const db = await getDb();
-  const [node] = await db.select().from(nodes).where(eq(nodes.tokenHash, await sha256(token))).limit(1);
-  if (!node) return Response.json({ status: 'error', error: '未知探针' }, { status: 401 });
+  const [authenticatedNode] = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.tokenHash, await sha256(token))).limit(1);
+  if (!authenticatedNode) return Response.json({ status: 'error', error: '未知探针' }, { status: 401 });
 
   const body = await request.json().catch(() => null) as ReportBody | null;
   if (!body) return Response.json({ status: 'error', error: 'JSON 请求无效' }, { status: 400 });
@@ -43,54 +44,77 @@ export async function POST(request: Request) {
   const parsed = parseReports(body);
   if ('error' in parsed) return Response.json({ status: 'error', error: parsed.error }, { status: 400 });
 
-  const now = new Date();
-  const failures: string[] = [];
-  const addressUpdates: { ipv4?: string; ipv6?: string } = {};
-  for (const report of parsed.reports) {
-    const previous = report.type === 'A' ? node.ipv4 : node.ipv6;
-    if (previous === report.ip) continue;
+  const operationId = await acquireNodeOperationLock(db, authenticatedNode.id);
+  if (operationId === undefined) return Response.json({ status: 'error', error: '未知探针' }, { status: 401 });
+  if (operationId === null) return Response.json({ status: 'error', error: '节点正在处理其他操作，请稍后重试' }, { status: 409 });
+  try {
+    const [node] = await db.select().from(nodes).where(eq(nodes.id, authenticatedNode.id)).limit(1);
+    if (!node) return Response.json({ status: 'error', error: '未知探针' }, { status: 401 });
+    const now = new Date();
+    const failures: string[] = [];
+    for (const report of parsed.reports) {
+    let snapshot = node;
+    let committed = false;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const previous = report.type === 'A' ? snapshot.ipv4 : snapshot.ipv6;
+      if (previous === report.ip) { committed = true; break; }
+      const recordColumn = report.type === 'A' ? nodes.recordV4 : nodes.recordV6;
+      const record = report.type === 'A' ? snapshot.recordV4 : snapshot.recordV6;
+      let eventKind = 'ip_changed';
+      let eventLevel = 'info';
+      let eventMessage = `${report.type} 地址已变化，未绑定 DNS 记录`;
+      if (snapshot.syncEnabled && snapshot.domainName && record) {
+        const result = await syncAliDnsRecord(snapshot.domainName, record, report.type, report.ip);
+        eventKind = result.ok ? 'dns_synced' : 'dns_failed';
+        eventLevel = result.ok ? 'info' : 'error';
+        eventMessage = result.ok ? `${report.type} 记录 ${record} 已同步` : `${report.type} 同步失败：${result.error}`;
+        if (!result.ok) {
+          failures.push(`${report.type}: ${result.error}`);
+          await db.insert(events).values({ nodeId: node.id, level: eventLevel, kind: eventKind, message: eventMessage, ipType: report.type, ip: report.ip, createdAt: now });
+          break;
+        }
+      }
 
-    const record = report.type === 'A' ? node.recordV4 : node.recordV6;
-    if (!node.syncEnabled || !node.domainName || !record) {
-      await db.insert(events).values({
-        nodeId: node.id,
-        kind: 'ip_changed',
-        message: `${report.type} 地址已变化，未绑定 DNS 记录`,
-        ipType: report.type,
-        ip: report.ip,
-        createdAt: now,
-      });
-      if (report.type === 'A') addressUpdates.ipv4 = report.ip;
-      else addressUpdates.ipv6 = report.ip;
-      continue;
+      // Commit the IP only if the DNS mapping we just used is still current.
+      // If an administrator changed the mapping concurrently, reload it and
+      // synchronize the new target before acknowledging the probe.
+      const mappingStillCurrent = and(
+        eq(nodes.id, node.id),
+        eq(nodes.syncEnabled, snapshot.syncEnabled),
+        snapshot.domainName === null ? isNull(nodes.domainName) : eq(nodes.domainName, snapshot.domainName),
+        record === null ? isNull(recordColumn) : eq(recordColumn, record),
+      );
+      const changed = await db.update(nodes).set({
+        ...(report.type === 'A' ? { ipv4: report.ip } : { ipv6: report.ip }),
+        updatedAt: now,
+      }).where(mappingStillCurrent).returning({ id: nodes.id });
+      if (changed.length) {
+        committed = true;
+        await db.insert(events).values({ nodeId: node.id, level: eventLevel, kind: eventKind, message: eventMessage, ipType: report.type, ip: report.ip, createdAt: now });
+        break;
+      }
+      const [latest] = await db.select().from(nodes).where(eq(nodes.id, node.id)).limit(1);
+      if (!latest) return Response.json({ status: 'error', error: '未知探针' }, { status: 401 });
+      snapshot = latest;
+    }
+    if (!committed && !failures.some((failure) => failure.startsWith(`${report.type}:`))) {
+      failures.push(`${report.type}: DNS 映射正在修改，请稍后重试`);
+    }
     }
 
-    const result = await syncAliDnsRecord(node.domainName, record, report.type, report.ip);
-    if (!result.ok) failures.push(`${report.type}: ${result.error}`);
-    else if (report.type === 'A') addressUpdates.ipv4 = report.ip;
-    else addressUpdates.ipv6 = report.ip;
-    await db.insert(events).values({
-      nodeId: node.id,
-      level: result.ok ? 'info' : 'error',
-      kind: result.ok ? 'dns_synced' : 'dns_failed',
-      message: result.ok ? `${report.type} 记录 ${record} 已同步` : `${report.type} 同步失败：${result.error}`,
-      ipType: report.type,
-      ip: report.ip,
-      createdAt: now,
-    });
-  }
+    await db.update(nodes).set({
+      agentVersion: cleanText(body.agentVersion, 30) || node.agentVersion,
+      lastSeenAt: now,
+      updatedAt: now,
+    }).where(eq(nodes.id, node.id));
 
-  await db.update(nodes).set({
-    ...addressUpdates,
-    agentVersion: cleanText(body.agentVersion, 30) || node.agentVersion,
-    lastSeenAt: now,
-    updatedAt: now,
-  }).where(eq(nodes.id, node.id));
-
-  if (failures.length) {
-    return Response.json({ status: 'error', error: failures.join('；') }, { status: 502 });
+    if (failures.length) {
+      return Response.json({ status: 'error', error: failures.join('；') }, { status: 502 });
+    }
+    return Response.json({ status: 'ok' });
+  } finally {
+    await releaseNodeOperationLock(db, authenticatedNode.id, operationId);
   }
-  return Response.json({ status: 'ok' });
 }
 
 function parseReports(body: ReportBody): { reports: AddressReport[] } | { error: string } {

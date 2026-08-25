@@ -8,6 +8,11 @@ export function newAgentToken() {
   return `pd_${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
+export function newBootstrapDownloadToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return `pbs_${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
 export function bearerToken(header: string | null) {
   if (!header?.startsWith('Bearer ')) return null;
   const token = header.slice(7).trim();

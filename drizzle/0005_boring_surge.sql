@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `idx_agent_tasks_one_running_per_node` ON `agent_tasks` (`node_id`) WHERE "agent_tasks"."status" = 'running';

@@ -1,5 +1,5 @@
 export type ParsedNyanpassCommand =
-  | { ok: true; args: string; panelUrl: string; role: 'inbound' | 'outbound' }
+  | { ok: true; args: string; clientToken: string; panelUrl: string; role: 'inbound' | 'outbound' }
   | { ok: false; error: string };
 
 const officialInstallerUrl = 'https://dl.nyafw.com/download/nyanpass-install.sh';
@@ -18,7 +18,14 @@ export function parseOfficialNyanpassCommand(value: unknown): ParsedNyanpassComm
     return { ok: false, error: '命令格式无效：必须使用官方安装脚本并调用 rel_nodeclient' };
   }
 
-  const tokens = (match[1] ?? match[2] ?? '').trim().split(/[ \t]+/).filter(Boolean);
+  return parseNyanpassArgs(match[1] ?? match[2] ?? '');
+}
+
+export function parseNyanpassArgs(value: unknown): ParsedNyanpassCommand {
+  if (typeof value !== 'string' || !value.trim() || value.length > 1024 || /[\r\n]/.test(value)) {
+    return { ok: false, error: 'rel_nodeclient 参数格式无效' };
+  }
+  const tokens = value.trim().split(/[ \t]+/).filter(Boolean);
   let hasOutboundFlag = false;
   let token = '';
   let urlValue = '';
@@ -54,12 +61,14 @@ export function parseOfficialNyanpassCommand(value: unknown): ParsedNyanpassComm
   return {
     ok: true,
     args: tokens.join(' '),
+    clientToken: token,
     panelUrl,
     role: hasOutboundFlag ? 'outbound' : 'inbound',
   };
 }
 
 function normalizeHttpsUrl(raw: string) {
+  if (!/^https:\/\/[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:\/[A-Za-z0-9._~:/@%+=,-]*)?$/.test(raw)) return null;
   try {
     const url = new URL(raw);
     if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return null;

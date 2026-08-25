@@ -2,24 +2,38 @@ import { NextRequest, NextResponse } from 'next/server';
 
 const PUBLIC_PATHS = new Set([
   '/api/v1/report',
+  '/api/v1/provision',
+  '/api/v1/tasks',
   '/favicon.svg',
+  '/og.png',
+]);
+
+const SELF_HOSTED_SCRIPT_PATHS = new Set([
   '/install.sh',
   '/monitor.sh',
-  '/og.png',
   '/update.sh',
 ]);
 
 export function proxy(request: NextRequest) {
+  if (process.env.PULSEDNS_SELF_HOSTED !== '1') return NextResponse.next();
+
+  const pathname = request.nextUrl.pathname;
+  if (SELF_HOSTED_SCRIPT_PATHS.has(pathname)) {
+    return new Response('Not Found', {
+      status: 404,
+      headers: { 'Cache-Control': 'no-store' },
+    });
+  }
+
+  if (pathname.startsWith('/api/v1/bootstrap/')) return NextResponse.next();
+
   const localUser = process.env.PULSEDNS_ADMIN_USER;
   const localPassword = process.env.PULSEDNS_ADMIN_PASSWORD;
-  if (process.env.PULSEDNS_SELF_HOSTED !== '1' || !localUser || !localPassword) {
-    return NextResponse.next();
-  }
+  if (!localUser || !localPassword) return NextResponse.next();
 
   // Only the configured random base path is protected. Requests to the bare
   // IP:port must remain a plain 404 and must not reveal the login challenge.
   if (!request.nextUrl.basePath) return NextResponse.next();
-  const pathname = request.nextUrl.pathname;
   if (pathname.startsWith('/_next/') || PUBLIC_PATHS.has(pathname)) return NextResponse.next();
 
   const credentials = decodeBasicAuthorization(request.headers.get('authorization'));

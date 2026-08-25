@@ -27,6 +27,8 @@ button { cursor:pointer; }
 .top-actions { display:flex; align-items:center; gap:10px; }
 .sync-state { margin-right:8px; color:#667286; font-size:12px; }
 .sync-state i { display:inline-block; width:7px; height:7px; margin-right:7px; background:#38cb8d; border-radius:50%; }
+.sync-state.error { color:#a83a32; }
+.sync-state.error i { background:#df5d52; }
 .ghost-button,.primary-button { padding:10px 14px; border-radius:9px; font-size:12px; font-weight:650; }
 .ghost-button { color:#344155; background:#fff; border:1px solid #d9dee7; }
 .primary-button { color:#fff; background:#1378ff; border:1px solid #1378ff; box-shadow:0 7px 18px #1678ff28; }
@@ -79,7 +81,9 @@ td small { display:block; margin-top:4px; color:#a0a9b6; font-size:8px; letter-s
 .role-badge.inbound { color:#6750c8; background:#f0edff; }
 .role-badge.outbound { color:#176cae; background:#e8f4ff; }
 code { display:block; color:#45546a; font-family:var(--font-geist-mono),monospace; font-size:9px; line-height:1.8; }
-.badge { padding:4px 8px; border-radius:99px; font-size:9px; font-weight:650; }.badge.online { color:#198960; background:#e9f8f2; }.badge.warning { color:#b97713; background:#fff4db; }
+.badge { padding:4px 8px; border-radius:99px; font-size:9px; font-weight:650; }.badge.online { color:#198960; background:#e9f8f2; }.badge.warning { color:#b97713; background:#fff4db; }.badge.pending { color:#966811; background:#fff3ce; }.badge.running { color:#236fc5; background:#e9f3ff; }.badge.failed { color:#b3483f; background:#ffebe9; }.badge.neutral { color:#667286; background:#eef1f5; }
+.sync-link { padding:0; color:#1477ff; background:none; border:0; font-size:9px; font-weight:750; white-space:nowrap; }.sync-link:hover { color:#075dbf; text-decoration:underline; }.sync-link:disabled { color:#9ba5b4; cursor:wait; text-decoration:none; }.sync-error { max-width:220px; color:#b3483f; line-height:1.45; letter-spacing:0; }.nyanpass-actions { flex-wrap:wrap; min-width:150px; }
+.transport-warning { margin:0 0 14px; padding:12px 14px; border:1px solid #f5c2c0; border-radius:12px; background:#fff4f3; color:#8f1d18; font-size:13px; line-height:1.55; }
 .live { padding:3px 6px; color:#21a570; background:#e9f9f2; border-radius:5px; font-size:8px; font-weight:800; letter-spacing:.08em; }
 .activity-list { padding:5px 20px; }
 .activity-heading-actions { display:flex; align-items:center; gap:9px; }
@@ -106,7 +110,7 @@ code { display:block; color:#45546a; font-family:var(--font-geist-mono),monospac
 .muted-value { color:#a0a9b6; font-size:10px; }
 .compact-empty { min-height:220px; }
 @media(max-width:1050px){.metrics{grid-template-columns:repeat(2,1fr)}.grid-layout{grid-template-columns:1fr}.pulse-orbit{display:none}}
-@media(max-width:760px){.app-shell{grid-template-columns:1fr}.sidebar{position:static;width:100%;height:auto;padding:16px}.sidebar nav{flex-direction:row;overflow:auto}.brand{padding:0 8px 14px}.sidebar-foot{display:none}.nav-item{flex:0 0 auto;white-space:nowrap}.topbar{align-items:flex-start}.sync-state,.ghost-button{display:none}.metrics{grid-template-columns:1fr 1fr}.hero-panel{padding:28px}.content{padding-inline:16px}.topbar{padding-inline:18px}.activity-page .activity-toolbar{grid-template-columns:repeat(2,minmax(0,1fr))}.activity-page .activity-search{grid-column:1/-1}}
+@media(max-width:760px){.app-shell{grid-template-columns:1fr}.sidebar{position:static;width:100%;height:auto;padding:16px}.sidebar nav{flex-direction:row;overflow:auto}.brand{padding:0 8px 14px}.sidebar-foot{display:none}.nav-item{flex:0 0 auto;white-space:nowrap}.topbar{align-items:flex-start}.sync-state{display:none}.metrics{grid-template-columns:1fr 1fr}.hero-panel{padding:28px}.content{padding-inline:16px}.topbar{padding-inline:18px}.activity-page .activity-toolbar{grid-template-columns:repeat(2,minmax(0,1fr))}.activity-page .activity-search{grid-column:1/-1}}
 @media(max-width:520px){.metrics{grid-template-columns:1fr}.top-actions .primary-button{padding:9px}.hero-panel h2{font-size:25px}td,th{padding-inline:12px}.activity-toolbar,.activity-page .activity-toolbar{grid-template-columns:1fr}.activity-search,.activity-page .activity-search{grid-column:auto}.row-actions{flex-direction:column;align-items:flex-start;gap:6px}}
 .user-chip { display:grid; place-items:center; width:34px; height:34px; color:#2267b8; background:#eaf3ff; border:1px solid #d4e6fc; border-radius:50%; font-size:12px; font-weight:800; }
 .empty-state { min-height:270px; padding:44px 24px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; }

@@ -29,6 +29,34 @@
       "when": 1787321643616,
       "tag": "0003_warm_mathemanic",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1787654325735,
+      "tag": "0004_chubby_cannonball",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1787655809338,
+      "tag": "0005_boring_surge",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1787660000000,
+      "tag": "0006_bootstrap_attempts",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1787668145471,
+      "tag": "0007_sour_quasimodo",
+      "breakpoints": true
     }
   ]
 }
