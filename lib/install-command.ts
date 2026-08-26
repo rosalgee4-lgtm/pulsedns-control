@@ -13,9 +13,10 @@ type NodeProvisionCommandInput = {
   instances: ProvisionedNyanpassInstance[];
 };
 
-export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.0/public/install.sh';
-export const PROBE_INSTALLER_SHA256 = 'b0a2acbf9ac54e3c2488563bd74b1a4baddd82584951416029ca3c3d5774e402';
-export const MAX_NODE_STARTUP_SCRIPT_BYTES = 15 * 1024;
+export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.1/public/install.sh';
+export const PROBE_INSTALLER_SHA256 = '092e281a8c3bad87ee0919be78e86efd4867932bb05ddeb6b1526d2c028b80e5';
+export const MAX_CLOUD_LAUNCHER_BYTES = 15 * 1024;
+export const MAX_BOOTSTRAP_RESPONSE_BYTES = 64 * 1024;
 
 export function buildNodeStartupScript({ nodeId, generation, origin, token, rootPassword, instances }: NodeProvisionCommandInput) {
   const instanceConfigWrites = instances
@@ -111,7 +112,7 @@ report_provision_message() {
   response=$(curl -sS --connect-timeout 5 --max-time 20 -X POST \
     "$server_url/api/v1/provision" \
     -H 'Content-Type: application/json' \
-    -H 'X-Agent-Version: 0.8.0' \
+    -H 'X-Agent-Version: 0.8.1' \
     -H "X-Secret-Token: $token" \
     -d "$body" 2>/dev/null || true)
   printf '%s' "$response" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' || return 1

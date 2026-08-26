@@ -1,9 +1,9 @@
 @import 'tailwindcss';
 
-:root { --ink:#0b1324; --muted:#748096; --line:#e6eaf0; --surface:#fff; --canvas:#f4f7fb; --accent:#1477ff; }
+:root { --ink:#0b1324; --muted:#748096; --line:#e6eaf0; --surface:#fff; --canvas:#f4f7fb; --accent:#1477ff; --font-geist-sans:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,"Helvetica Neue",Arial,sans-serif; --font-geist-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace; }
 * { box-sizing:border-box; }
 html { background:var(--canvas); scroll-behavior:smooth; }
-body { margin:0; color:var(--ink); background:var(--canvas); font-family:var(--font-geist-sans),"PingFang SC","Microsoft YaHei",sans-serif; }
+body { margin:0; color:var(--ink); background:var(--canvas); font-family:var(--font-geist-sans); }
 button,a { font:inherit; }
 button { cursor:pointer; }
 .app-shell { min-height:100vh; display:grid; grid-template-columns:230px minmax(0,1fr); }

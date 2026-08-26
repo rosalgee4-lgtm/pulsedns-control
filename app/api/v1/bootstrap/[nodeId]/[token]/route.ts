@@ -3,7 +3,7 @@ import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { nodes } from '@/db/schema';
 import { decryptBootstrapPayload } from '@/lib/bootstrap-payload';
-import { buildNodeStartupScript, MAX_NODE_STARTUP_SCRIPT_BYTES } from '@/lib/install-command';
+import { buildNodeStartupScript, MAX_BOOTSTRAP_RESPONSE_BYTES } from '@/lib/install-command';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
 import { publicOrigin } from '@/lib/public-origin';
 import { sha256 } from '@/lib/security';
@@ -62,8 +62,8 @@ export async function GET(
       rootPassword: payload.rootPassword,
       instances: payload.instances,
     });
-    if (new TextEncoder().encode(script).byteLength > MAX_NODE_STARTUP_SCRIPT_BYTES) {
-      return new Response('脚本超过云厂商 user-data 安全上限，请联系管理员更新配置。\n', { status: 409, headers: noStoreHeaders });
+    if (new TextEncoder().encode(script).byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES) {
+      return new Response('完整安装脚本超过 64 KiB 服务端安全上限，请联系管理员更新配置。\n', { status: 409, headers: noStoreHeaders });
     }
     return new Response(script, {
       headers: {

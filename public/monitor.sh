@@ -6,11 +6,12 @@ set -euo pipefail
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.8.0"
+VERSION="0.8.1"
 CHECK_INTERVAL=10
 LOG_FILE="/var/log/ddns-monitor.log"
 CACHE_V4="/tmp/.ddns_last_ipv4"
 CACHE_V6="/tmp/.ddns_last_ipv6"
+REPORT_ACCEPTED_MARK="/run/ddns-monitor-report-accepted"
 CONFIG_FILE="/etc/ddns-monitor.conf"
 TASK_STATE_DIR="/var/lib/ddns-monitor/tasks"
 TASK_LOCK_FILE="/run/ddns-monitor-nyanpass.lock"
@@ -107,11 +108,71 @@ load_config() {
     SERVER_URL="${SERVER_URL%/}"
 }
 
+trim_space() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
+valid_ipv4() {
+    local ip="$1" part=""
+    local -a parts=()
+    [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    IFS='.' read -r -a parts <<< "$ip"
+    [[ ${#parts[@]} -eq 4 ]] || return 1
+    for part in "${parts[@]}"; do
+        [[ "$part" =~ ^(0|[1-9][0-9]{0,2})$ ]] || return 1
+        ((10#$part <= 255)) || return 1
+    done
+}
+
+valid_ipv6() {
+    local ip="$1" left="" right="" ipv4_tail="" part="" count=0
+    local -a parts=()
+    [[ ${#ip} -ge 2 && ${#ip} -le 45 && "$ip" == *:* && "$ip" != *%* ]] || return 1
+    [[ "$ip" =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
+    if [[ "$ip" == *.* ]]; then
+        ipv4_tail="${ip##*:}"
+        valid_ipv4 "$ipv4_tail" || return 1
+        ip="${ip%:*}:0:0"
+    fi
+    [[ "$ip" != *:::* ]] || return 1
+    if [[ "$ip" == *::* ]]; then
+        left="${ip%%::*}"
+        right="${ip#*::}"
+        [[ "$right" != *::* ]] || return 1
+        if [[ -n "$left" ]]; then
+            IFS=':' read -r -a parts <<< "$left"
+            for part in "${parts[@]}"; do
+                [[ "$part" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+                count=$((count + 1))
+            done
+        fi
+        if [[ -n "$right" ]]; then
+            IFS=':' read -r -a parts <<< "$right"
+            for part in "${parts[@]}"; do
+                [[ "$part" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+                count=$((count + 1))
+            done
+        fi
+        ((count < 8))
+        return
+    fi
+    [[ "$ip" != :* && "$ip" != *: ]] || return 1
+    IFS=':' read -r -a parts <<< "$ip"
+    [[ ${#parts[@]} -eq 8 ]] || return 1
+    for part in "${parts[@]}"; do
+        [[ "$part" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+    done
+}
+
 get_ipv4() {
     local ip="" url=""
     for url in "${IPV4_SERVICES[@]}"; do
-        ip=$(curl -4 -s --max-time 5 --retry 2 "$url" 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1 || true)
-        [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && echo "$ip" && return 0
+        ip=$(curl -4 -s --max-time 5 --retry 2 "$url" 2>/dev/null || true)
+        ip=$(trim_space "$ip")
+        valid_ipv4 "$ip" && echo "$ip" && return 0
     done
     echo ""
 }
@@ -119,8 +180,9 @@ get_ipv4() {
 get_ipv6() {
     local ip="" url=""
     for url in "${IPV6_SERVICES[@]}"; do
-        ip=$(curl -6 -s --max-time 5 --retry 2 "$url" 2>/dev/null | grep -oE '([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}' | head -1 || true)
-        [[ -n "$ip" ]] && echo "$ip" && return 0
+        ip=$(curl -6 -s --max-time 5 --retry 2 "$url" 2>/dev/null || true)
+        ip=$(trim_space "$ip")
+        valid_ipv6 "$ip" && echo "$ip" && return 0
     done
     echo ""
 }
@@ -131,9 +193,15 @@ notify_server() {
         -H "Content-Type: application/json" \
         -H "X-Secret-Token: $TOKEN" \
         -d "{\"ip\":\"$ip\",\"type\":\"$type\",\"agentVersion\":\"$VERSION\"}" || true)
-    if echo "$resp" | grep -q '"status":"ok"'; then
+    if printf '%s' "$resp" | jq -e 'type == "object" and .status == "ok"' >/dev/null 2>&1; then
+        : > "$REPORT_ACCEPTED_MARK"
         log INFO "[$type] 主控通知成功 -> $ip"
         return 0
+    fi
+    if printf '%s' "$resp" | jq -e 'type == "object" and .reportAccepted == true' >/dev/null 2>&1; then
+        : > "$REPORT_ACCEPTED_MARK"
+        log ERROR "[$type] 主控已认证本次上报，但 DNS 同步失败，稍后将重试"
+        return 1
     fi
     log ERROR "[$type] 主控通知失败"
     return 1

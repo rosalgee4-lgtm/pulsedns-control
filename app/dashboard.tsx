@@ -475,7 +475,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
             onClick={() => setActiveView(item.id)}
           ><span aria-hidden="true">{item.icon}</span>{item.label}</a>)}
         </nav>
-        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.8.0 · {nodes.length} 个探针</small></div>
+        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.8.1 · {nodes.length} 个探针</small></div>
       </aside>
 
       <section className="workspace" inert={hasModal}>
@@ -542,7 +542,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
                 <label>官方安装命令<textarea required rows={3} autoComplete="off" spellCheck={false} value={instance.command} onChange={(event) => updateNodeNyanpass(index, 'command', event.target.value)} placeholder={'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t … -u https://…"'} /></label>
                 <label className="nyanpass-check"><input type="checkbox" checked={instance.optimize} onChange={(event) => updateNodeNyanpass(index, 'optimize', event.target.checked)} />启用原脚本 OPTIMIZE=1</label>
               </div>)}<button type="button" className="ghost-button" disabled={nodeNyanpass.length >= 16} onClick={() => setNodeNyanpass((current) => [...current, emptyNyanpassDraft()])}>＋ 添加另一个实例</button></fieldset>
-              <p className="form-hint">命令中的独立 -o 表示出口，没有 -o 表示入口。原始凭据仅以密文暂存；页面不会返回完整脚本，只返回一个节点专属下载直链。直链本身就是 Bearer 凭据，请勿公开或转发。动态脚本仍受 15 KiB 安全上限约束，实例过多时请先减少，节点上线后再远程添加。</p>
+              <p className="form-hint">命令中的独立 -o 表示出口，没有 -o 表示入口。原始凭据仅以密文暂存；页面不会返回完整脚本，只返回一个节点专属下载直链。直链本身就是 Bearer 凭据，请勿公开或转发。可复制的开机启动器受 15 KiB user-data 上限约束，下载后的完整安装脚本另受 64 KiB 服务端上限保护。</p>
               {error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '创建中…' : '创建节点并生成下载直链'}</button>
             </form></>
           : <>

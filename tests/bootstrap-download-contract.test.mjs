@@ -53,7 +53,7 @@ test('bootstrap GET authenticates the link, serializes generation, and renders t
   const renderAt = downloadRoute.indexOf('buildNodeStartupScript({');
   assert.ok(decryptAt >= 0 && renderAt > decryptAt, 'the latest startup builder must render a validated encrypted payload');
   assert.match(downloadRoute.slice(renderAt), /generation: node\.generation[\s\S]*token: payload\.agentToken[\s\S]*rootPassword: payload\.rootPassword[\s\S]*instances: payload\.instances/);
-  assert.match(downloadRoute, /TextEncoder\(\)\.encode\(script\)\.byteLength > MAX_NODE_STARTUP_SCRIPT_BYTES/);
+  assert.match(downloadRoute, /TextEncoder\(\)\.encode\(script\)\.byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES/);
 
   assert.match(downloadRoute, /'Cache-Control': 'no-store, private, max-age=0'/);
   assert.match(downloadRoute, /Pragma: 'no-cache'/);

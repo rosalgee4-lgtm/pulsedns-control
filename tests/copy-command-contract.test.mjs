@@ -36,7 +36,14 @@ test('generated cloud startup launcher follows the proven wget chmod bash sequen
     '11111111-2222-4333-8444-555555555555',
     'http://203.0.113.9:39900/0123456789abcdef0123456789abcdef/api/v1/bootstrap/11111111-2222-4333-8444-555555555555/pbs_abc123',
   );
-  assert.equal(launcher, "#!/bin/bash\numask 077\nwget -O '/root/pulsedns_11111111-2222-4333-8444-555555555555_install.sh' 'http://203.0.113.9:39900/0123456789abcdef0123456789abcdef/api/v1/bootstrap/11111111-2222-4333-8444-555555555555/pbs_abc123' && chmod +x '/root/pulsedns_11111111-2222-4333-8444-555555555555_install.sh' && bash '/root/pulsedns_11111111-2222-4333-8444-555555555555_install.sh'");
+  assert.match(launcher, /^#!\/bin\/bash\numask 077\n/);
+  assert.match(launcher, /pulsedns-bootstrap-launcher\.log/);
+  assert.match(launcher, /command -v wget/);
+  assert.match(launcher, /apt-get[\s\S]*dnf[\s\S]*yum[\s\S]*apk/);
+  assert.match(launcher, /wget ca-certificates/);
+  assert.doesNotMatch(launcher, /\bcurl\b/);
+  assert.match(launcher, /wget -O '([^']+)' '[^']+' && chmod \+x '\1' && bash '\1'$/);
+  assert.ok(Buffer.byteLength(launcher) < 15 * 1024);
   const bash = process.env.BASH_EXE || 'bash';
   const result = spawnSync(bash, ['-n'], { input: launcher, encoding: 'utf8' });
   if (result.error) context.skip(`Bash unavailable: ${result.error.message}`);

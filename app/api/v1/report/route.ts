@@ -109,7 +109,7 @@ export async function POST(request: Request) {
     }).where(eq(nodes.id, node.id));
 
     if (failures.length) {
-      return Response.json({ status: 'error', error: failures.join('；') }, { status: 502 });
+      return Response.json({ status: 'error', reportAccepted: true, error: failures.join('；') }, { status: 502 });
     }
     return Response.json({ status: 'ok' });
   } finally {

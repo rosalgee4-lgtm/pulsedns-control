@@ -15,9 +15,11 @@ function body(name) {
 
 test('DDNS installation clears stale IP state and verifies the service', () => {
   const install = body('install_ddns_service');
-  assert.ok(install.indexOf('systemctl stop "$SERVICE_NAME"') < install.indexOf('rm -f "$CACHE_V4" "$CACHE_V6"'));
-  assert.ok(install.indexOf('rm -f "$CACHE_V4" "$CACHE_V6"') < install.indexOf('systemctl restart "$SERVICE_NAME"'));
+  assert.ok(install.indexOf('systemctl stop "$SERVICE_NAME"') < install.indexOf('rm -f "$CACHE_V4" "$CACHE_V6" "$REPORT_ACCEPTED_MARK"'));
+  assert.ok(install.indexOf('rm -f "$CACHE_V4" "$CACHE_V6" "$REPORT_ACCEPTED_MARK"') < install.indexOf('systemctl restart "$SERVICE_NAME"'));
   assert.ok(install.indexOf('systemctl restart "$SERVICE_NAME"') < install.indexOf('verify_ddns_service'));
+  assert.match(install, /for download_attempt in 1 2 3 4 5/);
+  assert.match(install, /连续 5 次下载/);
 });
 
 test('DDNS verification checks artifacts, enablement, and sustained activity', () => {
@@ -31,9 +33,23 @@ test('DDNS verification checks artifacts, enablement, and sustained activity', (
     'for attempt in 1 2 3',
     'systemctl is-active --quiet "$SERVICE_NAME"',
   ]) assert.equal(verify.includes(required), true, `missing verification: ${required}`);
-  assert.match(verify, /for attempt in \{1\.\.30\}/);
+  assert.match(verify, /for attempt in \{1\.\.90\}/);
   assert.match(verify, /-s "\$CACHE_V4" \|\| -s "\$CACHE_V6"/);
+  assert.match(verify, /-f "\$REPORT_ACCEPTED_MARK"/);
   assert.match(verify, /主控已接受首次地址上报/);
+});
+
+test('SSH changes are validated, effective, atomic, and reversible', () => {
+  const ssh = body('configure_ssh');
+  assert.doesNotMatch(source, /rm\s+-rf\s+\/etc\/ssh\/sshd_config\.d/);
+  assert.match(ssh, /BEGIN PulseDNS managed SSH options/);
+  assert.match(ssh, /awk -v begin=/);
+  assert.match(ssh, /"\$sshd_bin" -t -f "\$candidate_config"/);
+  assert.match(ssh, /"\$sshd_bin" -T -f "\$candidate_config" -C user=root/);
+  assert.match(ssh, /cp -a -- "\$backup_config" "\$rollback_config"/);
+  assert.match(ssh, /systemctl reload "\$ssh_service"/);
+  assert.ok(ssh.indexOf('"$sshd_bin" -t -f') < ssh.indexOf('mv -f -- "$candidate_config" "$sshd_config"'));
+  assert.ok(ssh.indexOf('mv -f -- "$candidate_config" "$sshd_config"') < ssh.indexOf("printf 'root:%s\\n' \"$root_password\" | chpasswd"));
 });
 
 test('installer validates the token with the master before changing the VPS', () => {
@@ -118,6 +134,9 @@ test('panel installer uses immutable source and README verifies the downloaded e
 
   const panelHash = createHash('sha256').update(panelSource).digest('hex');
   assert.equal(readme.includes(panelHash), true, 'README panel command must pin the entrypoint digest');
-  assert.match(readme, /panel-install\.sh\?v=0\.8\.0[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" install/);
-  assert.match(readme, /panel-install\.sh\?v=0\.8\.0[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" update/);
+  assert.match(panelSource, /lib\/startup-launcher\.ts/);
+  assert.match(panelSource, /startupScript/);
+  assert.match(panelSource, /next\/font\/google/);
+  assert.match(readme, /panel-install\.sh\?v=0\.8\.1[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" install/);
+  assert.match(readme, /panel-install\.sh\?v=0\.8\.1[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" update/);
 });

@@ -188,7 +188,7 @@ test('self-hosted panels do not serve root shell payloads', () => {
 
 test('README uses the pinned HTTPS installer and never recommends an HTTP master script', () => {
   const installerDigest = createHash('sha256').update(installScript).digest('hex');
-  assert.match(readme, /curl --proto '=https' --proto-redir '=https'[\s\S]*raw\.githubusercontent\.com\/rosalgee4-lgtm\/pulsedns-control\/release-v0\.8\.0\/public\/install\.sh/);
+  assert.match(readme, /curl --proto '=https' --proto-redir '=https'[\s\S]*raw\.githubusercontent\.com\/rosalgee4-lgtm\/pulsedns-control\/release-v0\.8\.1\/public\/install\.sh/);
   assert.ok(readme.includes(installerDigest));
   assert.doesNotMatch(readme, /curl[^\n]*http:\/\/[^\n]*(?:install|monitor|update)\.sh/);
 });

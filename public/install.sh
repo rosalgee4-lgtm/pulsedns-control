@@ -9,7 +9,7 @@ set -euo pipefail
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.8.0"
+VERSION="0.8.1"
 SERVER_URL="${SERVER_URL:-}"
 TOKEN="${TOKEN:-}"
 ROOT_PASSWORD="${ROOT_PASSWORD:-}"
@@ -18,6 +18,7 @@ CHECK_INTERVAL=10
 LOG_FILE="/var/log/ddns-monitor.log"
 CACHE_V4="/tmp/.ddns_last_ipv4"
 CACHE_V6="/tmp/.ddns_last_ipv6"
+REPORT_ACCEPTED_MARK="/run/ddns-monitor-report-accepted"
 INSTALL_DIR="/opt/ddns-monitor"
 INSTALL_PATH="${INSTALL_DIR}/monitor.sh"
 CONFIG_FILE="/etc/ddns-monitor.conf"
@@ -28,8 +29,8 @@ PROVISION_OUTCOME_DIR="/var/lib/ddns-monitor/provision-outcomes"
 DDNS_CREDENTIALS_VERIFIED=0
 CONFIG_TMP=""
 NYANPASS_TMP=""
-MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.0/public/monitor.sh"
-MONITOR_SHA256="ce9abbe2388ffb172837a80ad8afce2b73a4ba29d79adcc3fccb94d677a89026"
+MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.1/public/monitor.sh"
+MONITOR_SHA256="28c9c07f1d297c778b8cc961d1a013318806bfd0f18029317a4b0acebb766443"
 
 NYANPASS_INSTALL_URL="https://dl.nyafw.com/download/nyanpass-install.sh"
 TASK_LOCK_FILE="/run/ddns-monitor-nyanpass.lock"
@@ -177,7 +178,13 @@ SYSCTL_EOF
 
 configure_ssh() {
     need_root
-    local root_password="$ROOT_PASSWORD" root_password_confirm="" sshd_config="/etc/ssh/sshd_config"
+    local root_password="$ROOT_PASSWORD" root_password_confirm=""
+    local sshd_config="/etc/ssh/sshd_config"
+    local managed_begin="# BEGIN PulseDNS managed SSH options"
+    local managed_end="# END PulseDNS managed SSH options"
+    local sshd_bin="" ssh_service="" service_candidate=""
+    local candidate_config="" backup_config="" rollback_config="" effective_config=""
+    local begin_count=0 end_count=0
 
     log INFO "配置 SSH root 登录和密码登录..."
     if [[ -n "$root_password" ]]; then
@@ -194,33 +201,108 @@ configure_ssh() {
         elif [[ "$root_password" != "$root_password_confirm" ]]; then
             warn "两次输入的密码不一致，请重试"
             root_password=""
+        elif [[ ${#root_password} -lt 8 || ${#root_password} -gt 128 ]]; then
+            warn "root 密码长度必须为 8-128 个字符"
+            root_password=""
+        elif [[ "$root_password" == *$'\n'* || "$root_password" == *$'\r'* ]]; then
+            warn "root 密码不能包含换行"
+            root_password=""
         fi
     done
 
-    if printf 'root:%s\n' "$root_password" | chpasswd 2>/dev/null; then
-        log INFO "root 密码设置完成"
-    else
-        fail "root 密码设置失败"
+    [[ -f "$sshd_config" && ! -L "$sshd_config" ]] || fail "未找到安全的 $sshd_config，拒绝只修改 root 密码"
+    sshd_bin=$(command -v sshd 2>/dev/null || true)
+    if [[ -z "$sshd_bin" || ! -x "$sshd_bin" ]]; then
+        if [[ -x /usr/sbin/sshd ]]; then
+            sshd_bin=/usr/sbin/sshd
+        else
+            fail "未找到 sshd，无法安全验证 SSH 配置"
+        fi
     fi
+    for service_candidate in sshd.service ssh.service; do
+        if systemctl cat "$service_candidate" >/dev/null 2>&1; then
+            ssh_service="$service_candidate"
+            break
+        fi
+    done
+    [[ -n "$ssh_service" ]] || fail "未找到 sshd.service 或 ssh.service"
+
+    begin_count=$(grep -Fxc -- "$managed_begin" "$sshd_config" || true)
+    end_count=$(grep -Fxc -- "$managed_end" "$sshd_config" || true)
+    [[ "$begin_count" -eq "$end_count" && "$begin_count" -le 1 ]] || fail "检测到损坏或重复的 PulseDNS SSH 受管块，请先人工检查"
+
+    candidate_config=$(mktemp "${sshd_config}.pulsedns.XXXXXX") || fail "无法创建 SSH 候选配置"
+    backup_config=$(mktemp "${sshd_config}.pulsedns.bak.XXXXXX") || {
+        rm -f -- "$candidate_config"
+        fail "无法创建 SSH 配置备份"
+    }
+    if ! cp -a -- "$sshd_config" "$backup_config" || ! cp -a -- "$sshd_config" "$candidate_config"; then
+        rm -f -- "$candidate_config" "$backup_config"
+        fail "无法备份 SSH 配置"
+    fi
+    if ! {
+        printf '%s\nPermitRootLogin yes\nPasswordAuthentication yes\n%s\n\n' "$managed_begin" "$managed_end"
+        awk -v begin="$managed_begin" -v end="$managed_end" '
+            $0 == begin { managed=1; next }
+            $0 == end { managed=0; next }
+            !managed { print }
+        ' "$sshd_config"
+    } > "$candidate_config"; then
+        rm -f -- "$candidate_config"
+        fail "生成 SSH 候选配置失败；原配置未变（备份：$backup_config）"
+    fi
+
+    if ! "$sshd_bin" -t -f "$candidate_config"; then
+        rm -f -- "$candidate_config"
+        fail "SSH 候选配置语法检查失败；原配置未变（备份：$backup_config）"
+    fi
+    if ! effective_config=$("$sshd_bin" -T -f "$candidate_config" -C user=root,host=localhost,addr=127.0.0.1 2>&1); then
+        rm -f -- "$candidate_config"
+        fail "SSH 候选配置有效值检查失败：$effective_config（备份：$backup_config）"
+    fi
+    if ! printf '%s\n' "$effective_config" | grep -Eq '^permitrootlogin[[:space:]]+yes$'; then
+        rm -f -- "$candidate_config"
+        fail "PermitRootLogin 有效值不是 yes（备份：$backup_config）"
+    fi
+    if ! printf '%s\n' "$effective_config" | grep -Eq '^passwordauthentication[[:space:]]+yes$'; then
+        rm -f -- "$candidate_config"
+        fail "PasswordAuthentication 有效值不是 yes（备份：$backup_config）"
+    fi
+    effective_config=""
+
+    if ! mv -f -- "$candidate_config" "$sshd_config"; then
+        rm -f -- "$candidate_config"
+        fail "原子写入 SSH 配置失败；原配置未变（备份：$backup_config）"
+    fi
+    candidate_config=""
+    command -v restorecon >/dev/null 2>&1 && restorecon -F "$sshd_config" >/dev/null 2>&1 || true
+
+    if ! systemctl reload "$ssh_service" >/dev/null 2>&1 && ! systemctl restart "$ssh_service" >/dev/null 2>&1; then
+        rollback_config=$(mktemp "${sshd_config}.rollback.XXXXXX") || fail "SSH 加载失败且无法创建回滚文件；备份：$backup_config"
+        if cp -a -- "$backup_config" "$rollback_config" && mv -f -- "$rollback_config" "$sshd_config"; then
+            rollback_config=""
+            command -v restorecon >/dev/null 2>&1 && restorecon -F "$sshd_config" >/dev/null 2>&1 || true
+            systemctl reload "$ssh_service" >/dev/null 2>&1 || systemctl restart "$ssh_service" >/dev/null 2>&1 || log ERROR "原 SSH 配置已恢复，但服务恢复加载失败"
+        fi
+        rm -f -- "$rollback_config"
+        fail "SSH 新配置加载失败，已尝试恢复原配置（备份：$backup_config）"
+    fi
+
+    if ! printf 'root:%s\n' "$root_password" | chpasswd 2>/dev/null; then
+        rollback_config=$(mktemp "${sshd_config}.rollback.XXXXXX") || fail "root 密码设置失败且无法创建回滚文件；备份：$backup_config"
+        if cp -a -- "$backup_config" "$rollback_config" && mv -f -- "$rollback_config" "$sshd_config"; then
+            rollback_config=""
+            command -v restorecon >/dev/null 2>&1 && restorecon -F "$sshd_config" >/dev/null 2>&1 || true
+            systemctl reload "$ssh_service" >/dev/null 2>&1 || systemctl restart "$ssh_service" >/dev/null 2>&1 || log ERROR "原 SSH 配置已恢复，但服务恢复加载失败"
+        fi
+        rm -f -- "$rollback_config"
+        fail "root 密码设置失败，已尝试恢复原 SSH 配置（备份：$backup_config）"
+    fi
+
     root_password=""
     root_password_confirm=""
     ROOT_PASSWORD=""
-
-    if [[ ! -f "$sshd_config" ]]; then
-        log WARN "未找到 $sshd_config，跳过 SSH 配置"
-        return 0
-    fi
-
-    cp "$sshd_config" "${sshd_config}.bak.$(date +%s)" 2>/dev/null || true
-    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/g' "$sshd_config" 2>/dev/null || true
-    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/g' "$sshd_config" 2>/dev/null || true
-    rm -rf /etc/ssh/sshd_config.d 2>/dev/null || true
-
-    if systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null; then
-        log INFO "SSH 服务重启完成"
-    else
-        log WARN "SSH 服务重启可能失败"
-    fi
+    log INFO "SSH 配置和 root 密码设置完成（原配置备份：$backup_config）"
 }
 
 trim_space() {
@@ -409,12 +491,64 @@ install_nyanpass_batch() {
     done
 }
 
+valid_ipv4() {
+    local ip="$1" part=""
+    local -a parts=()
+    [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    IFS='.' read -r -a parts <<< "$ip"
+    [[ ${#parts[@]} -eq 4 ]] || return 1
+    for part in "${parts[@]}"; do
+        [[ "$part" =~ ^(0|[1-9][0-9]{0,2})$ ]] || return 1
+        ((10#$part <= 255)) || return 1
+    done
+}
+
+valid_ipv6() {
+    local ip="$1" left="" right="" ipv4_tail="" part="" count=0
+    local -a parts=()
+    [[ ${#ip} -ge 2 && ${#ip} -le 45 && "$ip" == *:* && "$ip" != *%* ]] || return 1
+    [[ "$ip" =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
+    if [[ "$ip" == *.* ]]; then
+        ipv4_tail="${ip##*:}"
+        valid_ipv4 "$ipv4_tail" || return 1
+        ip="${ip%:*}:0:0"
+    fi
+    [[ "$ip" != *:::* ]] || return 1
+    if [[ "$ip" == *::* ]]; then
+        left="${ip%%::*}"
+        right="${ip#*::}"
+        [[ "$right" != *::* ]] || return 1
+        if [[ -n "$left" ]]; then
+            IFS=':' read -r -a parts <<< "$left"
+            for part in "${parts[@]}"; do
+                [[ "$part" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+                count=$((count + 1))
+            done
+        fi
+        if [[ -n "$right" ]]; then
+            IFS=':' read -r -a parts <<< "$right"
+            for part in "${parts[@]}"; do
+                [[ "$part" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+                count=$((count + 1))
+            done
+        fi
+        ((count < 8))
+        return
+    fi
+    [[ "$ip" != :* && "$ip" != *: ]] || return 1
+    IFS=':' read -r -a parts <<< "$ip"
+    [[ ${#parts[@]} -eq 8 ]] || return 1
+    for part in "${parts[@]}"; do
+        [[ "$part" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+    done
+}
+
 get_ipv4() {
     local ip="" url=""
     for url in "${IPV4_SERVICES[@]}"; do
-        ip=$(curl -4 -s --max-time 5 --retry 2 "$url" 2>/dev/null \
-            | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1 || true)
-        [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && echo "$ip" && return 0
+        ip=$(curl -4 -s --max-time 5 --retry 2 "$url" 2>/dev/null || true)
+        ip=$(trim_space "$ip")
+        valid_ipv4 "$ip" && echo "$ip" && return 0
     done
     echo ""
 }
@@ -422,9 +556,9 @@ get_ipv4() {
 get_ipv6() {
     local ip="" url=""
     for url in "${IPV6_SERVICES[@]}"; do
-        ip=$(curl -6 -s --max-time 5 --retry 2 "$url" 2>/dev/null \
-            | grep -oE '([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}' | head -1 || true)
-        [[ -n "$ip" ]] && echo "$ip" && return 0
+        ip=$(curl -6 -s --max-time 5 --retry 2 "$url" 2>/dev/null || true)
+        ip=$(trim_space "$ip")
+        valid_ipv6 "$ip" && echo "$ip" && return 0
     done
     echo ""
 }
@@ -526,15 +660,19 @@ verify_ddns_service() {
         systemctl is-active --quiet "$SERVICE_NAME" || ddns_verification_failed "systemd 服务未保持运行"
     done
 
-    for attempt in {1..30}; do
+    for attempt in {1..90}; do
         sleep 2
         systemctl is-active --quiet "$SERVICE_NAME" || ddns_verification_failed "等待首次上报时服务已停止"
         if [[ -s "$CACHE_V4" || -s "$CACHE_V6" ]]; then
             log INFO "DDNS 探针验收通过：主控已接受首次地址上报"
             return 0
         fi
+        if [[ -f "$REPORT_ACCEPTED_MARK" && ! -L "$REPORT_ACCEPTED_MARK" ]]; then
+            log WARN "DDNS 探针验收通过：主控已认证首次地址上报，但 DNS 同步失败；探针会继续重试"
+            return 0
+        fi
     done
-    ddns_verification_failed "60 秒内未完成首次地址上报；请检查主控、令牌和公网连通性"
+    ddns_verification_failed "180 秒内未完成首次地址上报；请检查主控、令牌和公网连通性"
 }
 
 load_ddns_config() {
@@ -570,9 +708,16 @@ notify_server() {
         -H "Authorization: Bearer $TOKEN" \
         -d "{\"ip\":\"$ip\",\"type\":\"$type\",\"agentVersion\":\"$VERSION\"}" || true)
 
-    if echo "$resp" | grep -q '"status":"ok"'; then
+    if printf '%s' "$resp" | jq -e 'type == "object" and .status == "ok"' >/dev/null 2>&1; then
+        : > "$REPORT_ACCEPTED_MARK"
         log INFO "[$type] 主控通知成功 -> $ip"
         return 0
+    fi
+
+    if printf '%s' "$resp" | jq -e 'type == "object" and .reportAccepted == true' >/dev/null 2>&1; then
+        : > "$REPORT_ACCEPTED_MARK"
+        log ERROR "[$type] 主控已认证本次上报，但 DNS 同步失败，稍后将重试：$resp"
+        return 1
     fi
 
     log ERROR "[$type] 主控通知失败，响应：$resp"
@@ -593,12 +738,20 @@ install_ddns_service() {
     mkdir -p "$INSTALL_DIR"
     chown root:root "$INSTALL_DIR"
     chmod 0755 "$INSTALL_DIR"
-    local install_tmp=""
+    local install_tmp="" download_attempt=0 downloaded=0
     install_tmp=$(mktemp "${INSTALL_DIR}/.monitor.sh.XXXXXX")
     info "正在从 GitHub HTTPS 发布通道下载并校验 DDNS 探针..."
-    if ! curl --proto '=https' --proto-redir '=https' -fLSs --max-time 30 "$MONITOR_DOWNLOAD_URL" -o "$install_tmp"; then
+    for download_attempt in 1 2 3 4 5; do
+        if curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 60 -fLSs "$MONITOR_DOWNLOAD_URL" -o "$install_tmp"; then
+            downloaded=1
+            break
+        fi
+        warn "DDNS 探针下载失败（${download_attempt}/5），稍后重试"
+        [[ $download_attempt -eq 5 ]] || sleep 5
+    done
+    if [[ $downloaded -ne 1 ]]; then
         rm -f "$install_tmp"
-        fail "下载 DDNS 监控脚本失败"
+        fail "连续 5 次下载 DDNS 监控脚本失败"
     fi
     if ! grep -Fq '# PulseDNS DDNS monitor payload' "$install_tmp"; then
         rm -f "$install_tmp"
@@ -621,7 +774,7 @@ install_ddns_service() {
 
     # 必须先停止旧探针再清缓存，防止旧进程在 restart 前写回旧节点的成功结果。
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-    rm -f "$CACHE_V4" "$CACHE_V6"
+    rm -f "$CACHE_V4" "$CACHE_V6" "$REPORT_ACCEPTED_MARK"
 
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
@@ -671,7 +824,7 @@ uninstall_ddns() {
     systemctl disable "$SERVICE_NAME" 2>/dev/null || true
     rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
     rm -rf "$INSTALL_DIR"
-    rm -f "$CACHE_V4" "$CACHE_V6" "$CONFIG_FILE"
+    rm -f "$CACHE_V4" "$CACHE_V6" "$REPORT_ACCEPTED_MARK" "$CONFIG_FILE"
     rm -rf "$TASK_STATE_DIR"
     rm -rf "$PROVISION_OUTCOME_DIR"
     rmdir "$(dirname "$PROVISION_OUTCOME_DIR")" 2>/dev/null || true

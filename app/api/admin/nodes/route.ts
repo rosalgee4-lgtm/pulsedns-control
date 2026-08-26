@@ -4,7 +4,7 @@ import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { syncAliDnsRecord } from '@/lib/alidns';
-import { buildNodeStartupScript, MAX_NODE_STARTUP_SCRIPT_BYTES } from '@/lib/install-command';
+import { buildNodeStartupScript, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES } from '@/lib/install-command';
 import { parseOfficialNyanpassCommand } from '@/lib/nyanpass-command';
 import { publicOrigin } from '@/lib/public-origin';
 import { newAgentToken, newBootstrapDownloadToken, sha256 } from '@/lib/security';
@@ -63,8 +63,8 @@ export async function POST(request: Request) {
   const provisionGeneration = 1;
   const origin = publicOrigin(request);
   const installCommand = buildNodeStartupScript({ nodeId: id, generation: provisionGeneration, origin, token, rootPassword, instances: preparedInstances });
-  if (new TextEncoder().encode(installCommand).byteLength > MAX_NODE_STARTUP_SCRIPT_BYTES) {
-    return Response.json({ error: '开机脚本超过 AWS user-data 的 15 KiB 安全上限；请减少首次预配实例，节点上线后再用远程同步添加' }, { status: 400 });
+  if (new TextEncoder().encode(installCommand).byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES) {
+    return Response.json({ error: '完整安装脚本超过 64 KiB 服务端安全上限；请减少首次预配实例，节点上线后再用远程同步添加' }, { status: 400 });
   }
   let bootstrapPayloadCiphertext = '';
   try {
@@ -80,6 +80,9 @@ export async function POST(request: Request) {
   const [tokenHash, bootstrapDownloadTokenHash] = await Promise.all([sha256(token), sha256(downloadToken)]);
   const installUrl = `${origin}/api/v1/bootstrap/${id}/${downloadToken}`;
   const startupScript = buildNodeStartupLauncher(id, installUrl);
+  if (new TextEncoder().encode(startupScript).byteLength > MAX_CLOUD_LAUNCHER_BYTES) {
+    return Response.json({ error: '开机启动器超过 AWS user-data 的 15 KiB 安全上限' }, { status: 500 });
+  }
 
   await ensureSchema();
   const db = await getDb();

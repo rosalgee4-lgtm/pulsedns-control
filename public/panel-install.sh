@@ -2,7 +2,7 @@
 # PulseDNS Web 主控一键安装与管理脚本
 set -euo pipefail
 
-VERSION="0.8.0"
+VERSION="0.8.1"
 REPOSITORY="rosalgee4-lgtm/pulsedns-control"
 SOURCE_COMMIT="21802f13c467b227891f348253b24c26107a2a84"
 SOURCE_LOCK_SHA256="1fb15db69bc20c25365426fcad11b15270cf535e94b0c9a320eaa8245227b782"
@@ -183,8 +183,14 @@ download_and_build_panel() {
     tar -xzf "$source_archive" --strip-components=1 -C "$release_dir"
 
     [[ -s "${release_dir}/package.json" && -s "${release_dir}/pnpm-lock.yaml" && \
-        -s "${release_dir}/public/og.png" ]] || \
+        -s "${release_dir}/public/og.png" && -s "${release_dir}/lib/startup-launcher.ts" && \
+        -s "${release_dir}/app/api/admin/nodes/route.ts" ]] || \
         fail "下载的源码不完整：缺少必要文件"
+    grep -Fq 'startupScript' "${release_dir}/app/api/admin/nodes/route.ts" || \
+        fail "下载的源码不完整：缺少开机脚本返回逻辑"
+    if grep -Fq 'next/font/google' "${release_dir}/app/layout.tsx"; then
+        fail "下载的源码仍依赖在线 Google 字体，拒绝在自托管环境构建"
+    fi
     corrupt_file=$(LC_ALL=C grep -Il -m1 -E \
         'Warning: truncated output|original token count|[0-9]+ tokens truncated' \
         "${release_dir}/pnpm-lock.yaml" "${release_dir}/public/og.png" \
