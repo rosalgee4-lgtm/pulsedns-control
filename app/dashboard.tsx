@@ -44,7 +44,7 @@ type NyanpassRow = {
   taskStatus: string | null; taskCreatedAt: string | null; taskClaimedAt: string | null; taskLeaseExpiresAt: string | null;
 };
 type NyanpassDraft = { name: string; command: string; optimize: boolean };
-type CreatedNode = { installUrl: string; node: { id: string; name: string; region: string }; instances: NyanpassRow[] };
+type CreatedNode = { installUrl: string; startupScript: string; node: { id: string; name: string; region: string }; instances: NyanpassRow[] };
 type CreatedNyanpass = { instance: NyanpassRow };
 type UpdatedNode = { node: NodeRow; events: EventRow[]; warnings: string[] };
 type UpdatedNyanpass = { instance: NyanpassRow; event: EventRow };
@@ -76,6 +76,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
   const [nyanpassErrors, setNyanpassErrors] = useState<Record<string, string>>({});
   const [agentUpgrade, setAgentUpgrade] = useState<{ nodeId: string; nodeName: string; command: string } | null>(null);
   const [copyFeedback, setCopyFeedback] = useState<'idle' | 'copying' | 'success' | 'error'>('idle');
+  const [startupCopyFeedback, setStartupCopyFeedback] = useState<'idle' | 'copying' | 'success' | 'error'>('idle');
   const [now, setNow] = useState(0);
   const [insecureTransport, setInsecureTransport] = useState(false);
   const [refreshError, setRefreshError] = useState('');
@@ -188,6 +189,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
       refreshSequence.current += 1;
       setCreated(result);
       setCopyFeedback('idle');
+      setStartupCopyFeedback('idle');
       setNyanpass((current) => [...result.instances, ...current]);
       setNodes((current) => [{
         id: result.node.id, name: result.node.name, region: result.node.region, ipv4: null, ipv6: null,
@@ -407,9 +409,14 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
     setCopyFeedback(await copyText(command) ? 'success' : 'error');
   }
 
+  async function copyStartupScript(script: string) {
+    setStartupCopyFeedback('copying');
+    setStartupCopyFeedback(await copyText(script) ? 'success' : 'error');
+  }
+
   function closeModal() {
     if (saving) return;
-    setShowCreate(false); setCreated(null); setNodeNyanpass([emptyNyanpassDraft()]); setError(''); setCopyFeedback('idle');
+    setShowCreate(false); setCreated(null); setNodeNyanpass([emptyNyanpassDraft()]); setError(''); setCopyFeedback('idle'); setStartupCopyFeedback('idle');
   }
   function closeNyanpassModal() {
     if (saving) return;
@@ -427,7 +434,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
     if (saving) return;
     setShowNyanpass(false); setEditingNode(null); setEditingNyanpass(null); setAgentUpgrade(null);
     setCreated(null); setCreatedNyanpass(null); setNodeNyanpass([emptyNyanpassDraft()]);
-    setError(''); setEditError(''); setCopyFeedback('idle'); setShowCreate(true);
+    setError(''); setEditError(''); setCopyFeedback('idle'); setStartupCopyFeedback('idle'); setShowCreate(true);
   }
   function openNyanpassModal() {
     if (saving) return;
@@ -538,7 +545,21 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
               <p className="form-hint">命令中的独立 -o 表示出口，没有 -o 表示入口。原始凭据仅以密文暂存；页面不会返回完整脚本，只返回一个节点专属下载直链。直链本身就是 Bearer 凭据，请勿公开或转发。动态脚本仍受 15 KiB 安全上限约束，实例过多时请先减少，节点上线后再远程添加。</p>
               {error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '创建中…' : '创建节点并生成下载直链'}</button>
             </form></>
-          : <><p className="eyebrow cyan">节点已创建</p><h2 id="create-title">复制节点脚本下载直链</h2><p className="modal-intro"><strong>这条 Bearer 直链只显示一次，请立即复制并妥善保存。</strong> 任何拿到 URL 的人都能在失效前下载含敏感凭据的脚本，请只交给目标 VPS 或云平台。平台可为启动重试重复下载，每次都会取得主控当前版本的脚本；节点安装成功后密文会被擦除，直链自动失效。若平台只接受脚本文本，可先用直链下载后完整粘贴。</p><pre className="install-command">{created.installUrl}</pre><button type="button" className="primary-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(created.installUrl)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制下载直链' : '复制下载直链'}</button>{copyFeedback === 'success' && <p className="form-success" role="status">下载直链已复制，请粘贴到云厂商的启动脚本 URL／远程脚本地址。</p>}{copyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整下载直链；剪贴板内容没有更新。</p>}<button type="button" className="ghost-button wide" onClick={closeModal} disabled={saving}>完成</button></>}
+          : <>
+            <p className="eyebrow cyan">节点已创建</p>
+            <h2 id="create-title">复制开机脚本</h2>
+            <p className="modal-intro"><strong>下面的内容严格使用已验证的 wget 安装方式。</strong> 整段放进云厂商开机脚本：下载到 <code>/root</code>、赋予执行权限，再交给 Bash 完成 SSH、DDNS、全部 Nyanpass 与 BBR。</p>
+            <pre className="install-command">{created.startupScript}</pre>
+            <button type="button" className="primary-button wide" disabled={startupCopyFeedback === 'copying'} onClick={() => copyStartupScript(created.startupScript)}>{startupCopyFeedback === 'copying' ? '正在复制…' : startupCopyFeedback === 'success' ? '已复制开机脚本' : '复制开机脚本'}</button>
+            {startupCopyFeedback === 'success' && <p className="form-success" role="status">复制成功，可以直接粘贴到云厂商 User data。</p>}
+            {startupCopyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整开机脚本；剪贴板内容没有更新。</p>}
+            <p className="form-hint"><strong>节点脚本下载直链（只显示一次）：</strong>保留它可以沿用你现有脚本，或在安装前始终下载主控当前版本。成功后凭据会被擦除，直链自动失效。</p>
+            <pre className="install-command">{created.installUrl}</pre>
+            <button type="button" className="ghost-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(created.installUrl)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制下载直链' : '复制下载直链'}</button>
+            {copyFeedback === 'success' && <p className="form-success" role="status">下载直链已复制，请替换到现有开机脚本的 wget URL。</p>}
+            {copyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整下载直链；剪贴板内容没有更新。</p>}
+            <button type="button" className="ghost-button wide" onClick={closeModal} disabled={saving}>完成</button>
+          </>}
         </section>
       </div>}
 

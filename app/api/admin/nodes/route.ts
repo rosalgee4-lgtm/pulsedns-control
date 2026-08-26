@@ -13,6 +13,7 @@ import { expireProvisionAttempts, isBootstrapLocked } from '@/lib/provision-life
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
 import { nodeResponse } from '@/lib/node-response';
 import { encryptBootstrapPayload } from '@/lib/bootstrap-payload';
+import { buildNodeStartupLauncher } from '@/lib/startup-launcher';
 
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
@@ -78,6 +79,7 @@ export async function POST(request: Request) {
   }
   const [tokenHash, bootstrapDownloadTokenHash] = await Promise.all([sha256(token), sha256(downloadToken)]);
   const installUrl = `${origin}/api/v1/bootstrap/${id}/${downloadToken}`;
+  const startupScript = buildNodeStartupLauncher(id, installUrl);
 
   await ensureSchema();
   const db = await getDb();
@@ -91,6 +93,7 @@ export async function POST(request: Request) {
   return Response.json({
     node: { id, name, region },
     installUrl,
+    startupScript,
     instances: preparedInstances.map((instance) => ({ id: instance.id, nodeId: id, nodeName: name, name: instance.name, role: instance.role, panelUrl: instance.panelUrl, optimize: instance.optimize, status: 'bootstrap', hasCredential: false, lastReportedAt: null, syncError: null, activeTaskId: null, configRevision: 0, taskStatus: null, taskCreatedAt: null, taskClaimedAt: null, taskLeaseExpiresAt: null })),
   }, { status: 201, headers: { 'Cache-Control': 'no-store' } });
 }
