@@ -28,6 +28,8 @@ export const nodes = sqliteTable('nodes', {
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
 }, (table) => [
   uniqueIndex('idx_nodes_token_hash').on(table.tokenHash),
+  uniqueIndex('idx_nodes_dns_v4_owner').on(table.domainName, table.recordV4).where(sql`${table.syncEnabled} = 1 AND ${table.domainName} IS NOT NULL AND ${table.recordV4} IS NOT NULL`),
+  uniqueIndex('idx_nodes_dns_v6_owner').on(table.domainName, table.recordV6).where(sql`${table.syncEnabled} = 1 AND ${table.domainName} IS NOT NULL AND ${table.recordV6} IS NOT NULL`),
   index('idx_nodes_last_seen_at').on(table.lastSeenAt),
   index('idx_nodes_provision_lease').on(table.nyanpassStatus, table.provisionLeaseExpiresAt),
   uniqueIndex('idx_nodes_bootstrap_download_token_hash').on(table.bootstrapDownloadTokenHash),

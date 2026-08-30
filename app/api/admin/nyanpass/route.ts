@@ -10,6 +10,7 @@ import { parseOfficialNyanpassCommand } from '@/lib/nyanpass-command';
 import { encryptNyanpassCredential } from '@/lib/nyanpass-credential';
 import { expireProvisionAttempts, isBootstrapLocked } from '@/lib/provision-lifecycle';
 import { cleanText } from '@/lib/validation';
+import { pruneEvents } from '@/lib/event-retention';
 
 const busyStatuses = new Set(['pending', 'running']);
 
@@ -20,6 +21,7 @@ export async function GET() {
   const db = await getDb();
   await expireProvisionAttempts(db, new Date());
   await expireAgentTasks(db, new Date());
+  await pruneEvents(db).catch(() => undefined);
   const rows = await db.select({
     id: nyanpassInstances.id,
     nodeId: nyanpassInstances.nodeId,

@@ -13,8 +13,8 @@ type NodeProvisionCommandInput = {
   instances: ProvisionedNyanpassInstance[];
 };
 
-export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.1/public/install.sh';
-export const PROBE_INSTALLER_SHA256 = '092e281a8c3bad87ee0919be78e86efd4867932bb05ddeb6b1526d2c028b80e5';
+export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/install.sh';
+export const PROBE_INSTALLER_SHA256 = 'dc3eb8d1a83f6eb2fef7f1e442e9c72c734cbdc348bc3cb1dfd7eddb452e43f3';
 export const MAX_CLOUD_LAUNCHER_BYTES = 15 * 1024;
 export const MAX_BOOTSTRAP_RESPONSE_BYTES = 64 * 1024;
 
@@ -112,7 +112,7 @@ report_provision_message() {
   response=$(curl -sS --connect-timeout 5 --max-time 20 -X POST \
     "$server_url/api/v1/provision" \
     -H 'Content-Type: application/json' \
-    -H 'X-Agent-Version: 0.8.1' \
+    -H 'X-Agent-Version: 0.8.2' \
     -H "X-Secret-Token: $token" \
     -d "$body" 2>/dev/null || true)
   printf '%s' "$response" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' || return 1

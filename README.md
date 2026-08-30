@@ -8,7 +8,7 @@ PulseDNS 把原仓库的多份 VPS Shell 脚本合并为一个 Web 主控和一�
 | --- | --- |
 | IPv4 / IPv6 多地址源回退 | 保留原来的 8 个 IPv4 源和 5 个 IPv6 源及访问顺序 |
 | 每 10 秒检测 | 保留 |
-| 首次或地址变化才上报 | 保留；仅主控返回 `{"status":"ok"}` 后更新 `/tmp` 缓存 |
+| 首次、地址变化或每 10 分钟校准时上报 | 地址变化立即上报；未变化地址也按 TTL 周期做幂等校准，网络失败按最长 5 分钟指数退避 |
 | `POST {"ip","type"}` + `X-Secret-Token` | 保留；主控收到后调用阿里云 DNS |
 | `/opt/ddns-monitor/monitor.sh` + `ddns-monitor.service` | 保留 |
 | `/var/log/ddns-monitor.log` | 保留，卸载时不删除 |
@@ -26,7 +26,7 @@ PulseDNS 把原仓库的多份 VPS Shell 脚本合并为一个 Web 主控和一�
 Linux VPS / ddns-monitor
   ├─ 按原顺序获取公网 IPv4 / IPv6
   ├─ 与 /tmp 中的上次成功地址比较
-  └─ 变化后 POST { ip, type }
+  └─ 变化后立即、未变化时每 10 分钟 POST { ip, type }
                  │  X-Secret-Token
                  ▼
 PulseDNS Web 主控 /api/v1/report
@@ -60,7 +60,7 @@ ALIBABA_CLOUD_ACCESS_KEY_SECRET
 ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 ```
 
-建议使用只允许目标域名执行 `alidns:DescribeDomainRecords`、`alidns:AddDomainRecord`、`alidns:UpdateDomainRecord` 的 RAM 身份。添加节点时填写主域名与主机记录；根记录填写 `@`。
+建议使用只允许目标域名执行 `alidns:DescribeDomainRecords`、`alidns:AddDomainRecord`、`alidns:UpdateDomainRecord` 的 RAM 身份。添加节点时填写主域名与主机记录；根记录填写 `@`。同一主域名与主机记录的 A、AAAA 归属分别唯一，多个启用节点不能争用同类型记录；升级检测到历史冲突时会安全暂停较新的冲突节点并留下错误事件。临时同步失败会由探针周期性自愈，同一记录、类型和 IP 的重复失败一小时只记一次，自动事件路径把事件表控制在约 10,000 条。
 
 ## 安装与菜单
 
@@ -69,7 +69,7 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 准备一台使用 systemd、glibc 2.28 或更高版本的 x86_64/arm64 Linux VPS，并确保至少有 2 GiB 可用磁盘及 768 MiB 可用内存与 swap；Alpine/musl、Docker、WSL 和 chroot 不受支持。安装器会自动识别公网 IPv4、询问 HTTP 端口（默认 `3100`），并生成 32 位随机访问路径；不需要域名、证书邮箱或 GitHub Token。只需向自己的来源 IP 放行所选端口，然后以 root 执行：
 
 ```bash
-( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.8.1' -o "$tmp" && test "$(sha256sum "$tmp" | awk '{print $1}')" = '74d91527fee21222da161ac73e408c9be2991f1e0324abe3a27f2417498ac581' && grep -Fq '# PulseDNS Web 主控一键安装与管理脚本' "$tmp" && bash -n "$tmp" && bash "$tmp" install )
+( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.8.2' -o "$tmp" && test "$(sha256sum "$tmp" | awk '{print $1}')" = '5f8c72e44e001233737113133b4a732d42c65cd29a5c0f10231c71779c32ba8b' && grep -Fq '# PulseDNS Web 主控一键安装与管理脚本' "$tmp" && bash -n "$tmp" && bash "$tmp" install )
 ```
 
 脚本会询问端口、管理员账号和阿里云 AccessKey，随后自动安装经过校验的 Node.js、构建 PulseDNS、创建本地 SQLite 数据库、配置管理员 Basic Auth 并注册 systemd 服务。Caddy、域名和 HTTPS 证书流程已完全移除。完成后会显示类似 `http://203.0.113.10:3100/32位随机路径` 的唯一入口；直接访问 IP 与端口根路径不能进入面板。再次不带参数运行同一脚本会打开操作菜单：
@@ -82,7 +82,7 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 一键升级命令：
 
 ```bash
-( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.8.1' -o "$tmp" && test "$(sha256sum "$tmp" | awk '{print $1}')" = '74d91527fee21222da161ac73e408c9be2991f1e0324abe3a27f2417498ac581' && grep -Fq '# PulseDNS Web 主控一键安装与管理脚本' "$tmp" && bash -n "$tmp" && bash "$tmp" update )
+( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.8.2' -o "$tmp" && test "$(sha256sum "$tmp" | awk '{print $1}')" = '5f8c72e44e001233737113133b4a732d42c65cd29a5c0f10231c71779c32ba8b' && grep -Fq '# PulseDNS Web 主控一键安装与管理脚本' "$tmp" && bash -n "$tmp" && bash "$tmp" update )
 ```
 
 面板数据保存在 `/var/lib/pulsedns-control/pulsedns.db`；管理员密码、阿里云凭据和独立生成的远程任务与开机凭据加密密钥保存在权限为 `0600` 的 `/etc/pulsedns-control.env`。密钥还会以 `0600` 权限单独保存在 `/var/lib/pulsedns-control/task-encryption.key`，以便卸载程序但保留数据库后仍能恢复待处理任务；升级旧面板时会自动补齐并校验该密钥。
@@ -97,14 +97,14 @@ umask 077
 wget -O '/root/pulsedns_<节点ID>_install.sh' '<节点脚本下载直链>' && chmod +x '/root/pulsedns_<节点ID>_install.sh' && bash '/root/pulsedns_<节点ID>_install.sh'
 ```
 
-下载的完整脚本会先在最小化系统中补齐 `curl`、CA 证书、`coreutils` 与 `util-linux`，再等待主控，把过程写入 `/var/log/pulsedns-bootstrap.log`、使用由内核在进程结束时自动释放的 `flock` 避免并发，并只在全部步骤成功后写入该节点专属的完成标记；后续重启只启动现有 DDNS 服务，不会覆盖令牌或重复安装 Nyanpass。直接打开交互式操作菜单时，也从固定的 GitHub HTTPS 发布通道下载安装器并校验 SHA-256（目标机需要 `sha256sum`）：
+下载的完整脚本会先在最小化系统中补齐 `curl`、CA 证书、`coreutils`、`util-linux` 与 `unzip`，再等待主控，把过程写入 `/var/log/pulsedns-bootstrap.log`、使用由内核在进程结束时自动释放的 `flock` 避免并发，并只在全部步骤成功后写入该节点专属的完成标记；后续重启只启动现有 DDNS 服务，不会覆盖令牌或重复安装 Nyanpass。直接打开交互式操作菜单时，也从固定的 GitHub HTTPS 发布通道下载安装器并校验 SHA-256（目标机需要 `sha256sum`）：
 
 ```bash
 (
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
-  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.1/public/install.sh -o "$tmp" &&
-  test "$(sha256sum "$tmp" | awk '{print $1}')" = '092e281a8c3bad87ee0919be78e86efd4867932bb05ddeb6b1526d2c028b80e5' &&
+  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/install.sh -o "$tmp" &&
+  test "$(sha256sum "$tmp" | awk '{print $1}')" = 'dc3eb8d1a83f6eb2fef7f1e442e9c72c734cbdc348bc3cb1dfd7eddb452e43f3' &&
   grep -Fq '# PulseDNS / 原 DDNS 脚本兼容安装器' "$tmp" &&
   bash -n "$tmp" &&
   bash "$tmp"
@@ -123,7 +123,7 @@ wget -O '/root/pulsedns_<节点ID>_install.sh' '<节点脚本下载直链>' && c
 6. 卸载 DDNS
 7. 升级现有探针，启用 Nyanpass 远程同步
 
-Web 中“添加探针节点”会先要求填写一次性 root 密码，并预配一个或多个 Nyanpass 服务名、官方命令及原脚本的 `OPTIMIZE` 选项。主控把 root 密码、节点原始令牌和规范化后的预配参数绑定 `nodeId + generation`，以 AES-GCM 加密暂存；页面只返回节点专属下载直链，访问时才解密并按当前代码动态生成脚本。可复制的开机启动器会先检查并补齐 `wget` 与 CA 证书，然后严格按 `wget -O → chmod +x → bash` 执行，并把首阶段日志写入 `/var/log/pulsedns-bootstrap-launcher.log`。完整脚本执行：补齐基础环境 → 主控令牌预校验 → 事务式配置 SSH → DDNS 安装 → 首次地址上报验收 → 全部 Nyanpass → BBR → DDNS 复检。主控确认令牌有效后才会修改 SSH；只有主控认证过至少一次格式正确的公网地址上报后才会继续安装 Nyanpass。阿里云 DNS 同步失败不会把有效探针误判为未安装，但 IP 不会写入本地成功缓存，探针会继续重试 DNS。可复制启动器受 15 KiB user-data 上限约束，下载后的完整安装脚本另受 64 KiB 服务端上限保护。
+Web 中“添加探针节点”会先要求填写一次性 root 密码，并预配一个或多个 Nyanpass 服务名、官方命令及原脚本的 `OPTIMIZE` 选项。主控把 root 密码、节点原始令牌和规范化后的预配参数绑定 `nodeId + generation`，以 AES-GCM 加密暂存；页面只返回节点专属下载直链，访问时才解密并按当前代码动态生成脚本。可复制的开机启动器会先检查并补齐 `wget` 与 CA 证书，然后严格按 `wget -O → chmod +x → bash` 执行，并把首阶段日志写入 `/var/log/pulsedns-bootstrap-launcher.log`。完整脚本执行：补齐基础环境 → 主控令牌预校验 → 事务式配置 SSH → DDNS 安装 → 首次地址上报验收 → 全部 Nyanpass → BBR → DDNS 复检。主控确认令牌有效后才会修改 SSH；只有主控认证过至少一次格式正确的公网地址上报后才会继续安装 Nyanpass。阿里云 DNS 同步失败不会把有效探针误判为未安装；主控会保存已认证的当前 IP，探针更新本地缓存后按 10 分钟周期重新校准，不会每 10 秒放大失败写入。可复制启动器受 15 KiB user-data 上限约束，下载后的完整安装脚本另受 64 KiB 服务端上限保护。
 
 新节点创建后先显示“等待开机安装”，不能提前修改或下发额外实例。开机脚本开始执行后每 20 秒向主控续租，并用节点 generation 与本次随机 attempt ID 绑定回执；在真正修改机器前重跑会恢复同一次尝试，旧脚本或另一台机器的回执不能覆盖当前结果。若机器断电或安装进程被强制终止，租约到期后会标记“结果未知”，脚本也不会自动重复安装。恢复时绝对不要先删除 `started`：先确认旧进程已经停止，再使用原直链重新下载并运行同一节点脚本，让它用旧 attempt ID 向主控收敛为失败；只有日志明确显示“主控已确认旧安装失败”后，才删除日志给出的该节点精确 `started` 路径，并再次通过原直链下载运行，开始新尝试。`failed` 或 `uncertain` 时直链会保留；若回执未送达，继续保留标记，待网络和主控恢复后重试。成功后直链失效，也可以在明确核查后删除整个节点登记。
 
@@ -145,15 +145,15 @@ HTTP 面板上的“复制开机脚本”和“复制下载直链”按钮都包
 (
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
-  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.1/public/update.sh -o "$tmp" &&
-  test "$(sha256sum "$tmp" | awk '{print $1}')" = 'c75f56465886c7595b1df80432145a8c72f161d5aa266e7ac0030698c38a16d9' &&
+  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/update.sh -o "$tmp" &&
+  test "$(sha256sum "$tmp" | awk '{print $1}')" = '7b3ff47f2dff1a6469bf12198f991b9b0f286ea797ddad39259600909096c659' &&
   bash "$tmp"
 )
 ```
 
-升级器支持 HTTPS 地址，以及带端口和 32 位随机路径的 HTTP 主控地址。它先补齐 `curl`、`jq`、`coreutils` 与 `util-linux`，再从 GitHub HTTPS 的 `release-v0.8.1` 发布通道下载专用 `monitor.sh` 并校验代码内固定的 SHA-256；不会从 HTTP 主控执行 root 脚本，也不会下载或执行完整安装器。它只替换 DDNS 探针，不接受新的主控地址或令牌，也不改 systemd 单元、配置、SSH、BBR 或 Nyanpass。配置、IP 缓存和日志不会被清空；运行中的服务会重启并继续正常检测，若公网 IP 此时已经变化，仍会按原逻辑上报并更新 DNS。停止的服务保持停止。新版启动失败时会恢复旧探针，并在 `/opt/ddns-monitor/monitor.sh.previous` 保留上一版本。
+升级器支持 HTTPS 地址，以及带端口和 32 位随机路径的 HTTP 主控地址。它先补齐 `curl`、`jq`、`coreutils` 与 `util-linux`，再从 GitHub HTTPS 的 `release-v0.8.2` 发布通道下载专用 `monitor.sh` 并校验代码内固定的 SHA-256；不会从 HTTP 主控执行 root 脚本，也不会下载或执行完整安装器。它只替换 DDNS 探针，不接受新的主控地址或令牌，也不改 systemd 单元、配置、SSH、BBR 或 Nyanpass。配置、IP 缓存和日志不会被清空；运行中的服务会重启并继续正常检测，若公网 IP 此时已经变化，仍会按原逻辑上报并更新 DNS。停止的服务保持停止。新版启动失败时会恢复旧探针，并在 `/opt/ddns-monitor/monitor.sh.previous` 保留上一版本。
 
-v0.7.x 及更早的探针不会轮询任务，第一次使用远程同步前必须升级一次。Nyanpass 页面会按节点版本显示“先升级探针”，并生成保留现有 `/etc/ddns-monitor.conf` 的一次性升级命令。v0.8.0 之后，探针每轮独立检查任务；官方安装器最长运行 10 分钟，但在后台锁中串行执行，不会暂停原来的 IP 检测。
+v0.7.x 及更早的探针不会轮询任务，第一次使用远程同步前必须升级一次。Nyanpass 页面会按节点版本显示“先升级探针”，并生成保留现有 `/etc/ddns-monitor.conf` 的一次性升级命令。v0.8.0 之后，探针每轮独立检查任务；官方安装器最长运行 10 分钟，超时后再给 30 秒强制终止进程组，但在后台锁中串行执行，不会暂停原来的 IP 检测。
 
 ## Nyanpass 入口与出口
 
@@ -162,7 +162,7 @@ Web 中添加实例时粘贴 Nyanpass 面板生成的原始命令。程序只检
 - 参数中存在独立的 `-o`：出口。
 - 参数中不存在 `-o`：入口。
 
-不会根据 Token、面板 URL、IP 或端口猜测。创建探针时可一次添加多个面板/实例，它们仍随开机脚本自动安装；这个原流程没有改动。探针运行后再追加实例时，主控只下发 `serviceName`、入口/出口、HTTPS 面板地址、Token 和 `OPTIMIZE` 这些结构化字段；探针固定下载 Nyanpass 官方安装器，拒绝任意命令、脚本地址或额外参数。
+不会根据 Token、面板 URL、IP 或端口猜测。创建探针时可一次添加多个面板/实例，它们仍随开机脚本自动安装；这个原流程没有改动。探针运行后再追加实例时，主控只下发 `serviceName`、入口/出口、HTTPS 面板地址、Token 和 `OPTIMIZE` 这些结构化字段；探针固定校验 Nyanpass 官方安装器及 amd64、amd64v3、arm64 对应二进制包的 SHA-256，再通过官方 `NO_DOWNLOAD=1` 路径安装，不执行上游未校验的二级下载脚本，并拒绝任意命令、脚本地址或额外参数。`OPTIMIZE=0` 会保持为空传给官方脚本，不再误触发优化；再次同步同名实例时会原子刷新 `start.sh` 中的已校验参数。
 
 ## DDNS API
 

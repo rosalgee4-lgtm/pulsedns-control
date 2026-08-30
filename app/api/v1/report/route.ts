@@ -1,4 +1,4 @@
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, gte, like } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { events, nodes } from '@/db/schema';
@@ -6,6 +6,7 @@ import { syncAliDnsRecord } from '@/lib/alidns';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
 import { bearerToken, sha256 } from '@/lib/security';
 import { cleanText, validIPv4, validIPv6 } from '@/lib/validation';
+import { pruneEventsAfterInsert } from '@/lib/event-retention';
 
 type AddressType = 'A' | 'AAAA';
 type ReportBody = {
@@ -17,6 +18,9 @@ type ReportBody = {
 };
 
 type AddressReport = { type: AddressType; ip: string };
+type AppDb = Awaited<ReturnType<typeof getDb>>;
+
+const dnsFailureDedupeMs = 60 * 60 * 1000;
 
 export async function GET(request: Request) {
   const token = request.headers.get('x-secret-token')?.trim() || bearerToken(request.headers.get('authorization'));
@@ -53,53 +57,56 @@ export async function POST(request: Request) {
     const now = new Date();
     const failures: string[] = [];
     for (const report of parsed.reports) {
-    let snapshot = node;
-    let committed = false;
-    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const [snapshot] = await db.select().from(nodes).where(eq(nodes.id, node.id)).limit(1);
+      if (!snapshot) return Response.json({ status: 'error', error: '未知探针' }, { status: 401 });
       const previous = report.type === 'A' ? snapshot.ipv4 : snapshot.ipv6;
-      if (previous === report.ip) { committed = true; break; }
-      const recordColumn = report.type === 'A' ? nodes.recordV4 : nodes.recordV6;
       const record = report.type === 'A' ? snapshot.recordV4 : snapshot.recordV6;
-      let eventKind = 'ip_changed';
-      let eventLevel = 'info';
-      let eventMessage = `${report.type} 地址已变化，未绑定 DNS 记录`;
-      if (snapshot.syncEnabled && snapshot.domainName && record) {
+      const hasDnsMapping = Boolean(snapshot.syncEnabled && snapshot.domainName && record);
+
+      if (previous === report.ip && !hasDnsMapping) continue;
+
+      if (hasDnsMapping && snapshot.domainName && record) {
         const result = await syncAliDnsRecord(snapshot.domainName, record, report.type, report.ip);
-        eventKind = result.ok ? 'dns_synced' : 'dns_failed';
-        eventLevel = result.ok ? 'info' : 'error';
-        eventMessage = result.ok ? `${report.type} 记录 ${record} 已同步` : `${report.type} 同步失败：${result.error}`;
         if (!result.ok) {
+          if (previous !== report.ip) await updateReportedIp(db, node.id, report, now);
           failures.push(`${report.type}: ${result.error}`);
-          await db.insert(events).values({ nodeId: node.id, level: eventLevel, kind: eventKind, message: eventMessage, ipType: report.type, ip: report.ip, createdAt: now });
-          break;
+          await logDnsFailure(db, {
+            nodeId: node.id,
+            type: report.type,
+            ip: report.ip,
+            recordLabel: record === '@' ? snapshot.domainName : `${record}.${snapshot.domainName}`,
+            error: result.error,
+            now,
+          });
+          continue;
         }
+
+        const repairedExistingAddress = previous === report.ip && !('unchanged' in result);
+        if (previous !== report.ip) await updateReportedIp(db, node.id, report, now);
+        if (previous !== report.ip || repairedExistingAddress) {
+          await insertReportEvent(db, {
+            nodeId: node.id,
+            kind: 'dns_synced',
+            message: previous === report.ip
+              ? `${report.type} 记录 ${record} 已重新校准`
+              : `${report.type} 记录 ${record} 已同步`,
+            ipType: report.type,
+            ip: report.ip,
+            createdAt: now,
+          });
+        }
+        continue;
       }
 
-      // Commit the IP only if the DNS mapping we just used is still current.
-      // If an administrator changed the mapping concurrently, reload it and
-      // synchronize the new target before acknowledging the probe.
-      const mappingStillCurrent = and(
-        eq(nodes.id, node.id),
-        eq(nodes.syncEnabled, snapshot.syncEnabled),
-        snapshot.domainName === null ? isNull(nodes.domainName) : eq(nodes.domainName, snapshot.domainName),
-        record === null ? isNull(recordColumn) : eq(recordColumn, record),
-      );
-      const changed = await db.update(nodes).set({
-        ...(report.type === 'A' ? { ipv4: report.ip } : { ipv6: report.ip }),
-        updatedAt: now,
-      }).where(mappingStillCurrent).returning({ id: nodes.id });
-      if (changed.length) {
-        committed = true;
-        await db.insert(events).values({ nodeId: node.id, level: eventLevel, kind: eventKind, message: eventMessage, ipType: report.type, ip: report.ip, createdAt: now });
-        break;
-      }
-      const [latest] = await db.select().from(nodes).where(eq(nodes.id, node.id)).limit(1);
-      if (!latest) return Response.json({ status: 'error', error: '未知探针' }, { status: 401 });
-      snapshot = latest;
-    }
-    if (!committed && !failures.some((failure) => failure.startsWith(`${report.type}:`))) {
-      failures.push(`${report.type}: DNS 映射正在修改，请稍后重试`);
-    }
+      await updateReportedIp(db, node.id, report, now);
+      await insertReportEvent(db, {
+        nodeId: node.id,
+        kind: 'ip_changed',
+        message: `${report.type} 地址已变化，未绑定 DNS 记录`,
+        ipType: report.type,
+        ip: report.ip,
+        createdAt: now,
+      });
     }
 
     await db.update(nodes).set({
@@ -115,6 +122,47 @@ export async function POST(request: Request) {
   } finally {
     await releaseNodeOperationLock(db, authenticatedNode.id, operationId);
   }
+}
+
+async function updateReportedIp(db: AppDb, nodeId: string, report: AddressReport, now: Date) {
+  await db.update(nodes).set({
+    ...(report.type === 'A' ? { ipv4: report.ip } : { ipv6: report.ip }),
+    updatedAt: now,
+  }).where(eq(nodes.id, nodeId));
+}
+
+async function logDnsFailure(db: AppDb, input: {
+  nodeId: string;
+  type: AddressType;
+  ip: string;
+  recordLabel: string;
+  error: string;
+  now: Date;
+}) {
+  const messagePrefix = `${input.type} 记录 ${input.recordLabel} 同步失败：`;
+  const [recent] = await db.select({ id: events.id }).from(events).where(and(
+    eq(events.nodeId, input.nodeId),
+    eq(events.kind, 'dns_failed'),
+    eq(events.ipType, input.type),
+    eq(events.ip, input.ip),
+    like(events.message, `${messagePrefix}%`),
+    gte(events.createdAt, new Date(input.now.getTime() - dnsFailureDedupeMs)),
+  )).limit(1);
+  if (recent) return;
+  await insertReportEvent(db, {
+    nodeId: input.nodeId,
+    level: 'error',
+    kind: 'dns_failed',
+    message: `${messagePrefix}${input.error}`,
+    ipType: input.type,
+    ip: input.ip,
+    createdAt: input.now,
+  });
+}
+
+async function insertReportEvent(db: AppDb, values: typeof events.$inferInsert) {
+  const [inserted] = await db.insert(events).values(values).returning({ id: events.id });
+  if (inserted) await pruneEventsAfterInsert(db, inserted.id).catch(() => undefined);
 }
 
 function parseReports(body: ReportBody): { reports: AddressReport[] } | { error: string } {

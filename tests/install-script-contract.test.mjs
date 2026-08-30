@@ -137,6 +137,21 @@ test('panel installer uses immutable source and README verifies the downloaded e
   assert.match(panelSource, /lib\/startup-launcher\.ts/);
   assert.match(panelSource, /startupScript/);
   assert.match(panelSource, /next\/font\/google/);
-  assert.match(readme, /panel-install\.sh\?v=0\.8\.1[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" install/);
-  assert.match(readme, /panel-install\.sh\?v=0\.8\.1[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" update/);
+  assert.match(readme, /panel-install\.sh\?v=0\.8\.2[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" install/);
+  assert.match(readme, /panel-install\.sh\?v=0\.8\.2[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" update/);
+});
+
+test('Nyanpass installation executes only pinned installer and binary payloads', () => {
+  const install = body('install_nyanpass_once');
+  const installerDownload = install.indexOf('"$NYANPASS_INSTALL_URL" -o "$installer"');
+  const installerDigest = install.indexOf('"$digest" == "$NYANPASS_INSTALL_SHA256"');
+  const binaryDownload = install.indexOf('"$NYANPASS_BINARY_URL" -o "$archive"');
+  const binaryDigest = install.indexOf('"$archive_digest" == "$NYANPASS_BINARY_SHA256"');
+  const stage = install.indexOf('stage_nyanpass_binary');
+  const startScript = install.indexOf('write_nyanpass_start_script');
+  const execute = install.indexOf('NO_DOWNLOAD=1 timeout --kill-after=30s');
+  assert.ok(installerDownload >= 0 && installerDownload < installerDigest);
+  assert.ok(installerDigest < binaryDownload && binaryDownload < binaryDigest);
+  assert.ok(binaryDigest < stage && stage < startScript && startScript < execute);
+  assert.match(install, /OPTIMIZE="\$optimize_env"/);
 });

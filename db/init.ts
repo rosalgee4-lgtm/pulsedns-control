@@ -91,11 +91,38 @@ const schemaStatements = [
 const taskIndexStatements = [
   'CREATE INDEX IF NOT EXISTS idx_nodes_provision_lease ON nodes(nyanpass_status, provision_lease_expires_at)',
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_bootstrap_download_token_hash ON nodes(bootstrap_download_token_hash)',
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_dns_v4_owner ON nodes(domain_name, record_v4) WHERE sync_enabled = 1 AND domain_name IS NOT NULL AND record_v4 IS NOT NULL',
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_dns_v6_owner ON nodes(domain_name, record_v6) WHERE sync_enabled = 1 AND domain_name IS NOT NULL AND record_v6 IS NOT NULL',
   'CREATE INDEX IF NOT EXISTS idx_nyanpass_active_task ON nyanpass_instances(active_task_id)',
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_tasks_instance_revision ON agent_tasks(instance_id, revision)',
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_tasks_one_running_per_node ON agent_tasks(node_id) WHERE status = 'running'",
   'CREATE INDEX IF NOT EXISTS idx_agent_tasks_node_status_created ON agent_tasks(node_id, status, created_at)',
   'CREATE INDEX IF NOT EXISTS idx_agent_tasks_instance_status ON agent_tasks(instance_id, status)',
+];
+
+const conflictedDnsOwners = `WITH ranked_v4 AS (
+  SELECT id, ROW_NUMBER() OVER (PARTITION BY domain_name, record_v4 ORDER BY created_at, id) AS owner_rank
+  FROM nodes
+  WHERE sync_enabled = 1 AND domain_name IS NOT NULL AND record_v4 IS NOT NULL
+), ranked_v6 AS (
+  SELECT id, ROW_NUMBER() OVER (PARTITION BY domain_name, record_v6 ORDER BY created_at, id) AS owner_rank
+  FROM nodes
+  WHERE sync_enabled = 1 AND domain_name IS NOT NULL AND record_v6 IS NOT NULL
+)
+SELECT id FROM ranked_v4 WHERE owner_rank > 1
+UNION
+SELECT id FROM ranked_v6 WHERE owner_rank > 1`;
+
+const dnsOwnershipCleanupStatements = [
+  `INSERT INTO events (node_id, level, kind, message, created_at)
+   SELECT nodes.id, 'error', 'dns_ownership_conflict', '升级时发现该 DNS 记录同时由多个节点管理，已安全暂停自动同步；请检查节点配置后重新启用', CAST(strftime('%s', 'now') AS INTEGER) * 1000
+   FROM nodes
+   WHERE nodes.sync_enabled = 1
+     AND nodes.id IN (${conflictedDnsOwners})
+     AND NOT EXISTS (SELECT 1 FROM events WHERE events.node_id = nodes.id AND events.kind = 'dns_ownership_conflict')`,
+  `UPDATE nodes
+   SET sync_enabled = 0, updated_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000
+   WHERE sync_enabled = 1 AND id IN (${conflictedDnsOwners})`,
 ];
 
 export async function ensureSchema() {
@@ -134,7 +161,9 @@ async function initializeSchema() {
     if (!nyanpassColumns.some((column) => column.name === 'active_task_id')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN active_task_id TEXT');
     if (!nyanpassColumns.some((column) => column.name === 'sync_error')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN sync_error TEXT');
     if (!nyanpassColumns.some((column) => column.name === 'bootstrap_generation')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN bootstrap_generation INTEGER');
-    db.exec(`${taskIndexStatements.join(';\n')}; UPDATE nodes SET provider = 'alidns' WHERE provider = 'cloudflare'; UPDATE nodes SET nyanpass_status = 'uncertain', provision_generation = CASE WHEN provision_generation < 1 THEN 1 ELSE provision_generation END WHERE nyanpass_status = 'provisioning' AND provision_attempt_id IS NULL; UPDATE nyanpass_instances SET bootstrap_generation = 1 WHERE config_revision = 0 AND status IN ('bootstrap', 'uncertain') AND bootstrap_generation IS NULL; UPDATE nyanpass_instances SET status = 'legacy' WHERE status = '等待安装'; PRAGMA optimize;`);
+    db.exec(`UPDATE nodes SET provider = 'alidns' WHERE provider = 'cloudflare'; UPDATE nodes SET nyanpass_status = 'uncertain', provision_generation = CASE WHEN provision_generation < 1 THEN 1 ELSE provision_generation END WHERE nyanpass_status = 'provisioning' AND provision_attempt_id IS NULL; UPDATE nyanpass_instances SET bootstrap_generation = 1 WHERE config_revision = 0 AND status IN ('bootstrap', 'uncertain') AND bootstrap_generation IS NULL; UPDATE nyanpass_instances SET status = 'legacy' WHERE status = '等待安装';`);
+    db.exec(`${dnsOwnershipCleanupStatements.join(';\n')};`);
+    db.exec(`${taskIndexStatements.join(';\n')}; PRAGMA optimize;`);
     return;
   }
 
@@ -170,11 +199,12 @@ async function initializeSchema() {
   if (!nyanpassColumns.results.some((column) => column.name === 'active_task_id')) await addD1Column(db, 'ALTER TABLE nyanpass_instances ADD COLUMN active_task_id TEXT');
   if (!nyanpassColumns.results.some((column) => column.name === 'sync_error')) await addD1Column(db, 'ALTER TABLE nyanpass_instances ADD COLUMN sync_error TEXT');
   if (!nyanpassColumns.results.some((column) => column.name === 'bootstrap_generation')) await addD1Column(db, 'ALTER TABLE nyanpass_instances ADD COLUMN bootstrap_generation INTEGER');
-  await db.batch(taskIndexStatements.map((statement) => db.prepare(statement)));
   await db.prepare("UPDATE nodes SET provider = 'alidns' WHERE provider = 'cloudflare'").run();
   await db.prepare("UPDATE nodes SET nyanpass_status = 'uncertain', provision_generation = CASE WHEN provision_generation < 1 THEN 1 ELSE provision_generation END WHERE nyanpass_status = 'provisioning' AND provision_attempt_id IS NULL").run();
   await db.prepare("UPDATE nyanpass_instances SET bootstrap_generation = 1 WHERE config_revision = 0 AND status IN ('bootstrap', 'uncertain') AND bootstrap_generation IS NULL").run();
   await db.prepare("UPDATE nyanpass_instances SET status = 'legacy' WHERE status = '等待安装'").run();
+  await db.batch(dnsOwnershipCleanupStatements.map((statement) => db.prepare(statement)));
+  await db.batch(taskIndexStatements.map((statement) => db.prepare(statement)));
   await db.prepare('PRAGMA optimize').run();
 }
 

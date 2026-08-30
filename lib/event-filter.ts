@@ -16,7 +16,7 @@ export type FilterableEvent = {
 export function eventCategory(kind: string) {
   if (kind === 'node_created' || kind === 'node_updated') return 'node';
   if (kind === 'ip_changed') return 'ip';
-  if (kind === 'dns_synced' || kind === 'dns_failed') return 'dns';
+  if (kind === 'dns_synced' || kind === 'dns_failed' || kind === 'dns_ownership_conflict') return 'dns';
   if (kind.startsWith('nyanpass_')) return 'nyanpass';
   return 'other';
 }

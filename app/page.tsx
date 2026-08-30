@@ -6,6 +6,7 @@ import { ensureSchema } from '@/db/init';
 import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { nodeResponse } from '@/lib/node-response';
 import { expireProvisionAttempts } from '@/lib/provision-lifecycle';
+import { pruneEvents } from '@/lib/event-retention';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,6 +21,7 @@ async function AuthenticatedDashboard() {
   await ensureSchema();
   const db = await getDb();
   await expireProvisionAttempts(db, new Date());
+  await pruneEvents(db).catch(() => undefined);
   const nodeRows = await db.select().from(nodes).orderBy(desc(nodes.createdAt));
   const eventRows = await db.select({
     id: events.id,

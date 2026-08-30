@@ -9,7 +9,7 @@ set -euo pipefail
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.8.1"
+VERSION="0.8.2"
 SERVER_URL="${SERVER_URL:-}"
 TOKEN="${TOKEN:-}"
 ROOT_PASSWORD="${ROOT_PASSWORD:-}"
@@ -29,10 +29,20 @@ PROVISION_OUTCOME_DIR="/var/lib/ddns-monitor/provision-outcomes"
 DDNS_CREDENTIALS_VERIFIED=0
 CONFIG_TMP=""
 NYANPASS_TMP=""
-MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.1/public/monitor.sh"
-MONITOR_SHA256="28c9c07f1d297c778b8cc961d1a013318806bfd0f18029317a4b0acebb766443"
+NYANPASS_ARCHIVE_TMP=""
+NYANPASS_EXTRACT_TMP=""
+MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/monitor.sh"
+MONITOR_SHA256="62303a5081caf0234215f8aaef4401f5e8907488c9c5e35cdd2588181ea637a3"
 
 NYANPASS_INSTALL_URL="https://dl.nyafw.com/download/nyanpass-install.sh"
+NYANPASS_INSTALL_SHA256="ece867743399c6a4c262ca31292b79d81a97b0a6efa98ef309f75fdd3e5ca624"
+NYANPASS_BINARY_BASE_URL="https://dl.nyafw.com/download/zf-nc20260412"
+NYANPASS_BINARY_RELEASE="0e6b2dce-7547-4b51-ab4f-36a45b92649a"
+NYANPASS_BINARY_AMD64_SHA256="dcd751c7cb6efbe4c28fe35e026b312e01935a7dc81cb5a37386d67c2539da95"
+NYANPASS_BINARY_AMD64V3_SHA256="46b6c894a37b606888f491c6273a6a1d0cec4a176e7760c4ffb9b3c89c921a24"
+NYANPASS_BINARY_ARM64_SHA256="06a97fb08e5e3579e3b8e92e5c6d17a60edee6c6c77fb0274d35cf378898b365"
+NYANPASS_BINARY_URL=""
+NYANPASS_BINARY_SHA256=""
 TASK_LOCK_FILE="/run/ddns-monitor-nyanpass.lock"
 NYANPASS_TIMEOUT=600
 NYANPASS_INPUT=""
@@ -83,6 +93,8 @@ fail() { printf "%b[FAIL]%b %s\n" "$red" "$reset" "$*" >&2; exit 1; }
 cleanup_sensitive_temps() {
     case "${CONFIG_TMP:-}" in /etc/ddns-monitor.conf.*) rm -f -- "$CONFIG_TMP" ;; esac
     case "${NYANPASS_TMP:-}" in /tmp/nyanpass-install.*.sh) rm -f -- "$NYANPASS_TMP" ;; esac
+    case "${NYANPASS_ARCHIVE_TMP:-}" in /tmp/nyanpass-binary.*.zip) rm -f -- "$NYANPASS_ARCHIVE_TMP" ;; esac
+    case "${NYANPASS_EXTRACT_TMP:-}" in /tmp/nyanpass-extract.*) rm -rf -- "$NYANPASS_EXTRACT_TMP" ;; esac
 }
 trap cleanup_sensitive_temps EXIT
 
@@ -111,6 +123,7 @@ install_deps() {
     command -v jq >/dev/null 2>&1 || missing+=("jq")
     command -v timeout >/dev/null 2>&1 || missing+=("coreutils")
     command -v flock >/dev/null 2>&1 || missing+=("util-linux")
+    command -v unzip >/dev/null 2>&1 || missing+=("unzip")
 
     [[ ${#missing[@]} -eq 0 ]] && return 0
 
@@ -127,6 +140,70 @@ install_deps() {
     else
         log ERROR "未找到支持的包管理器，请手动安装：${missing[*]}"
         exit 1
+    fi
+}
+
+select_nyanpass_binary() {
+    local arch=""
+    case "$(uname -m)" in
+        aarch64|arm64) arch="arm64" ;;
+        x86_64|amd64)
+            if grep -Fq "Intel Core Processor (Broadwell)" /proc/cpuinfo 2>/dev/null; then
+                arch="amd64"
+            elif awk -F ':' '/flags/{print $2; exit}' /proc/cpuinfo | grep -qw avx2; then
+                arch="amd64v3"
+            else
+                arch="amd64"
+            fi
+            ;;
+        *) return 1 ;;
+    esac
+    NYANPASS_BINARY_URL="${NYANPASS_BINARY_BASE_URL}/rel_nodeclient_linux_${arch}-${NYANPASS_BINARY_RELEASE}.zip"
+    case "$arch" in
+        amd64) NYANPASS_BINARY_SHA256="$NYANPASS_BINARY_AMD64_SHA256" ;;
+        amd64v3) NYANPASS_BINARY_SHA256="$NYANPASS_BINARY_AMD64V3_SHA256" ;;
+        arm64) NYANPASS_BINARY_SHA256="$NYANPASS_BINARY_ARM64_SHA256" ;;
+    esac
+}
+
+verify_nyanpass_archive() {
+    local archive="$1" extract_dir="$2" members=""
+    members=$(unzip -Z1 "$archive" 2>/dev/null) || return 1
+    [[ "$members" == "rel_nodeclient" ]] || return 1
+    mkdir -p "$extract_dir"
+    unzip -qq "$archive" -d "$extract_dir" || return 1
+    [[ -f "$extract_dir/rel_nodeclient" && ! -L "$extract_dir/rel_nodeclient" ]]
+}
+
+stage_nyanpass_binary() {
+    local service_name="$1" binary="$2" target_dir="" candidate=""
+    target_dir="/opt/$service_name"
+    [[ ! -L "$target_dir" ]] || return 1
+    install -d -m 0755 "$target_dir"
+    candidate=$(mktemp "$target_dir/.rel_nodeclient.pulsedns.XXXXXX") || return 1
+    if ! install -m 0755 "$binary" "$candidate" || ! mv -f "$candidate" "$target_dir/rel_nodeclient"; then
+        rm -f "$candidate"
+        return 1
+    fi
+}
+
+write_nyanpass_start_script() {
+    local service_name="$1" arguments="$2" target_dir="" candidate="" word=""
+    local -a argument_words=()
+    target_dir="/opt/$service_name"
+    [[ ! -L "$target_dir" ]] || return 1
+    install -d -m 0755 "$target_dir"
+    candidate=$(mktemp "$target_dir/.start.pulsedns.XXXXXX") || return 1
+    read -r -a argument_words <<< "$arguments"
+    if ! {
+        printf 'source ./env.sh || true\n./rel_nodeclient'
+        for word in "${argument_words[@]}"; do printf ' %q' "$word"; done
+        printf '\n'
+    } > "$candidate" \
+        || ! chmod 0700 "$candidate" \
+        || ! mv -f "$candidate" "$target_dir/start.sh"; then
+        rm -f "$candidate"
+        return 1
     fi
 }
 
@@ -391,14 +468,21 @@ install_nyanpass_once() {
     local service_name="${2:-$NYANPASS_NAME}"
     local optimize="${3:-$NYANPASS_OPTIMIZE}"
     local unattended="${4:-$NYANPASS_UNATTENDED}"
-    local installer="" digest="" answer="" install_ok=false
+    local installer="" archive="" extract_dir="" digest="" archive_digest="" answer="" optimize_answer="" optimize_env="" install_ok=false
     need_root
     install_deps
 
     if ! parse_nyanpass_input "$input"; then
         fail "Nyanpass 命令无效。只接受官方安装命令，或 -t TOKEN -u HTTPS_URL；出口仅多一个独立的 -o 参数"
     fi
-    if [[ -n "$service_name" && ! "$service_name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$ ]]; then
+    if [[ -z "$service_name" ]]; then
+        [[ "$unattended" == "0" ]] || fail "无人值守安装必须提供 Nyanpass 服务名称"
+        read -r -p "请输入服务名 [默认 nyanpass] : " service_name
+        service_name="${service_name:-nyanpass}"
+        read -r -p "是否优化系统参数 [输入 y 优化] : " optimize_answer
+        [[ "$optimize_answer" =~ ^[Yy]$ ]] && optimize="1" || optimize="0"
+    fi
+    if [[ ! "$service_name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$ ]]; then
         fail "Nyanpass 服务名称只能包含字母、数字、点、下划线和短横线"
     fi
     [[ "$optimize" == "0" || "$optimize" == "1" ]] || fail "Nyanpass OPTIMIZE 只能为 0 或 1"
@@ -406,45 +490,50 @@ install_nyanpass_once() {
 
     installer=$(mktemp /tmp/nyanpass-install.XXXXXX.sh)
     NYANPASS_TMP="$installer"
-    if ! curl --proto '=https' --proto-redir '=https' -fLSs "$NYANPASS_INSTALL_URL" -o "$installer"; then
-        rm -f "$installer"
-        NYANPASS_TMP=""
-        fail "Nyanpass 官方安装器下载失败"
-    fi
-
+    archive=$(mktemp /tmp/nyanpass-binary.XXXXXX.zip)
+    NYANPASS_ARCHIVE_TMP="$archive"
+    extract_dir=$(mktemp -d /tmp/nyanpass-extract.XXXXXX)
+    NYANPASS_EXTRACT_TMP="$extract_dir"
+    select_nyanpass_binary || fail "当前 CPU 架构不受固定 Nyanpass 二进制支持"
+    curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs "$NYANPASS_INSTALL_URL" -o "$installer" \
+        || fail "Nyanpass 官方安装器下载失败"
     digest=$(sha256sum "$installer" | awk '{print $1}')
+    [[ "$digest" == "$NYANPASS_INSTALL_SHA256" ]] || fail "Nyanpass 官方安装器完整性校验失败；上游文件可能已更新，已拒绝执行"
+    bash -n "$installer" || fail "Nyanpass 官方安装器语法校验失败"
+    curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs "$NYANPASS_BINARY_URL" -o "$archive" \
+        || fail "Nyanpass 固定二进制下载失败"
+    archive_digest=$(sha256sum "$archive" | awk '{print $1}')
+    [[ "$archive_digest" == "$NYANPASS_BINARY_SHA256" ]] || fail "Nyanpass 固定二进制完整性校验失败"
+    verify_nyanpass_archive "$archive" "$extract_dir" || fail "Nyanpass 固定二进制压缩包结构无效"
     warn "识别为 Nyanpass ${PARSED_NYANPASS_ROLE}；即将执行官方安装器${service_name:+（${service_name}）}"
-    warn "安装器 SHA-256：$digest"
+    warn "安装器与 ${NYANPASS_BINARY_URL##*/} 均已通过固定 SHA-256 校验"
     if [[ "$unattended" == "1" ]]; then
         log INFO "无人值守安装 Nyanpass：${service_name:-未命名} (OPTIMIZE=${optimize})"
     else
         read -r -p "确认继续？[y/N]: " answer
         if [[ ! "$answer" =~ ^[Yy]$ ]]; then
-            rm -f "$installer"
-            NYANPASS_TMP=""
+            rm -f "$installer" "$archive"
+            rm -rf "$extract_dir"
+            NYANPASS_TMP=""; NYANPASS_ARCHIVE_TMP=""; NYANPASS_EXTRACT_TMP=""
             warn "已取消"
             return 0
         fi
     fi
 
-    if [[ -n "$service_name" ]]; then
-        if S="$service_name" OPTIMIZE="$optimize" timeout "$NYANPASS_TIMEOUT" bash "$installer" rel_nodeclient "$PARSED_NYANPASS_ARGS" 2>&1 | tee -a "$LOG_FILE"; then
-            install_ok=true
-        fi
-    else
-        if timeout "$NYANPASS_TIMEOUT" bash "$installer" rel_nodeclient "$PARSED_NYANPASS_ARGS" 2>&1 | tee -a "$LOG_FILE"; then
-            install_ok=true
-        fi
+    stage_nyanpass_binary "$service_name" "$extract_dir/rel_nodeclient" || fail "无法安全写入固定 Nyanpass 二进制"
+    write_nyanpass_start_script "$service_name" "$PARSED_NYANPASS_ARGS" || fail "无法安全写入 Nyanpass 启动参数"
+    if [[ "$optimize" == "1" ]]; then optimize_env="1"; fi
+    if S="$service_name" REINSTALL=1 OPTIMIZE="$optimize_env" NO_DOWNLOAD=1 timeout --kill-after=30s "$NYANPASS_TIMEOUT" bash "$installer" rel_nodeclient "$PARSED_NYANPASS_ARGS" 2>&1 | tee -a "$LOG_FILE"; then
+        install_ok=true
     fi
     if [[ "$install_ok" == true ]]; then
         log INFO "Nyanpass ${PARSED_NYANPASS_ROLE}安装完成"
     else
-        rm -f "$installer"
-        NYANPASS_TMP=""
         fail "Nyanpass 安装失败或超时"
     fi
-    rm -f "$installer"
-    NYANPASS_TMP=""
+    rm -f "$installer" "$archive"
+    rm -rf "$extract_dir"
+    NYANPASS_TMP=""; NYANPASS_ARCHIVE_TMP=""; NYANPASS_EXTRACT_TMP=""
     PARSED_NYANPASS_ARGS=""
     PARSED_NYANPASS_ROLE=""
     NYANPASS_NAME=""

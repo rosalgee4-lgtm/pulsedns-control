@@ -14,6 +14,7 @@ import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-o
 import { nodeResponse } from '@/lib/node-response';
 import { encryptBootstrapPayload } from '@/lib/bootstrap-payload';
 import { buildNodeStartupLauncher } from '@/lib/startup-launcher';
+import { dnsOwnershipConflictMessage, findDnsOwnershipConflict, isDnsOwnershipConstraintError } from '@/lib/dns-ownership';
 
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
@@ -86,12 +87,20 @@ export async function POST(request: Request) {
 
   await ensureSchema();
   const db = await getDb();
+  const ownershipConflict = await findDnsOwnershipConflict(db, { domainName, recordV4, recordV6 });
+  if (ownershipConflict) return Response.json({ error: dnsOwnershipConflictMessage(ownershipConflict) }, { status: 409 });
   const now = new Date();
-  await db.batch([
-    db.insert(nodes).values({ id, name, region, tokenHash, provider: 'alidns', domainName, recordV4, recordV6, nyanpassStatus: 'awaiting', provisionGeneration, bootstrapPayloadCiphertext, bootstrapDownloadTokenHash, createdAt: now, updatedAt: now }),
-    ...preparedInstances.map((instance) => db.insert(nyanpassInstances).values({ id: instance.id, nodeId: id, name: instance.name, role: instance.role, panelUrl: instance.panelUrl, status: 'bootstrap', bootstrapGeneration: provisionGeneration, optimize: instance.optimize, createdAt: now, updatedAt: now })),
-    db.insert(events).values({ nodeId: id, kind: 'node_created', message: `${user.email} 创建了节点并预配 ${preparedInstances.length} 个 Nyanpass 实例`, createdAt: now }),
-  ]);
+  try {
+    await db.batch([
+      db.insert(nodes).values({ id, name, region, tokenHash, provider: 'alidns', domainName, recordV4, recordV6, nyanpassStatus: 'awaiting', provisionGeneration, bootstrapPayloadCiphertext, bootstrapDownloadTokenHash, createdAt: now, updatedAt: now }),
+      ...preparedInstances.map((instance) => db.insert(nyanpassInstances).values({ id: instance.id, nodeId: id, name: instance.name, role: instance.role, panelUrl: instance.panelUrl, status: 'bootstrap', bootstrapGeneration: provisionGeneration, optimize: instance.optimize, createdAt: now, updatedAt: now })),
+      db.insert(events).values({ nodeId: id, kind: 'node_created', message: `${user.email} 创建了节点并预配 ${preparedInstances.length} 个 Nyanpass 实例`, createdAt: now }),
+    ]);
+  } catch (error) {
+    if (!isDnsOwnershipConstraintError(error)) throw error;
+    const concurrentOwner = await findDnsOwnershipConflict(db, { domainName, recordV4, recordV6 });
+    return Response.json({ error: concurrentOwner ? dnsOwnershipConflictMessage(concurrentOwner) : '该 DNS 记录刚刚被其他节点占用，请刷新后重试' }, { status: 409 });
+  }
 
   return Response.json({
     node: { id, name, region },
@@ -136,8 +145,19 @@ export async function PATCH(request: Request) {
     const [current] = await db.select().from(nodes).where(eq(nodes.id, id)).limit(1);
     if (!current) return Response.json({ error: '节点不存在' }, { status: 404 });
 
+    if (syncEnabled) {
+      const ownershipConflict = await findDnsOwnershipConflict(db, { domainName, recordV4, recordV6, excludeNodeId: id });
+      if (ownershipConflict) return Response.json({ error: dnsOwnershipConflictMessage(ownershipConflict) }, { status: 409 });
+    }
+
   const now = new Date();
-  await db.update(nodes).set({ name, region, domainName, recordV4, recordV6, syncEnabled, updatedAt: now }).where(eq(nodes.id, id));
+  try {
+    await db.update(nodes).set({ name, region, domainName, recordV4, recordV6, syncEnabled, updatedAt: now }).where(eq(nodes.id, id));
+  } catch (error) {
+    if (!isDnsOwnershipConstraintError(error)) throw error;
+    const concurrentOwner = await findDnsOwnershipConflict(db, { domainName, recordV4, recordV6, excludeNodeId: id });
+    return Response.json({ error: concurrentOwner ? dnsOwnershipConflictMessage(concurrentOwner) : '该 DNS 记录刚刚被其他节点占用，请刷新后重试' }, { status: 409 });
+  }
 
   const returnedEvents: Array<{ id: number; nodeId: string; nodeName: string; level: string; kind: string; message: string; createdAt: Date }> = [];
   const [updatedEvent] = await db.insert(events).values({

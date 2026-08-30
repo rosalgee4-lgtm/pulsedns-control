@@ -42,7 +42,7 @@ test('release scripts and documentation pin every published SHA-256', () => {
 
 test('release version and immutable channel agree across runtime entrypoints', () => {
   const version = JSON.parse(text('package.json')).version;
-  assert.equal(version, '0.8.1');
+  assert.equal(version, '0.8.2');
   for (const name of ['public/install.sh', 'public/monitor.sh', 'public/panel-install.sh']) {
     assert.equal(capture(name, /^VERSION="([0-9]+\.[0-9]+\.[0-9]+)"$/m), version);
   }
