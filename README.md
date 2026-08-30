@@ -69,7 +69,7 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 准备一台使用 systemd、glibc 2.28 或更高版本的 x86_64/arm64 Linux VPS，并确保至少有 2 GiB 可用磁盘及 768 MiB 可用内存与 swap；Alpine/musl、Docker、WSL 和 chroot 不受支持。安装器会自动识别公网 IPv4、询问 HTTP 端口（默认 `3100`），并生成 32 位随机访问路径；不需要域名、证书邮箱或 GitHub Token。只需向自己的来源 IP 放行所选端口，然后以 root 执行：
 
 ```bash
-( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.8.2' -o "$tmp" && test "$(sha256sum "$tmp" | awk '{print $1}')" = '5f8c72e44e001233737113133b4a732d42c65cd29a5c0f10231c71779c32ba8b' && grep -Fq '# PulseDNS Web 主控一键安装与管理脚本' "$tmp" && bash -n "$tmp" && bash "$tmp" install )
+( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.8.2' -o "$tmp" && test "$(sha256sum "$tmp" | awk '{print $1}')" = '572344947f9cc7d3db06bd731c0ca2c1a94211ae9faa5ec9e19ab5df6f8c0c65' && grep -Fq '# PulseDNS Web 主控一键安装与管理脚本' "$tmp" && bash -n "$tmp" && bash "$tmp" install )
 ```
 
 脚本会询问端口、管理员账号和阿里云 AccessKey，随后自动安装经过校验的 Node.js、构建 PulseDNS、创建本地 SQLite 数据库、配置管理员 Basic Auth 并注册 systemd 服务。Caddy、域名和 HTTPS 证书流程已完全移除。完成后会显示类似 `http://203.0.113.10:3100/32位随机路径` 的唯一入口；直接访问 IP 与端口根路径不能进入面板。再次不带参数运行同一脚本会打开操作菜单：
@@ -82,7 +82,7 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 一键升级命令：
 
 ```bash
-( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.8.2' -o "$tmp" && test "$(sha256sum "$tmp" | awk '{print $1}')" = '5f8c72e44e001233737113133b4a732d42c65cd29a5c0f10231c71779c32ba8b' && grep -Fq '# PulseDNS Web 主控一键安装与管理脚本' "$tmp" && bash -n "$tmp" && bash "$tmp" update )
+( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/main/public/panel-install.sh?v=0.8.2' -o "$tmp" && test "$(sha256sum "$tmp" | awk '{print $1}')" = '572344947f9cc7d3db06bd731c0ca2c1a94211ae9faa5ec9e19ab5df6f8c0c65' && grep -Fq '# PulseDNS Web 主控一键安装与管理脚本' "$tmp" && bash -n "$tmp" && bash "$tmp" update )
 ```
 
 面板数据保存在 `/var/lib/pulsedns-control/pulsedns.db`；管理员密码、阿里云凭据和独立生成的远程任务与开机凭据加密密钥保存在权限为 `0600` 的 `/etc/pulsedns-control.env`。密钥还会以 `0600` 权限单独保存在 `/var/lib/pulsedns-control/task-encryption.key`，以便卸载程序但保留数据库后仍能恢复待处理任务；升级旧面板时会自动补齐并校验该密钥。
