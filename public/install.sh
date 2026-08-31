@@ -32,7 +32,7 @@ NYANPASS_TMP=""
 NYANPASS_ARCHIVE_TMP=""
 NYANPASS_EXTRACT_TMP=""
 MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/monitor.sh"
-MONITOR_SHA256="62303a5081caf0234215f8aaef4401f5e8907488c9c5e35cdd2588181ea637a3"
+MONITOR_SHA256="f9f8992171e8ea37c7e99563710f698f1a94545c3598969a089fd1c86ae1f3e4"
 
 NYANPASS_INSTALL_URL="https://dl.nyafw.com/download/nyanpass-install.sh"
 NYANPASS_INSTALL_SHA256="ece867743399c6a4c262ca31292b79d81a97b0a6efa98ef309f75fdd3e5ca624"
@@ -117,6 +117,30 @@ fix_locale() {
     fi
 }
 
+install_packages_with_retry() {
+    local attempt=0
+    for attempt in {1..24}; do
+        if command -v apt-get >/dev/null 2>&1; then
+            if apt-get update -qq \
+                && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"; then
+                return 0
+            fi
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y -q "$@" && return 0
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y -q "$@" && return 0
+        elif command -v apk >/dev/null 2>&1; then
+            apk add --no-cache "$@" && return 0
+        else
+            log ERROR "未找到支持的包管理器，请手动安装：$*"
+            return 1
+        fi
+        log WARN "依赖暂时无法安装，等待包管理器或网络（${attempt}/24）"
+        [[ $attempt -eq 24 ]] || sleep 5
+    done
+    return 1
+}
+
 install_deps() {
     local missing=()
     command -v curl >/dev/null 2>&1 || missing+=("curl")
@@ -128,19 +152,13 @@ install_deps() {
     [[ ${#missing[@]} -eq 0 ]] && return 0
 
     log INFO "安装依赖：${missing[*]}"
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}"
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y -q "${missing[@]}"
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y -q "${missing[@]}"
-    elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache "${missing[@]}"
-    else
-        log ERROR "未找到支持的包管理器，请手动安装：${missing[*]}"
-        exit 1
-    fi
+    install_packages_with_retry "${missing[@]}" || fail "连续 24 次无法安装运行依赖"
+    command -v curl >/dev/null 2>&1 \
+        && command -v jq >/dev/null 2>&1 \
+        && command -v timeout >/dev/null 2>&1 \
+        && command -v flock >/dev/null 2>&1 \
+        && command -v unzip >/dev/null 2>&1 \
+        || fail "运行依赖安装后仍不完整"
 }
 
 select_nyanpass_binary() {
@@ -950,13 +968,15 @@ validate_provision_request() {
 }
 
 load_provision_config() {
-    local config_path="$1" metadata="" count="" expected="" index=0 offset=0
+    local config_path="$1" metadata="" count="" expected="" index=0 offset=0 value=""
     local -a values=()
     [[ "$ACTION" == "provision" ]] || fail "--provision-config 只能用于 Web 一键安装"
     [[ -f "$config_path" && ! -L "$config_path" ]] || fail "Web 一键安装配置文件无效"
     metadata=$(stat -c '%a:%u' "$config_path" 2>/dev/null || true)
     [[ "$metadata" == "600:0" ]] || fail "Web 一键安装配置文件必须由 root 持有且权限为 0600"
-    readarray -d '' -t values < "$config_path"
+    while IFS= read -r -d '' value; do
+        values[${#values[@]}]="$value"
+    done < "$config_path"
     rm -f -- "$config_path"
     [[ ${#values[@]} -ge 5 && "${values[0]}" == "PULSEDNS_PROVISION_V1" ]] || fail "Web 一键安装配置文件格式无效"
     count="${values[4]}"
@@ -979,7 +999,6 @@ load_provision_config() {
 }
 
 provision_node() {
-    local provision_lock_fd
     need_root
     validate_provision_request
     install_deps
@@ -988,8 +1007,8 @@ provision_node() {
     # Nyanpass batch runs. Hold the same machine-wide lock as that worker so a
     # queued Web task cannot overlap either the first bootstrap or a manual
     # retry after a partial failure.
-    exec {provision_lock_fd}>"$TASK_LOCK_FILE"
-    flock "$provision_lock_fd"
+    exec 8>"$TASK_LOCK_FILE"
+    flock 8
     log INFO "开始 Web 一键安装；DDNS 验收通过前不会安装 Nyanpass..."
     fix_locale
     configure_ssh
@@ -998,7 +1017,7 @@ provision_node() {
     install_nyanpass_batch
     [[ "$APPLY_BBR" == "1" ]] && configure_bbr
     verify_ddns_service
-    exec {provision_lock_fd}>&-
+    exec 8>&-
     log INFO "Web 一键安装全部完成"
 }
 

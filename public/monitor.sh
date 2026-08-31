@@ -361,12 +361,15 @@ retry_provision_outcome() {
 }
 
 retry_pending_acks() {
-    local ack_file="" job_id="" lease_token="" outcome="" error_code="" ack_status=0
+    local ack_file="" job_id="" lease_token="" outcome="" error_code="" value="" ack_status=0
     local -a values=()
     [[ -d "$TASK_STATE_DIR" ]] || return 0
     shopt -s nullglob
     for ack_file in "$TASK_STATE_DIR"/*.ack; do
-        mapfile -t values < "$ack_file"
+        values=()
+        while IFS= read -r value || [[ -n "$value" ]]; do
+            values[${#values[@]}]="$value"
+        done < "$ack_file"
         [[ ${#values[@]} -ge 3 ]] || continue
         job_id="${values[0]}"; lease_token="${values[1]}"; outcome="${values[2]}"; error_code="${values[3]:-}"
         valid_ack_payload "$job_id" "$lease_token" "$outcome" "$error_code" || continue
@@ -384,14 +387,17 @@ retry_pending_acks() {
 }
 
 recover_local_task_state() {
-    local started_file="" job_id="" lease_token="" revision=""
+    local started_file="" job_id="" lease_token="" revision="" value=""
     local -a values=()
     [[ -d "$TASK_STATE_DIR" ]] || return 0
     shopt -s nullglob
     for started_file in "$TASK_STATE_DIR"/*.started; do
         job_id="${started_file##*/}"; job_id="${job_id%.started}"
         [[ -e "${TASK_STATE_DIR}/${job_id}.ack" || -e "${TASK_STATE_DIR}/${job_id}.rejected" ]] && continue
-        mapfile -t values < "$started_file"
+        values=()
+        while IFS= read -r value || [[ -n "$value" ]]; do
+            values[${#values[@]}]="$value"
+        done < "$started_file"
         [[ ${#values[@]} -ge 3 ]] || continue
         lease_token="${values[1]}"; revision="${values[2]}"
         [[ "${values[0]}" == "$job_id" ]] && valid_task_uuid "$job_id" && valid_task_lease "$lease_token" && [[ "$revision" =~ ^[1-9][0-9]*$ ]] || continue

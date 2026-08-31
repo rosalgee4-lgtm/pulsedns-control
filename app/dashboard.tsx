@@ -548,7 +548,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
           : <>
             <p className="eyebrow cyan">节点已创建</p>
             <h2 id="create-title">复制开机脚本</h2>
-            <p className="modal-intro"><strong>下面的内容严格使用已验证的 wget 安装方式。</strong> 整段放进云厂商开机脚本：下载到 <code>/root</code>、赋予执行权限，再交给 Bash 完成 SSH、DDNS、全部 Nyanpass 与 BBR。</p>
+            <p className="modal-intro"><strong>下面的内容已适配云厂商开机环境。</strong> 它会补齐 Bash、下载工具与 CA 证书，等待包管理器和网络，下载到 <code>/root</code> 后完成 SSH、DDNS、全部 Nyanpass 与 BBR；后续开机会识别完成标记，不再访问已失效的直链。</p>
             <pre className="install-command">{created.startupScript}</pre>
             <button type="button" className="primary-button wide" disabled={startupCopyFeedback === 'copying'} onClick={() => copyStartupScript(created.startupScript)}>{startupCopyFeedback === 'copying' ? '正在复制…' : startupCopyFeedback === 'success' ? '已复制开机脚本' : '复制开机脚本'}</button>
             {startupCopyFeedback === 'success' && <p className="form-success" role="status">复制成功，可以直接粘贴到云厂商 User data。</p>}
@@ -556,7 +556,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
             <p className="form-hint"><strong>节点脚本下载直链（只显示一次）：</strong>保留它可以沿用你现有脚本，或在安装前始终下载主控当前版本。成功后凭据会被擦除，直链自动失效。</p>
             <pre className="install-command">{created.installUrl}</pre>
             <button type="button" className="ghost-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(created.installUrl)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制下载直链' : '复制下载直链'}</button>
-            {copyFeedback === 'success' && <p className="form-success" role="status">下载直链已复制，请替换到现有开机脚本的 wget URL。</p>}
+            {copyFeedback === 'success' && <p className="form-success" role="status">下载直链已复制，请替换现有开机脚本中的节点脚本下载地址。</p>}
             {copyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整下载直链；剪贴板内容没有更新。</p>}
             <button type="button" className="ghost-button wide" onClick={closeModal} disabled={saving}>完成</button>
           </>}

@@ -89,22 +89,24 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 
 ### 探针安装与菜单
 
-在 Web 控制台创建节点后会得到一条节点专属脚本下载直链；页面同时按已验证的 VPS 开机脚本形式生成一个很短的启动器，把该直链用 `wget` 下载到 `/root`、赋予执行权限并交给 Bash。完整节点脚本仍由直链动态返回，不会嵌进创建接口响应，所以主控修复脚本后无需重新创建节点；平台可为启动重试重复下载，直到本次预配成功后直链自动失效。页面生成的启动器结构如下：
+在 Web 控制台创建节点后会得到一条节点专属脚本下载直链；页面同时生成一个适合云厂商 user-data 的短启动器。启动器使用 POSIX `/bin/sh`，显式设置开机环境 `PATH`，先检查与当前安装代次匹配的节点完成标记；已经完成时只恢复 `ddns-monitor` 并跳过已经失效的直链。未完成时会校验或补齐 Bash、下载工具与 CA 证书，包管理器暂时被占用或网络未就绪时最多重试 24 次，并使用 `wget` 或 `curl` 最多重试下载 36 次。完整节点脚本仍由直链动态返回，不会嵌进创建接口响应，所以主控修复脚本后无需重新创建节点。
 
 ```bash
-#!/bin/bash
+#!/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
-wget -O '/root/pulsedns_<节点ID>_install.sh' '<节点脚本下载直链>' && chmod +x '/root/pulsedns_<节点ID>_install.sh' && bash '/root/pulsedns_<节点ID>_install.sh'
+# 已有完成标记时恢复 ddns-monitor；否则补齐环境并重试下载。
+# 下载到临时文件、经 Bash 语法检查后原子替换，再执行完整安装。
 ```
 
-下载的完整脚本会先在最小化系统中补齐 `curl`、CA 证书、`coreutils`、`util-linux` 与 `unzip`，再等待主控，把过程写入 `/var/log/pulsedns-bootstrap.log`、使用由内核在进程结束时自动释放的 `flock` 避免并发，并只在全部步骤成功后写入该节点专属的完成标记；后续重启只启动现有 DDNS 服务，不会覆盖令牌或重复安装 Nyanpass。直接打开交互式操作菜单时，也从固定的 GitHub HTTPS 发布通道下载安装器并校验 SHA-256（目标机需要 `sha256sum`）：
+下载的完整脚本会先在最小化系统中补齐 `curl`、CA 证书、`coreutils`、`util-linux` 与 `unzip`；包管理器锁或开机网络尚未就绪时会重试。随后等待主控，把过程写入 `/var/log/pulsedns-bootstrap.log`、使用固定文件描述符上的 `flock` 避免并发，并只在全部步骤成功后写入该节点专属的完成标记。启动器确认成功后删除 `/root` 下含一次性凭据的完整脚本；后续重启只启动现有 DDNS 服务，不会覆盖令牌、访问失效直链或重复安装 Nyanpass。直接打开交互式操作菜单时，也从固定的 GitHub HTTPS 发布通道下载安装器并校验 SHA-256（目标机需要 `sha256sum`）：
 
 ```bash
 (
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
   curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/install.sh -o "$tmp" &&
-  test "$(sha256sum "$tmp" | awk '{print $1}')" = 'dc3eb8d1a83f6eb2fef7f1e442e9c72c734cbdc348bc3cb1dfd7eddb452e43f3' &&
+  test "$(sha256sum "$tmp" | awk '{print $1}')" = '97f2cb26a1a71595f300c5c3e19fc5360d8d73e0ecfcf535a79e3db3c4890950' &&
   grep -Fq '# PulseDNS / 原 DDNS 脚本兼容安装器' "$tmp" &&
   bash -n "$tmp" &&
   bash "$tmp"
@@ -123,9 +125,9 @@ wget -O '/root/pulsedns_<节点ID>_install.sh' '<节点脚本下载直链>' && c
 6. 卸载 DDNS
 7. 升级现有探针，启用 Nyanpass 远程同步
 
-Web 中“添加探针节点”会先要求填写一次性 root 密码，并预配一个或多个 Nyanpass 服务名、官方命令及原脚本的 `OPTIMIZE` 选项。主控把 root 密码、节点原始令牌和规范化后的预配参数绑定 `nodeId + generation`，以 AES-GCM 加密暂存；页面只返回节点专属下载直链，访问时才解密并按当前代码动态生成脚本。可复制的开机启动器会先检查并补齐 `wget` 与 CA 证书，然后严格按 `wget -O → chmod +x → bash` 执行，并把首阶段日志写入 `/var/log/pulsedns-bootstrap-launcher.log`。完整脚本执行：补齐基础环境 → 主控令牌预校验 → 事务式配置 SSH → DDNS 安装 → 首次地址上报验收 → 全部 Nyanpass → BBR → DDNS 复检。主控确认令牌有效后才会修改 SSH；只有主控认证过至少一次格式正确的公网地址上报后才会继续安装 Nyanpass。阿里云 DNS 同步失败不会把有效探针误判为未安装；主控会保存已认证的当前 IP，探针更新本地缓存后按 10 分钟周期重新校准，不会每 10 秒放大失败写入。可复制启动器受 15 KiB user-data 上限约束，下载后的完整安装脚本另受 64 KiB 服务端上限保护。
+Web 中“添加探针节点”会先要求填写一次性 root 密码，并预配一个或多个 Nyanpass 服务名、官方命令及原脚本的 `OPTIMIZE` 选项。主控把 root 密码、节点原始令牌和规范化后的预配参数绑定 `nodeId + generation`，以 AES-GCM 加密暂存；页面只返回节点专属下载直链，访问时才解密并按当前代码动态生成脚本。可复制的 POSIX 开机启动器会先处理完成标记，再检查 Bash、下载工具与 CA 证书，通过临时文件和有界重试完成下载，并把首阶段日志写入 `/var/log/pulsedns-bootstrap-launcher.log`。完整脚本执行：补齐基础环境 → 主控令牌预校验 → 事务式配置 SSH → DDNS 安装 → 首次地址上报验收 → 全部 Nyanpass → BBR → DDNS 复检。主控确认令牌有效后才会修改 SSH；只有主控认证过至少一次格式正确的公网地址上报后才会继续安装 Nyanpass。阿里云 DNS 同步失败不会把有效探针误判为未安装；主控会保存已认证的当前 IP，探针更新本地缓存后按 10 分钟周期重新校准，不会每 10 秒放大失败写入。可复制启动器受 15 KiB user-data 上限约束，下载后的完整安装脚本另受 64 KiB 服务端上限保护。
 
-新节点创建后先显示“等待开机安装”，不能提前修改或下发额外实例。开机脚本开始执行后每 20 秒向主控续租，并用节点 generation 与本次随机 attempt ID 绑定回执；在真正修改机器前重跑会恢复同一次尝试，旧脚本或另一台机器的回执不能覆盖当前结果。若机器断电或安装进程被强制终止，租约到期后会标记“结果未知”，脚本也不会自动重复安装。恢复时绝对不要先删除 `started`：先确认旧进程已经停止，再使用原直链重新下载并运行同一节点脚本，让它用旧 attempt ID 向主控收敛为失败；只有日志明确显示“主控已确认旧安装失败”后，才删除日志给出的该节点精确 `started` 路径，并再次通过原直链下载运行，开始新尝试。`failed` 或 `uncertain` 时直链会保留；若回执未送达，继续保留标记，待网络和主控恢复后重试。成功后直链失效，也可以在明确核查后删除整个节点登记。
+新节点创建后先显示“等待开机安装”，不能提前修改或下发额外实例。开机脚本开始执行后每 20 秒向主控续租，并用节点 generation 与本次随机 attempt ID 绑定回执；在真正修改机器前重跑会恢复同一次尝试，旧脚本或另一台机器的回执不能覆盖当前结果。若机器断电或安装进程被强制终止，租约到期后会标记“结果未知”，脚本也不会自动重复安装。恢复时绝对不要先删除 `started`：先确认旧进程已经停止，再使用原直链重新下载并运行同一节点脚本，让它用旧 attempt ID 向主控收敛为失败；只有日志明确显示“主控已确认旧安装失败”后，才删除日志给出的该节点精确 `started` 路径，并再次通过原直链下载运行，开始新尝试。`failed` 或 `uncertain` 时直链会保留；若回执未送达，继续保留标记，待网络和主控恢复后重试。成功后直链失效；后续开机由本机完成标记直接恢复服务，不会再次访问它。
 
 创建完成后可在节点、DNS 记录和 Nyanpass 列表中直接修改配置。节点修改会保留原探针令牌与上报状态，并在已有公网地址时立即同步新的阿里云 DNS 映射；单独新增 Nyanpass 实例时，保存后点击“同步到机器”，探针会领取固定类型任务、安装并回传状态。一个节点可以登记多个实例，探针会逐个串行安装。实例名就是传给官方安装器的机器服务名，创建后不可直接改名，避免旧服务仍在 VPS 运行却失去登记；需要换名时应新增实例，确认新服务正常后再移除旧登记。尚未领取的任务可以安全取消；机器开始安装后不能远程取消。只有探针任务心跳离线且节点没有其他安装在运行时，排队超过 5 分钟才会自动结束并允许重试；运行租约超时则标记为“结果未知”并继续接受原探针的晚到回执，绝不会自动重复安装。总览“最近变更”和完整事件日志均支持按节点、类型、级别及关键词筛选，完整日志还可折叠。
 
@@ -146,7 +148,7 @@ HTTP 面板上的“复制开机脚本”和“复制下载直链”按钮都包
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
   curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/update.sh -o "$tmp" &&
-  test "$(sha256sum "$tmp" | awk '{print $1}')" = '7b3ff47f2dff1a6469bf12198f991b9b0f286ea797ddad39259600909096c659' &&
+  test "$(sha256sum "$tmp" | awk '{print $1}')" = '14c8a880b5cc21e47d6629749d211828e3b09bc3770b39733d26ef0cdc75fb66' &&
   bash "$tmp"
 )
 ```

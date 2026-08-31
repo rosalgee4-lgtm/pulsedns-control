@@ -80,7 +80,7 @@ export async function POST(request: Request) {
   }
   const [tokenHash, bootstrapDownloadTokenHash] = await Promise.all([sha256(token), sha256(downloadToken)]);
   const installUrl = `${origin}/api/v1/bootstrap/${id}/${downloadToken}`;
-  const startupScript = buildNodeStartupLauncher(id, installUrl);
+  const startupScript = buildNodeStartupLauncher(id, installUrl, provisionGeneration);
   if (new TextEncoder().encode(startupScript).byteLength > MAX_CLOUD_LAUNCHER_BYTES) {
     return Response.json({ error: '开机启动器超过 AWS user-data 的 15 KiB 安全上限' }, { status: 500 });
   }

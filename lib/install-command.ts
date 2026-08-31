@@ -14,7 +14,7 @@ type NodeProvisionCommandInput = {
 };
 
 export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/install.sh';
-export const PROBE_INSTALLER_SHA256 = 'dc3eb8d1a83f6eb2fef7f1e442e9c72c734cbdc348bc3cb1dfd7eddb452e43f3';
+export const PROBE_INSTALLER_SHA256 = '97f2cb26a1a71595f300c5c3e19fc5360d8d73e0ecfcf535a79e3db3c4890950';
 export const MAX_CLOUD_LAUNCHER_BYTES = 15 * 1024;
 export const MAX_BOOTSTRAP_RESPONSE_BYTES = 64 * 1024;
 
@@ -43,7 +43,6 @@ generation=${generation}
 attempt_id=''
 heartbeat_pid=''
 provision_pid=''
-bootstrap_lock_fd=''
 provision_disposition=''
 provision_config=''
 tmp=''
@@ -66,22 +65,34 @@ bootstrap_ca_bundle_ready() {
   [[ -s /etc/ssl/certs/ca-certificates.crt || -s /etc/pki/tls/certs/ca-bundle.crt || -s /etc/ssl/ca-bundle.pem || -s /etc/ssl/cert.pem ]]
 }
 
+install_bootstrap_packages() {
+  local attempt=0
+  for attempt in {1..24}; do
+    if command -v apt-get >/dev/null 2>&1; then
+      if apt-get update -qq \
+        && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates coreutils util-linux sed grep gawk; then
+        return 0
+      fi
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf install -y -q curl ca-certificates coreutils util-linux sed grep gawk && return 0
+    elif command -v yum >/dev/null 2>&1; then
+      yum install -y -q curl ca-certificates coreutils util-linux sed grep gawk && return 0
+    elif command -v apk >/dev/null 2>&1; then
+      apk add --no-cache curl ca-certificates coreutils util-linux sed grep gawk && return 0
+    else
+      echo '[PulseDNS] 未找到支持的包管理器，无法安装开机脚本环境'
+      return 1
+    fi
+    echo "[PulseDNS] 开机环境暂时无法安装，等待包管理器或网络（$attempt/24）"
+    [[ "$attempt" -eq 24 ]] || sleep 5
+  done
+  return 1
+}
+
 ensure_bootstrap_environment() {
   bootstrap_commands_ready && bootstrap_ca_bundle_ready && return 0
   echo '[PulseDNS] 安装开机脚本所需环境：curl、CA 证书、coreutils、util-linux'
-  if command -v apt-get >/dev/null 2>&1; then
-    apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates coreutils util-linux sed grep gawk
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y -q curl ca-certificates coreutils util-linux sed grep gawk
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y -q curl ca-certificates coreutils util-linux sed grep gawk
-  elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache curl ca-certificates coreutils util-linux sed grep gawk
-  else
-    echo '[PulseDNS] 未找到支持的包管理器，无法安装开机脚本环境'
-    return 1
-  fi
+  install_bootstrap_packages || return 1
   bootstrap_commands_ready && bootstrap_ca_bundle_ready
 }
 
@@ -205,10 +216,7 @@ cleanup() {
   [[ -z "$tmp" ]] || rm -f "$tmp"
   case "$provision_config" in "$state_dir"/.provision-config.*) rm -f "$provision_config" ;; esac
   provision_config=''
-  if [[ -n "$bootstrap_lock_fd" ]]; then
-    exec {bootstrap_lock_fd}>&-
-    bootstrap_lock_fd=''
-  fi
+  exec 9>&-
 }
 
 on_exit() {
@@ -238,8 +246,8 @@ if [[ $EUID -ne 0 ]]; then
 fi
 ensure_bootstrap_environment
 exec > >(tee -a "$log_file") 2>&1
-exec {bootstrap_lock_fd}>"$lock_file"
-if ! flock -n "$bootstrap_lock_fd"; then
+exec 9>"$lock_file"
+if ! flock -n 9; then
   echo '[PulseDNS] 另一个安装进程正在运行，本次退出'
   exit 1
 fi

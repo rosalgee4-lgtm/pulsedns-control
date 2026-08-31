@@ -13,6 +13,22 @@ function body(name) {
   return match[1];
 }
 
+test('boot-time dependency installation retries package locks and network startup', () => {
+  const packages = body('install_packages_with_retry');
+  const dependencies = body('install_deps');
+  assert.match(packages, /for attempt in \{1\.\.24\}/);
+  assert.match(packages, /apt-get[\s\S]*dnf[\s\S]*yum[\s\S]*apk/);
+  assert.match(packages, /等待包管理器或网络/);
+  assert.match(dependencies, /install_packages_with_retry "\$\{missing\[@\]\}"/);
+  assert.match(dependencies, /运行依赖安装后仍不完整/);
+});
+
+test('probe installation avoids Bash 4-only state and descriptor helpers', () => {
+  assert.doesNotMatch(source, /\breadarray\b|\bmapfile\b|exec \{[A-Za-z_][A-Za-z0-9_]*\}>/);
+  assert.match(source, /while IFS= read -r -d '' value/);
+  assert.match(source, /exec 8>"\$TASK_LOCK_FILE"[\s\S]*flock 8/);
+});
+
 test('DDNS installation clears stale IP state and verifies the service', () => {
   const install = body('install_ddns_service');
   assert.ok(install.indexOf('systemctl stop "$SERVICE_NAME"') < install.indexOf('rm -f "$CACHE_V4" "$CACHE_V6" "$REPORT_ACCEPTED_MARK"'));

@@ -41,6 +41,8 @@ test('startup script is boot-safe and only marks a fully successful installation
   assert.match(command, /pulsedns-bootstrap-11111111-2222-4333-8444-555555555555/);
   assert.match(command, /\/run\/pulsedns-bootstrap\.lock/);
   assert.match(command, /ensure_bootstrap_environment/);
+  assert.match(command, /for attempt in \{1\.\.24\}/);
+  assert.match(command, /等待包管理器或网络/);
   assert.match(command, /apt-get install -y -qq curl ca-certificates coreutils util-linux sed grep gawk/);
   assert.match(command, /for command_name in curl sha256sum flock setsid tee sed tr mktemp install chmod stat mv rm sleep grep awk systemctl/);
   for (const caBundle of [
@@ -53,9 +55,10 @@ test('startup script is boot-safe and only marks a fully successful installation
   assert.match(command, /bootstrap_commands_ready && bootstrap_ca_bundle_ready\n}/);
   const ensureInvocation = command.lastIndexOf('\nensure_bootstrap_environment\n');
   const logRedirection = command.indexOf('exec > >(tee -a "$log_file")');
-  const operationLock = command.indexOf('exec {bootstrap_lock_fd}>"$lock_file"');
+  const operationLock = command.indexOf('exec 9>"$lock_file"');
   assert.ok(ensureInvocation >= 0 && ensureInvocation < logRedirection && logRedirection < operationLock);
-  assert.match(command, /exec \{bootstrap_lock_fd\}>"\$lock_file"[\s\S]*flock -n "\$bootstrap_lock_fd"/);
+  assert.match(command, /exec 9>"\$lock_file"[\s\S]*flock -n 9/);
+  assert.doesNotMatch(command, /exec \{[A-Za-z_][A-Za-z0-9_]*\}>/);
   assert.doesNotMatch(command, /mkdir "\$lock_dir"/);
   assert.match(command, /tee -a "\$log_file"/);
   assert.match(command, /for attempt in \{1\.\.36\}/);

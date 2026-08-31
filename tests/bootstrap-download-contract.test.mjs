@@ -22,7 +22,7 @@ function handler(source, method, nextMethod) {
   return source.slice(start, end);
 }
 
-test('node creation returns only an unguessable bootstrap URL and its wget launcher', () => {
+test('node creation returns only an unguessable bootstrap URL and its boot-resilient launcher', () => {
   const post = handler(nodeRoute, 'POST', 'PATCH');
   const successStart = post.lastIndexOf('return Response.json({');
   assert.ok(successStart >= 0, 'successful node response missing');
@@ -33,7 +33,7 @@ test('node creation returns only an unguessable bootstrap URL and its wget launc
   assert.match(post, /sha256\(downloadToken\)/);
   assert.match(post, /bootstrapPayloadCiphertext, bootstrapDownloadTokenHash/);
   assert.match(post, /const installUrl = `\$\{origin\}\/api\/v1\/bootstrap\/\$\{id\}\/\$\{downloadToken\}`/);
-  assert.match(post, /const startupScript = buildNodeStartupLauncher\(id, installUrl\)/);
+  assert.match(post, /const startupScript = buildNodeStartupLauncher\(id, installUrl, provisionGeneration\)/);
   assert.match(successResponse, /\n\s*installUrl,/);
   assert.match(successResponse, /\n\s*startupScript,/);
   assert.doesNotMatch(successResponse, /\n\s*token\s*[,}:]/);
@@ -131,7 +131,7 @@ test('the dashboard receives the one-time URL plus its short launcher, not the f
   assert.match(dashboard, /created\.installUrl/);
   assert.doesNotMatch(dashboard, /created\.installCommand/);
   assert.match(dashboard, /created\.startupScript/);
-  assert.match(dashboard, /现有开机脚本的 wget URL/);
+  assert.match(dashboard, /现有开机脚本中的节点脚本下载地址/);
 });
 
 function restoreEnvironment(name, value) {

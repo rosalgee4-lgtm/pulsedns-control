@@ -134,7 +134,9 @@ test('monitor runs a background allowlisted worker and never evaluates server-pr
   assert.match(monitor, /validate_nyanpass_payload/);
   assert.match(monitor, /jq -e/);
   assert.match(monitor, /flock -n 9/);
-  assert.match(installScript, /flock "\$provision_lock_fd"/);
+  assert.match(installScript, /flock 8/);
+  assert.doesNotMatch(installScript, /exec \{[A-Za-z_][A-Za-z0-9_]*\}>/);
+  assert.doesNotMatch(monitor, /\bmapfile\b|\breadarray\b/);
   assert.match(installScript, /TASK_LOCK_FILE="\/run\/ddns-monitor-nyanpass\.lock"/);
   assert.match(monitor, /run_nyanpass_task_loop/);
   assert.match(monitor, /set \+e[\s\S]*\(\s*set -e[\s\S]*worker_status=\$\?/);
