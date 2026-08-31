@@ -21,8 +21,11 @@ const schemaStatements = [
     provision_generation INTEGER NOT NULL DEFAULT 0,
     provision_attempt_id TEXT,
     provision_lease_expires_at INTEGER,
+    provision_last_completed_step TEXT,
     bootstrap_payload_ciphertext TEXT,
     bootstrap_download_token_hash TEXT,
+    bootstrap_download_expires_at INTEGER,
+    bootstrap_download_consumed_at INTEGER,
     dns_operation_id TEXT,
     dns_operation_expires_at INTEGER,
     last_seen_at INTEGER,
@@ -149,8 +152,11 @@ async function initializeSchema() {
     if (!nodeColumns.some((column) => column.name === 'provision_generation')) db.exec('ALTER TABLE nodes ADD COLUMN provision_generation INTEGER NOT NULL DEFAULT 0');
     if (!nodeColumns.some((column) => column.name === 'provision_attempt_id')) db.exec('ALTER TABLE nodes ADD COLUMN provision_attempt_id TEXT');
     if (!nodeColumns.some((column) => column.name === 'provision_lease_expires_at')) db.exec('ALTER TABLE nodes ADD COLUMN provision_lease_expires_at INTEGER');
+    if (!nodeColumns.some((column) => column.name === 'provision_last_completed_step')) db.exec('ALTER TABLE nodes ADD COLUMN provision_last_completed_step TEXT');
     if (!nodeColumns.some((column) => column.name === 'bootstrap_payload_ciphertext')) db.exec('ALTER TABLE nodes ADD COLUMN bootstrap_payload_ciphertext TEXT');
     if (!nodeColumns.some((column) => column.name === 'bootstrap_download_token_hash')) db.exec('ALTER TABLE nodes ADD COLUMN bootstrap_download_token_hash TEXT');
+    if (!nodeColumns.some((column) => column.name === 'bootstrap_download_expires_at')) db.exec('ALTER TABLE nodes ADD COLUMN bootstrap_download_expires_at INTEGER');
+    if (!nodeColumns.some((column) => column.name === 'bootstrap_download_consumed_at')) db.exec('ALTER TABLE nodes ADD COLUMN bootstrap_download_consumed_at INTEGER');
     if (!nodeColumns.some((column) => column.name === 'dns_operation_id')) db.exec('ALTER TABLE nodes ADD COLUMN dns_operation_id TEXT');
     if (!nodeColumns.some((column) => column.name === 'dns_operation_expires_at')) db.exec('ALTER TABLE nodes ADD COLUMN dns_operation_expires_at INTEGER');
     const nyanpassColumns = db.prepare('PRAGMA table_info(nyanpass_instances)').all() as Array<{ name: string }>;
@@ -161,7 +167,7 @@ async function initializeSchema() {
     if (!nyanpassColumns.some((column) => column.name === 'active_task_id')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN active_task_id TEXT');
     if (!nyanpassColumns.some((column) => column.name === 'sync_error')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN sync_error TEXT');
     if (!nyanpassColumns.some((column) => column.name === 'bootstrap_generation')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN bootstrap_generation INTEGER');
-    db.exec(`UPDATE nodes SET provider = 'alidns' WHERE provider = 'cloudflare'; UPDATE nodes SET nyanpass_status = 'uncertain', provision_generation = CASE WHEN provision_generation < 1 THEN 1 ELSE provision_generation END WHERE nyanpass_status = 'provisioning' AND provision_attempt_id IS NULL; UPDATE nyanpass_instances SET bootstrap_generation = 1 WHERE config_revision = 0 AND status IN ('bootstrap', 'uncertain') AND bootstrap_generation IS NULL; UPDATE nyanpass_instances SET status = 'legacy' WHERE status = '等待安装';`);
+    db.exec(`UPDATE nodes SET provider = 'alidns' WHERE provider = 'cloudflare'; UPDATE nodes SET nyanpass_status = 'uncertain', provision_generation = CASE WHEN provision_generation < 1 THEN 1 ELSE provision_generation END WHERE nyanpass_status = 'provisioning' AND provision_attempt_id IS NULL; UPDATE nodes SET bootstrap_download_expires_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 1800000 WHERE bootstrap_download_token_hash IS NOT NULL AND bootstrap_download_expires_at IS NULL; UPDATE nyanpass_instances SET bootstrap_generation = 1 WHERE config_revision = 0 AND status IN ('bootstrap', 'uncertain') AND bootstrap_generation IS NULL; UPDATE nyanpass_instances SET status = 'legacy' WHERE status = '等待安装';`);
     db.exec(`${dnsOwnershipCleanupStatements.join(';\n')};`);
     db.exec(`${taskIndexStatements.join(';\n')}; PRAGMA optimize;`);
     return;
@@ -185,8 +191,11 @@ async function initializeSchema() {
   if (!nodeColumns.results.some((column) => column.name === 'provision_generation')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN provision_generation INTEGER NOT NULL DEFAULT 0');
   if (!nodeColumns.results.some((column) => column.name === 'provision_attempt_id')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN provision_attempt_id TEXT');
   if (!nodeColumns.results.some((column) => column.name === 'provision_lease_expires_at')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN provision_lease_expires_at INTEGER');
+  if (!nodeColumns.results.some((column) => column.name === 'provision_last_completed_step')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN provision_last_completed_step TEXT');
   if (!nodeColumns.results.some((column) => column.name === 'bootstrap_payload_ciphertext')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN bootstrap_payload_ciphertext TEXT');
   if (!nodeColumns.results.some((column) => column.name === 'bootstrap_download_token_hash')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN bootstrap_download_token_hash TEXT');
+  if (!nodeColumns.results.some((column) => column.name === 'bootstrap_download_expires_at')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN bootstrap_download_expires_at INTEGER');
+  if (!nodeColumns.results.some((column) => column.name === 'bootstrap_download_consumed_at')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN bootstrap_download_consumed_at INTEGER');
   if (!nodeColumns.results.some((column) => column.name === 'dns_operation_id')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN dns_operation_id TEXT');
   if (!nodeColumns.results.some((column) => column.name === 'dns_operation_expires_at')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN dns_operation_expires_at INTEGER');
   const nyanpassColumns = await db.prepare('PRAGMA table_info(nyanpass_instances)').all<{ name: string }>();
@@ -201,6 +210,7 @@ async function initializeSchema() {
   if (!nyanpassColumns.results.some((column) => column.name === 'bootstrap_generation')) await addD1Column(db, 'ALTER TABLE nyanpass_instances ADD COLUMN bootstrap_generation INTEGER');
   await db.prepare("UPDATE nodes SET provider = 'alidns' WHERE provider = 'cloudflare'").run();
   await db.prepare("UPDATE nodes SET nyanpass_status = 'uncertain', provision_generation = CASE WHEN provision_generation < 1 THEN 1 ELSE provision_generation END WHERE nyanpass_status = 'provisioning' AND provision_attempt_id IS NULL").run();
+  await db.prepare("UPDATE nodes SET bootstrap_download_expires_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 1800000 WHERE bootstrap_download_token_hash IS NOT NULL AND bootstrap_download_expires_at IS NULL").run();
   await db.prepare("UPDATE nyanpass_instances SET bootstrap_generation = 1 WHERE config_revision = 0 AND status IN ('bootstrap', 'uncertain') AND bootstrap_generation IS NULL").run();
   await db.prepare("UPDATE nyanpass_instances SET status = 'legacy' WHERE status = '等待安装'").run();
   await db.batch(dnsOwnershipCleanupStatements.map((statement) => db.prepare(statement)));

@@ -24,6 +24,7 @@ export async function expireProvisionAttempts(
     generation: nodes.provisionGeneration,
     attemptId: nodes.provisionAttemptId,
     leaseExpiresAt: nodes.provisionLeaseExpiresAt,
+    lastCompletedStep: nodes.provisionLastCompletedStep,
   }).from(nodes).where(and(...conditions));
 
   for (const node of expired) {
@@ -42,7 +43,7 @@ export async function expireProvisionAttempts(
     await db.batch([
       db.update(nyanpassInstances).set({
         status: 'uncertain',
-        syncError: '开机安装心跳已超时，机器可能发生部分变更；请先核查 VPS',
+        syncError: `开机安装心跳已超时，机器可能发生部分变更${node.lastCompletedStep ? `；最后完成步骤：${node.lastCompletedStep}` : ''}；请先核查 VPS`,
         updatedAt: now,
       }).where(and(
         eq(nyanpassInstances.nodeId, node.id),
@@ -53,7 +54,7 @@ export async function expireProvisionAttempts(
         nodeId: node.id,
         level: 'error',
         kind: 'nyanpass_bootstrap_uncertain',
-        message: `节点 ${node.name} 的开机安装心跳已超时，结果未知`,
+        message: `节点 ${node.name} 的开机安装心跳已超时，结果未知${node.lastCompletedStep ? `；最后完成步骤：${node.lastCompletedStep}` : ''}`,
         createdAt: now,
       }),
     ]);

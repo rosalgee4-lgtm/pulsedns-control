@@ -135,6 +135,7 @@ test('browser node DTO excludes credential hashes and internal operation identit
 test('live refresh updates full node report state and edit does not silently ignore OPTIMIZE', () => {
   assert.match(nyanpassRoute, /const nodeRows = await db\.select\(\)\.from\(nodes\)/);
   assert.match(nodeResponse, /lastSeenAt: node\.lastSeenAt\?\.toISOString\(\) \?\? null/);
+  assert.match(nodeResponse, /provisionLastCompletedStep: node\.provisionLastCompletedStep/);
   assert.match(dashboard, /setNodes\(refreshedNodes\)/);
   assert.match(nyanpassRoute, /optimize !== current\.optimize && !hasCommand/);
   assert.match(dashboard, /只修改 OPTIMIZE 开关时也必须重新粘贴官方命令/);

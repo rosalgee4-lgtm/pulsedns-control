@@ -6,6 +6,15 @@ import test from 'node:test';
 import { buildNodeStartupScript, PROBE_INSTALLER_SHA256, PROBE_INSTALLER_URL, shellArg } from '../lib/install-command.ts';
 
 const origin = 'http://203.0.113.9:39900/0123456789abcdef0123456789abcdef';
+const nyanpassRelease = {
+  installerUrl: 'https://dl.nyafw.com/download/nyanpass-install.sh',
+  installerSha256: 'a'.repeat(64),
+  binaryBaseUrl: 'https://dl.nyafw.com/download/zf-contract',
+  binaryRelease: '11111111-2222-4333-8444-555555555555',
+  binaryAmd64Sha256: 'b'.repeat(64),
+  binaryAmd64v3Sha256: 'c'.repeat(64),
+  binaryArm64Sha256: 'd'.repeat(64),
+};
 const command = buildNodeStartupScript({
   nodeId: '11111111-2222-4333-8444-555555555555',
   generation: 1,
@@ -16,6 +25,7 @@ const command = buildNodeStartupScript({
     { name: 'tenant-in', optimize: false, args: '-t inbound-token -u https://ny.example.test' },
     { name: 'tenant-out', optimize: true, args: '-o -t outbound-token -u https://ny.example.test' },
   ],
+  nyanpassRelease,
 });
 
 test('startup script uses the strict provision action and a pinned HTTPS installer', () => {
@@ -72,7 +82,7 @@ test('startup script is boot-safe and only marks a fully successful installation
   assert.match(command, /"protocol":1,"phase":"%s","generation":%s,"attemptId":"%s"/);
   assert.match(command, /persist_finish_outcome failed/);
   assert.match(command, /heartbeat_loop "\$\$"/);
-  assert.match(command, /setsid bash "\$tmp" provision[\s\S]*provision_pid=\$![\s\S]*wait "\$provision_pid"/);
+  assert.match(command, /PULSEDNS_PROVISION_STAGE_FILE="\$stage_file" setsid bash "\$tmp" provision[\s\S]*provision_pid=\$![\s\S]*wait "\$provision_pid"/);
   assert.match(command, /on_signal\(\)[\s\S]*stop_provision_process_group "\$signal"/);
   assert.match(command, /kill -s "\$signal" -- "-\$provision_pid"/);
   assert.match(command, /terminal_written/);
@@ -87,11 +97,15 @@ test('startup script is boot-safe and only marks a fully successful installation
   assert.match(command, /主控已确认旧安装失败[\s\S]*删除 \$started_file/);
   assert.match(command, /provision_disposition" == 'accepted'.*provision_disposition" == 'duplicate'/);
   assert.match(command, /systemctl enable --now ddns-monitor/);
+  assert.match(command, /current_provision_step\(\)/);
+  assert.match(command, /"lastCompletedStep":"%s"/);
 });
 
 test('node command keeps all Nyanpass instances in a root-only config instead of child argv', () => {
-  assert.match(command, /PULSEDNS_PROVISION_V1/);
-  assert.match(command, /printf '%s\\0' 'PULSEDNS_PROVISION_V1' "\$server_url" "\$token" "\$root_password" '2'/);
+  assert.match(command, /PULSEDNS_PROVISION_V2/);
+  assert.match(command, /printf '%s\\0' 'PULSEDNS_PROVISION_V2' "\$server_url" "\$token" "\$root_password"/);
+  assert.equal(command.includes(nyanpassRelease.binaryRelease), true);
+  assert.equal(command.includes(nyanpassRelease.binaryArm64Sha256), true);
   assert.equal(command.includes(shellArg("space $ bang ! slash \\ quote '")), true);
   assert.ok(command.indexOf("'tenant-in'") < command.indexOf("'tenant-out'"));
   assert.match(command, /printf '%s\\0' 'tenant-out' '1' '-o -t outbound-token/);
@@ -141,7 +155,7 @@ provision_node
 
   const failed = spawnSync(bash, ['-s', '--', 'ddns-fail'], { input: harness, encoding: 'utf8' });
   assert.equal(failed.status, 23, failed.stderr);
-  assert.deepEqual(failed.stdout.trim().split('\n'), ['root', 'validate', 'deps', 'credentials', 'fix_locale', 'ssh', 'ddns']);
+  assert.deepEqual(failed.stdout.trim().split('\n'), ['root', 'validate', 'deps', 'credentials', 'fix_locale', 'ddns']);
 
   const rejected = spawnSync(bash, ['-s', '--', 'credentials-fail'], { input: harness, encoding: 'utf8' });
   assert.equal(rejected.status, 41, rejected.stderr);
@@ -149,5 +163,5 @@ provision_node
 
   const succeeded = spawnSync(bash, ['-s', '--', 'success'], { input: harness, encoding: 'utf8' });
   assert.equal(succeeded.status, 0, succeeded.stderr);
-  assert.deepEqual(succeeded.stdout.trim().split('\n'), ['root', 'validate', 'deps', 'credentials', 'fix_locale', 'ssh', 'ddns', 'deps', 'nyanpass', 'bbr', 'verify']);
+  assert.deepEqual(succeeded.stdout.trim().split('\n'), ['root', 'validate', 'deps', 'credentials', 'fix_locale', 'ddns', 'nyanpass', 'bbr', 'ssh', 'verify']);
 });

@@ -87,7 +87,7 @@ test('systemd start-limit directives are in Unit rather than Service', () => {
   assert.doesNotMatch(serviceSection, /StartLimit/);
 });
 
-test('Web provision validates first and never reaches Nyanpass before DDNS verification', () => {
+test('Web provision validates first and changes SSH only after external installation steps', () => {
   const provision = body('provision_node');
   const validation = provision.indexOf('validate_provision_request');
   const ssh = provision.indexOf('configure_ssh');
@@ -95,12 +95,13 @@ test('Web provision validates first and never reaches Nyanpass before DDNS verif
   const nyanpass = provision.indexOf('install_nyanpass_batch');
   const bbr = provision.indexOf('configure_bbr');
   const finalVerification = provision.lastIndexOf('verify_ddns_service');
-  assert.ok(validation >= 0 && validation < ssh && ssh < ddns && ddns < nyanpass && nyanpass < bbr && bbr < finalVerification);
+  assert.ok(validation >= 0 && validation < ddns && ddns < nyanpass && nyanpass < bbr && bbr < ssh && ssh < finalVerification);
   assert.match(provision, /\[\[ "\$APPLY_BBR" == "1" \]\] && configure_bbr/);
   assert.match(source, /--bbr\)[\s\S]*APPLY_BBR="\$2"/);
   assert.match(source, /--provision-config\)[\s\S]*load_provision_config "\$2"/);
-  assert.match(source, /load_provision_config\(\)[\s\S]*PULSEDNS_PROVISION_V1/);
+  assert.match(source, /load_provision_config\(\)[\s\S]*PULSEDNS_PROVISION_V2/);
   assert.match(source, /load_provision_config\(\)[\s\S]*600:0/);
+  assert.match(source, /record_provision_stage ddns[\s\S]*record_provision_stage nyanpass[\s\S]*record_provision_stage bbr[\s\S]*record_provision_stage ssh/);
   assert.match(source, /Web 一键安装必须显式传入原脚本 BBR 参数/);
   assert.match(source, /^    provision\) provision_node ;;/m);
 });
@@ -170,4 +171,6 @@ test('Nyanpass installation executes only pinned installer and binary payloads',
   assert.ok(installerDigest < binaryDownload && binaryDownload < binaryDigest);
   assert.ok(binaryDigest < stage && stage < startScript && startScript < execute);
   assert.match(install, /OPTIMIZE="\$optimize_env"/);
+  assert.match(source, /validate_nyanpass_release_manifest\(\)/);
+  assert.match(source, /PULSEDNS_NYANPASS_INSTALLER_SHA256/);
 });

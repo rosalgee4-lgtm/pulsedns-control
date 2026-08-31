@@ -1,7 +1,8 @@
 export async function copyText(text: string): Promise<boolean> {
+  const normalizedText = text.replace(/\r\n?/g, '\n');
   if (window.isSecureContext && navigator.clipboard?.writeText) {
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(normalizedText);
       return true;
     } catch {
       // HTTP deployments and browser policies can reject the modern API.
@@ -10,7 +11,7 @@ export async function copyText(text: string): Promise<boolean> {
   }
 
   const textarea = document.createElement('textarea');
-  textarea.value = text;
+  textarea.value = normalizedText;
   textarea.readOnly = true;
   textarea.setAttribute('aria-hidden', 'true');
   textarea.style.position = 'fixed';

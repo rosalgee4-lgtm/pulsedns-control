@@ -1,3 +1,5 @@
+import type { TrustedNyanpassRelease } from '@/lib/nyanpass-release';
+
 export type ProvisionedNyanpassInstance = {
   name: string;
   optimize: boolean;
@@ -11,14 +13,15 @@ type NodeProvisionCommandInput = {
   token: string;
   rootPassword: string;
   instances: ProvisionedNyanpassInstance[];
+  nyanpassRelease: TrustedNyanpassRelease;
 };
 
 export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/install.sh';
-export const PROBE_INSTALLER_SHA256 = '97f2cb26a1a71595f300c5c3e19fc5360d8d73e0ecfcf535a79e3db3c4890950';
+export const PROBE_INSTALLER_SHA256 = 'b2b6b0e372dce447d05da8ccce27f36b3b8b10ff1bac120d0e1d2f0506240aca';
 export const MAX_CLOUD_LAUNCHER_BYTES = 15 * 1024;
 export const MAX_BOOTSTRAP_RESPONSE_BYTES = 64 * 1024;
 
-export function buildNodeStartupScript({ nodeId, generation, origin, token, rootPassword, instances }: NodeProvisionCommandInput) {
+export function buildNodeStartupScript({ nodeId, generation, origin, token, rootPassword, instances, nyanpassRelease }: NodeProvisionCommandInput) {
   const instanceConfigWrites = instances
     .map((instance) => `  printf '%s\\0' ${shellArg(instance.name)} ${shellArg(instance.optimize ? '1' : '0')} ${shellArg(instance.args)}`)
     .join('\n');
@@ -32,6 +35,7 @@ state_dir=${shellArg(stateDir)}
 attempt_file="$state_dir/attempt"
 started_file="$state_dir/started"
 complete_file="$state_dir/complete"
+stage_file="$state_dir/stage"
 outcome_dir=/var/lib/ddns-monitor/provision-outcomes
 lock_file=/run/pulsedns-bootstrap.lock
 server_url=${shellArg(origin)}
@@ -111,12 +115,26 @@ write_attempt_state() {
   mv -f "$state_tmp" "$target"
 }
 
+current_provision_step() {
+  local step=''
+  [[ -f "$stage_file" && ! -L "$stage_file" ]] || return 0
+  IFS= read -r step < "$stage_file" || return 0
+  case "$step" in ddns|nyanpass|bbr|ssh) printf '%s' "$step" ;; esac
+}
+
 report_provision_message() {
-  local phase="$1" outcome="\${2:-}" body='' response=''
+  local phase="$1" outcome="\${2:-}" body='' response='' last_completed_step=''
   provision_disposition=''
   command -v curl >/dev/null 2>&1 || return 1
+  last_completed_step=$(current_provision_step)
   if [[ "$phase" == 'finish' ]]; then
-    body=$(printf '{"protocol":1,"phase":"finish","generation":%s,"attemptId":"%s","outcome":"%s"}' "$generation" "$attempt_id" "$outcome")
+    if [[ -n "$last_completed_step" ]]; then
+      body=$(printf '{"protocol":1,"phase":"finish","generation":%s,"attemptId":"%s","outcome":"%s","lastCompletedStep":"%s"}' "$generation" "$attempt_id" "$outcome" "$last_completed_step")
+    else
+      body=$(printf '{"protocol":1,"phase":"finish","generation":%s,"attemptId":"%s","outcome":"%s"}' "$generation" "$attempt_id" "$outcome")
+    fi
+  elif [[ -n "$last_completed_step" ]]; then
+    body=$(printf '{"protocol":1,"phase":"%s","generation":%s,"attemptId":"%s","lastCompletedStep":"%s"}' "$phase" "$generation" "$attempt_id" "$last_completed_step")
   else
     body=$(printf '{"protocol":1,"phase":"%s","generation":%s,"attemptId":"%s"}' "$phase" "$generation" "$attempt_id")
   fi
@@ -147,11 +165,23 @@ report_provision_message() {
 }
 
 persist_finish_outcome() {
-  local outcome="$1" outcome_tmp='' outcome_file=''
+  local outcome="$1" outcome_tmp='' outcome_file='' last_completed_step=''
   install -d -m 0700 "$outcome_dir" || return 1
   outcome_file="$outcome_dir/$generation.$attempt_id.$outcome.json"
   outcome_tmp=$(mktemp "$outcome_dir/.provision.XXXXXX") || return 1
-  if ! printf '{"protocol":1,"phase":"finish","generation":%s,"attemptId":"%s","outcome":"%s"}\n' "$generation" "$attempt_id" "$outcome" > "$outcome_tmp" \
+  last_completed_step=$(current_provision_step)
+  if [[ -n "$last_completed_step" ]]; then
+    if ! printf '{"protocol":1,"phase":"finish","generation":%s,"attemptId":"%s","outcome":"%s","lastCompletedStep":"%s"}\n' "$generation" "$attempt_id" "$outcome" "$last_completed_step" > "$outcome_tmp"; then
+      rm -f "$outcome_tmp"
+      return 1
+    fi
+  else
+    if ! printf '{"protocol":1,"phase":"finish","generation":%s,"attemptId":"%s","outcome":"%s"}\n' "$generation" "$attempt_id" "$outcome" > "$outcome_tmp"; then
+      rm -f "$outcome_tmp"
+      return 1
+    fi
+  fi
+  if [[ ! -s "$outcome_tmp" ]] \
     || ! chmod 0600 "$outcome_tmp" \
     || ! mv -f "$outcome_tmp" "$outcome_file"; then
     rm -f "$outcome_tmp"
@@ -303,6 +333,7 @@ else
   [[ -r /proc/sys/kernel/random/uuid ]] || { echo '[PulseDNS] 无法生成本次安装 ID'; exit 1; }
   attempt_id=$(tr 'A-F' 'a-f' < /proc/sys/kernel/random/uuid)
   valid_attempt_id "$attempt_id" || { echo '[PulseDNS] 本次安装 ID 无效'; exit 1; }
+  rm -f "$stage_file"
   write_attempt_state "$attempt_file"
 fi
 
@@ -341,10 +372,10 @@ set +m
 provision_config=$(mktemp "$state_dir/.provision-config.XXXXXX")
 chmod 0600 "$provision_config"
 {
-  printf '%s\\0' 'PULSEDNS_PROVISION_V1' "$server_url" "$token" "$root_password" '${instances.length}'
+  printf '%s\\0' 'PULSEDNS_PROVISION_V2' "$server_url" "$token" "$root_password" ${shellArg(nyanpassRelease.installerUrl)} ${shellArg(nyanpassRelease.installerSha256)} ${shellArg(nyanpassRelease.binaryBaseUrl)} ${shellArg(nyanpassRelease.binaryRelease)} ${shellArg(nyanpassRelease.binaryAmd64Sha256)} ${shellArg(nyanpassRelease.binaryAmd64v3Sha256)} ${shellArg(nyanpassRelease.binaryArm64Sha256)} '${instances.length}'
 ${instanceConfigWrites}
 } > "$provision_config"
-setsid bash "$tmp" provision --provision-config "$provision_config" --bbr '1' &
+PULSEDNS_PROVISION_STAGE_FILE="$stage_file" setsid bash "$tmp" provision --provision-config "$provision_config" --bbr '1' &
 provision_pid=$!
 wait "$provision_pid"
 provision_status=$?

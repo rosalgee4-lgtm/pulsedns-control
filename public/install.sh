@@ -32,15 +32,15 @@ NYANPASS_TMP=""
 NYANPASS_ARCHIVE_TMP=""
 NYANPASS_EXTRACT_TMP=""
 MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/monitor.sh"
-MONITOR_SHA256="f9f8992171e8ea37c7e99563710f698f1a94545c3598969a089fd1c86ae1f3e4"
+MONITOR_SHA256="9cd34bc6185b4ab7e77605dc7473584b31334cbb878880d01e141d1b9b8882bb"
 
-NYANPASS_INSTALL_URL="https://dl.nyafw.com/download/nyanpass-install.sh"
-NYANPASS_INSTALL_SHA256="ece867743399c6a4c262ca31292b79d81a97b0a6efa98ef309f75fdd3e5ca624"
-NYANPASS_BINARY_BASE_URL="https://dl.nyafw.com/download/zf-nc20260412"
-NYANPASS_BINARY_RELEASE="0e6b2dce-7547-4b51-ab4f-36a45b92649a"
-NYANPASS_BINARY_AMD64_SHA256="dcd751c7cb6efbe4c28fe35e026b312e01935a7dc81cb5a37386d67c2539da95"
-NYANPASS_BINARY_AMD64V3_SHA256="46b6c894a37b606888f491c6273a6a1d0cec4a176e7760c4ffb9b3c89c921a24"
-NYANPASS_BINARY_ARM64_SHA256="06a97fb08e5e3579e3b8e92e5c6d17a60edee6c6c77fb0274d35cf378898b365"
+NYANPASS_INSTALL_URL="${PULSEDNS_NYANPASS_INSTALLER_URL:-https://dl.nyafw.com/download/nyanpass-install.sh}"
+NYANPASS_INSTALL_SHA256="${PULSEDNS_NYANPASS_INSTALLER_SHA256:-ece867743399c6a4c262ca31292b79d81a97b0a6efa98ef309f75fdd3e5ca624}"
+NYANPASS_BINARY_BASE_URL="${PULSEDNS_NYANPASS_BINARY_BASE_URL:-https://dl.nyafw.com/download/zf-nc20260412}"
+NYANPASS_BINARY_RELEASE="${PULSEDNS_NYANPASS_BINARY_RELEASE:-0e6b2dce-7547-4b51-ab4f-36a45b92649a}"
+NYANPASS_BINARY_AMD64_SHA256="${PULSEDNS_NYANPASS_BINARY_AMD64_SHA256:-dcd751c7cb6efbe4c28fe35e026b312e01935a7dc81cb5a37386d67c2539da95}"
+NYANPASS_BINARY_AMD64V3_SHA256="${PULSEDNS_NYANPASS_BINARY_AMD64V3_SHA256:-46b6c894a37b606888f491c6273a6a1d0cec4a176e7760c4ffb9b3c89c921a24}"
+NYANPASS_BINARY_ARM64_SHA256="${PULSEDNS_NYANPASS_BINARY_ARM64_SHA256:-06a97fb08e5e3579e3b8e92e5c6d17a60edee6c6c77fb0274d35cf378898b365}"
 NYANPASS_BINARY_URL=""
 NYANPASS_BINARY_SHA256=""
 TASK_LOCK_FILE="/run/ddns-monitor-nyanpass.lock"
@@ -54,6 +54,7 @@ PARSED_NYANPASS_ROLE=""
 NYANPASS_BATCH_NAMES=()
 NYANPASS_BATCH_OPTIMIZES=()
 NYANPASS_BATCH_INPUTS=()
+PROVISION_STAGE_FILE="${PULSEDNS_PROVISION_STAGE_FILE:-}"
 
 IPV4_SERVICES=(
     "https://api.ipify.org"
@@ -489,6 +490,7 @@ install_nyanpass_once() {
     local installer="" archive="" extract_dir="" digest="" archive_digest="" answer="" optimize_answer="" optimize_env="" install_ok=false
     need_root
     install_deps
+    validate_nyanpass_release_manifest
 
     if ! parse_nyanpass_input "$input"; then
         fail "Nyanpass 命令无效。只接受官方安装命令，或 -t TOKEN -u HTTPS_URL；出口仅多一个独立的 -o 参数"
@@ -954,6 +956,7 @@ validate_provision_request() {
     [[ ${#NYANPASS_BATCH_NAMES[@]} -ge 1 && ${#NYANPASS_BATCH_NAMES[@]} -le 16 ]] || fail "Web 一键安装需要 1-16 个 Nyanpass 实例"
     [[ ${#NYANPASS_BATCH_NAMES[@]} -eq ${#NYANPASS_BATCH_OPTIMIZES[@]} && ${#NYANPASS_BATCH_NAMES[@]} -eq ${#NYANPASS_BATCH_INPUTS[@]} ]] || fail "Web 一键安装的 Nyanpass 批量参数不完整"
     validate_ddns_config
+    validate_nyanpass_release_manifest
 
     for ((index = 0; index < ${#NYANPASS_BATCH_NAMES[@]}; index++)); do
         name="${NYANPASS_BATCH_NAMES[$index]}"
@@ -967,6 +970,30 @@ validate_provision_request() {
     PARSED_NYANPASS_ROLE=""
 }
 
+validate_nyanpass_release_manifest() {
+    [[ "$NYANPASS_INSTALL_URL" == "https://dl.nyafw.com/download/nyanpass-install.sh" ]] || fail "Nyanpass 安装器 URL 不属于可信官方路径"
+    [[ "$NYANPASS_BINARY_BASE_URL" =~ ^https://dl\.nyafw\.com/download/[A-Za-z0-9._/-]+$ ]] || fail "Nyanpass 二进制 URL 不属于可信官方路径"
+    [[ "$NYANPASS_BINARY_RELEASE" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || fail "Nyanpass 二进制发布 ID 无效"
+    local digest=""
+    for digest in "$NYANPASS_INSTALL_SHA256" "$NYANPASS_BINARY_AMD64_SHA256" "$NYANPASS_BINARY_AMD64V3_SHA256" "$NYANPASS_BINARY_ARM64_SHA256"; do
+        [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || fail "Nyanpass 可信发布 SHA-256 无效"
+    done
+}
+
+record_provision_stage() {
+    local step="$1" stage_tmp=""
+    [[ -n "$PROVISION_STAGE_FILE" ]] || return 0
+    case "$PROVISION_STAGE_FILE" in /var/lib/pulsedns-bootstrap-*/stage) ;; *) return 1 ;; esac
+    [[ -d "${PROVISION_STAGE_FILE%/*}" && ! -L "${PROVISION_STAGE_FILE%/*}" ]] || return 1
+    stage_tmp=$(mktemp "${PROVISION_STAGE_FILE}.XXXXXX") || return 1
+    if ! printf '%s\n' "$step" > "$stage_tmp" \
+        || ! chmod 0600 "$stage_tmp" \
+        || ! mv -f "$stage_tmp" "$PROVISION_STAGE_FILE"; then
+        rm -f "$stage_tmp"
+        return 1
+    fi
+}
+
 load_provision_config() {
     local config_path="$1" metadata="" count="" expected="" index=0 offset=0 value=""
     local -a values=()
@@ -978,10 +1005,17 @@ load_provision_config() {
         values[${#values[@]}]="$value"
     done < "$config_path"
     rm -f -- "$config_path"
-    [[ ${#values[@]} -ge 5 && "${values[0]}" == "PULSEDNS_PROVISION_V1" ]] || fail "Web 一键安装配置文件格式无效"
-    count="${values[4]}"
+    [[ ${#values[@]} -ge 12 && "${values[0]}" == "PULSEDNS_PROVISION_V2" ]] || fail "Web 一键安装配置文件格式无效"
+    NYANPASS_INSTALL_URL="${values[4]}"
+    NYANPASS_INSTALL_SHA256="${values[5]}"
+    NYANPASS_BINARY_BASE_URL="${values[6]}"
+    NYANPASS_BINARY_RELEASE="${values[7]}"
+    NYANPASS_BINARY_AMD64_SHA256="${values[8]}"
+    NYANPASS_BINARY_AMD64V3_SHA256="${values[9]}"
+    NYANPASS_BINARY_ARM64_SHA256="${values[10]}"
+    count="${values[11]}"
     [[ "$count" =~ ^[1-9][0-9]*$ && "$count" -le 16 ]] || fail "Web 一键安装配置中的实例数量无效"
-    expected=$((5 + count * 3))
+    expected=$((12 + count * 3))
     [[ ${#values[@]} -eq $expected ]] || fail "Web 一键安装配置文件字段不完整"
     SERVER_URL="${values[1]}"
     TOKEN="${values[2]}"
@@ -990,7 +1024,7 @@ load_provision_config() {
     NYANPASS_BATCH_OPTIMIZES=()
     NYANPASS_BATCH_INPUTS=()
     for ((index = 0; index < count; index++)); do
-        offset=$((5 + index * 3))
+        offset=$((12 + index * 3))
         NYANPASS_BATCH_NAMES+=("${values[$offset]}")
         NYANPASS_BATCH_OPTIMIZES+=("${values[$((offset + 1))]}")
         NYANPASS_BATCH_INPUTS+=("${values[$((offset + 2))]}")
@@ -1009,13 +1043,16 @@ provision_node() {
     # retry after a partial failure.
     exec 8>"$TASK_LOCK_FILE"
     flock 8
-    log INFO "开始 Web 一键安装；DDNS 验收通过前不会安装 Nyanpass..."
+    log INFO "开始 Web 一键安装；外部依赖完成后才会修改 SSH 登录凭据..."
     fix_locale
-    configure_ssh
     install_ddns_service
-    install_deps
+    record_provision_stage ddns || log WARN "无法记录 DDNS 完成阶段"
     install_nyanpass_batch
+    record_provision_stage nyanpass || log WARN "无法记录 Nyanpass 完成阶段"
     [[ "$APPLY_BBR" == "1" ]] && configure_bbr
+    record_provision_stage bbr || log WARN "无法记录 BBR 完成阶段"
+    configure_ssh
+    record_provision_stage ssh || log WARN "无法记录 SSH 完成阶段"
     verify_ddns_service
     exec 8>&-
     log INFO "Web 一键安装全部完成"
@@ -1025,7 +1062,6 @@ install_all() {
     need_root
     log INFO "开始完整安装..."
     fix_locale
-    configure_ssh
     install_ddns_service
     install_deps
     if [[ ${#NYANPASS_BATCH_NAMES[@]} -gt 0 ]]; then
@@ -1034,6 +1070,7 @@ install_all() {
         install_nyanpass_many
     fi
     configure_bbr
+    configure_ssh
     log INFO "全部安装完成"
     log INFO "查看 DDNS 日志：tail -f $LOG_FILE"
 }
@@ -1042,7 +1079,7 @@ menu() {
     local choice=""
     while true; do
         printf '\n%bPulseDNS 安装管理器 v%s%b\n' "$blue" "$VERSION" "$reset"
-        printf '  1) 完整安装（SSH + DDNS + Nyanpass + BBR）\n'
+        printf '  1) 完整安装（DDNS + Nyanpass + BBR + SSH）\n'
         printf '  2) 仅安装 / 重新配置 DDNS\n'
         printf '  3) 安装 Nyanpass（可连续添加多个实例）\n'
         printf '  4) 配置 root 密码和 SSH\n'

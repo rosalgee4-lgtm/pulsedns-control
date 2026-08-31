@@ -66,7 +66,9 @@ test('agent task endpoint authenticates, conditionally leases, validates revisio
   assert.match(taskRoute, /task\.status !== 'running' && task\.status !== 'uncertain'/);
   assert.match(taskRoute, /reconcileTerminalInstance/);
   assert.match(taskRoute, /Cache-Control.*no-store/);
-  assert.doesNotMatch(taskRoute, /installerUrl|shellCommand|bashCommand/);
+  assert.match(taskRoute, /trustedNyanpassRelease/);
+  assert.match(taskRoute, /release: nyanpassRelease/);
+  assert.doesNotMatch(taskRoute, /shellCommand|bashCommand/);
   assert.match(proxy, /'\/api\/v1\/tasks'/);
 });
 
@@ -132,6 +134,8 @@ test('monitor runs a background allowlisted worker and never evaluates server-pr
   assert.match(monitor, /action" != "nyanpass_apply_v1"/);
   assert.match(monitor, /NYANPASS_INSTALL_URL="https:\/\/dl\.nyafw\.com\/download\/nyanpass-install\.sh"/);
   assert.match(monitor, /validate_nyanpass_payload/);
+  assert.match(monitor, /validate_nyanpass_release_manifest/);
+  assert.match(monitor, /\.job\.payload\.release\.installerSha256/);
   assert.match(monitor, /jq -e/);
   assert.match(monitor, /flock -n 9/);
   assert.match(installScript, /flock 8/);
@@ -181,10 +185,11 @@ test('probe executables use an HTTPS release plus a pinned digest', () => {
   assert.equal(pinnedMonitorHash, createHash('sha256').update(monitor).digest('hex'));
 
   const installerHash = monitor.match(/^NYANPASS_INSTALL_SHA256="([a-f0-9]{64})"$/m)?.[1];
-  assert.equal(installerHash, installScript.match(/^NYANPASS_INSTALL_SHA256="([a-f0-9]{64})"$/m)?.[1]);
+  assert.equal(installerHash, installScript.match(/^NYANPASS_INSTALL_SHA256="\$\{PULSEDNS_NYANPASS_INSTALLER_SHA256:-([a-f0-9]{64})\}"$/m)?.[1]);
   for (const architecture of ['AMD64', 'AMD64V3', 'ARM64']) {
     const pattern = new RegExp(`^NYANPASS_BINARY_${architecture}_SHA256="([a-f0-9]{64})"$`, 'm');
-    assert.equal(monitor.match(pattern)?.[1], installScript.match(pattern)?.[1]);
+    const dynamicPattern = new RegExp(`^NYANPASS_BINARY_${architecture}_SHA256="\\$\\{PULSEDNS_NYANPASS_BINARY_${architecture}_SHA256:-([a-f0-9]{64})\\}"$`, 'm');
+    assert.equal(monitor.match(pattern)?.[1], installScript.match(dynamicPattern)?.[1]);
   }
   for (const source of [monitor, installScript]) {
     assert.match(source, /verify_nyanpass_archive/);

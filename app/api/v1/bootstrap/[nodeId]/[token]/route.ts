@@ -1,10 +1,12 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { nodes } from '@/db/schema';
 import { decryptBootstrapPayload } from '@/lib/bootstrap-payload';
+import { bootstrapDownloadWindow } from '@/lib/bootstrap-download';
 import { buildNodeStartupScript, MAX_BOOTSTRAP_RESPONSE_BYTES } from '@/lib/install-command';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
+import { trustedNyanpassRelease } from '@/lib/nyanpass-release';
 import { publicOrigin } from '@/lib/public-origin';
 import { sha256 } from '@/lib/security';
 
@@ -42,17 +44,34 @@ export async function GET(
       status: nodes.nyanpassStatus,
       generation: nodes.provisionGeneration,
       payloadCiphertext: nodes.bootstrapPayloadCiphertext,
+      downloadExpiresAt: nodes.bootstrapDownloadExpiresAt,
+      downloadConsumedAt: nodes.bootstrapDownloadConsumedAt,
     }).from(nodes).where(and(
       eq(nodes.id, nodeId),
       eq(nodes.bootstrapDownloadTokenHash, tokenHash),
     )).limit(1);
     if (!node?.payloadCiphertext || !downloadableStatuses.has(node.status)) return notFound();
 
+    const now = new Date();
+    const downloadWindow = bootstrapDownloadWindow(node.downloadExpiresAt, node.downloadConsumedAt, now);
+    if (!downloadWindow.allowed) {
+      await db.update(nodes).set({ bootstrapDownloadTokenHash: null }).where(and(
+        eq(nodes.id, node.id),
+        eq(nodes.bootstrapDownloadTokenHash, tokenHash),
+      ));
+      return notFound();
+    }
     let payload;
     try {
       payload = await decryptBootstrapPayload(node.payloadCiphertext, { nodeId: node.id, generation: node.generation });
     } catch {
       return notFound();
+    }
+    let nyanpassRelease;
+    try {
+      nyanpassRelease = await trustedNyanpassRelease();
+    } catch {
+      return new Response('Nyanpass trusted release manifest is unavailable.\n', { status: 503, headers: noStoreHeaders });
     }
     const script = buildNodeStartupScript({
       nodeId: node.id,
@@ -61,9 +80,18 @@ export async function GET(
       token: payload.agentToken,
       rootPassword: payload.rootPassword,
       instances: payload.instances,
+      nyanpassRelease,
     });
     if (new TextEncoder().encode(script).byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES) {
       return new Response('完整安装脚本超过 64 KiB 服务端安全上限，请联系管理员更新配置。\n', { status: 409, headers: noStoreHeaders });
+    }
+    if (downloadWindow.shouldConsume) {
+      const [consumed] = await db.update(nodes).set({ bootstrapDownloadConsumedAt: now }).where(and(
+        eq(nodes.id, node.id),
+        eq(nodes.bootstrapDownloadTokenHash, tokenHash),
+        isNull(nodes.bootstrapDownloadConsumedAt),
+      )).returning({ id: nodes.id });
+      if (!consumed) return notFound();
     }
     return new Response(script, {
       headers: {

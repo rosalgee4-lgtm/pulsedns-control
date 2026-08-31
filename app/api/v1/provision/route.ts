@@ -13,6 +13,7 @@ const attemptPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-
 
 type ProvisionPhase = 'start' | 'heartbeat' | 'finish';
 type ProvisionOutcome = 'succeeded' | 'failed';
+type ProvisionStep = 'ddns' | 'nyanpass' | 'bbr' | 'ssh';
 
 export async function POST(request: Request) {
   const token = request.headers.get('x-secret-token')?.trim() || bearerToken(request.headers.get('authorization'));
@@ -21,18 +22,22 @@ export async function POST(request: Request) {
   if (!body) return errorResponse('回执格式无效', 400);
   const phase = body.phase as ProvisionPhase;
   const allowedKeys = phase === 'finish'
-    ? new Set(['protocol', 'phase', 'generation', 'attemptId', 'outcome'])
-    : new Set(['protocol', 'phase', 'generation', 'attemptId']);
+    ? new Set(['protocol', 'phase', 'generation', 'attemptId', 'outcome', 'lastCompletedStep'])
+    : new Set(['protocol', 'phase', 'generation', 'attemptId', 'lastCompletedStep']);
   if (Object.keys(body).some((key) => !allowedKeys.has(key))) return errorResponse('回执格式无效', 400);
   const generation = body.generation;
   const attemptId = typeof body.attemptId === 'string' ? body.attemptId : '';
   const outcome = body.outcome as ProvisionOutcome | undefined;
+  const lastCompletedStep = body.lastCompletedStep as ProvisionStep | undefined;
   if (body.protocol !== 1 || !['start', 'heartbeat', 'finish'].includes(phase)
     || !Number.isSafeInteger(generation) || Number(generation) < 1 || !attemptPattern.test(attemptId)) {
     return errorResponse('回执参数无效', 400);
   }
   if ((phase === 'finish' && outcome !== 'succeeded' && outcome !== 'failed') || (phase !== 'finish' && body.outcome !== undefined)) {
     return errorResponse('回执结果无效', 400);
+  }
+  if (lastCompletedStep !== undefined && !['ddns', 'nyanpass', 'bbr', 'ssh'].includes(lastCompletedStep)) {
+    return errorResponse('安装阶段无效', 400);
   }
 
   await ensureSchema();
@@ -61,6 +66,7 @@ export async function POST(request: Request) {
           nyanpassStatus: 'provisioning',
           provisionAttemptId: attemptId,
           provisionLeaseExpiresAt: leaseExpiresAt,
+          provisionLastCompletedStep: lastCompletedStep ?? null,
           agentVersion,
           updatedAt: now,
         }).where(and(
@@ -76,11 +82,11 @@ export async function POST(request: Request) {
     }
     const [current] = await db.select({ status: nodes.nyanpassStatus, attemptId: nodes.provisionAttemptId }).from(nodes).where(eq(nodes.id, node.id)).limit(1);
     if (current?.status === 'provisioning' && current.attemptId === attemptId) {
-      await db.update(nodes).set({ provisionLeaseExpiresAt: leaseExpiresAt, agentVersion, updatedAt: now }).where(and(eq(nodes.id, node.id), eq(nodes.provisionAttemptId, attemptId), eq(nodes.nyanpassStatus, 'provisioning')));
+      await db.update(nodes).set({ provisionLeaseExpiresAt: leaseExpiresAt, ...(lastCompletedStep ? { provisionLastCompletedStep: lastCompletedStep } : {}), agentVersion, updatedAt: now }).where(and(eq(nodes.id, node.id), eq(nodes.provisionAttemptId, attemptId), eq(nodes.nyanpassStatus, 'provisioning')));
       return okResponse('duplicate');
     }
     if (current?.status === 'uncertain' && current.attemptId === attemptId) {
-      await db.update(nodes).set({ nyanpassStatus: 'provisioning', provisionLeaseExpiresAt: leaseExpiresAt, agentVersion, updatedAt: now }).where(and(eq(nodes.id, node.id), eq(nodes.provisionAttemptId, attemptId), eq(nodes.nyanpassStatus, 'uncertain')));
+      await db.update(nodes).set({ nyanpassStatus: 'provisioning', provisionLeaseExpiresAt: leaseExpiresAt, ...(lastCompletedStep ? { provisionLastCompletedStep: lastCompletedStep } : {}), agentVersion, updatedAt: now }).where(and(eq(nodes.id, node.id), eq(nodes.provisionAttemptId, attemptId), eq(nodes.nyanpassStatus, 'uncertain')));
       return okResponse('duplicate');
     }
     return okResponse(current?.status === 'uncertain' ? 'busy' : 'conflict');
@@ -91,7 +97,7 @@ export async function POST(request: Request) {
     if (node.nyanpassStatus === 'ready' || node.nyanpassStatus === 'failed') return okResponse('duplicate');
     if (node.nyanpassStatus !== 'provisioning' && node.nyanpassStatus !== 'uncertain') return okResponse('conflict');
     const leaseExpiresAt = new Date(now.getTime() + provisionLeaseMs);
-    await db.update(nodes).set({ nyanpassStatus: 'provisioning', provisionLeaseExpiresAt: leaseExpiresAt, agentVersion, updatedAt: now }).where(and(
+    await db.update(nodes).set({ nyanpassStatus: 'provisioning', provisionLeaseExpiresAt: leaseExpiresAt, ...(lastCompletedStep ? { provisionLastCompletedStep: lastCompletedStep } : {}), agentVersion, updatedAt: now }).where(and(
       eq(nodes.id, node.id),
       eq(nodes.provisionGeneration, numericGeneration),
       eq(nodes.provisionAttemptId, attemptId),
@@ -100,7 +106,7 @@ export async function POST(request: Request) {
     return okResponse('accepted');
   }
 
-  return finishProvision(db, node, numericGeneration, attemptId, outcome!, agentVersion, now);
+  return finishProvision(db, node, numericGeneration, attemptId, outcome!, lastCompletedStep, agentVersion, now);
   } finally {
     await releaseNodeOperationLock(db, authenticated.id, operationId);
   }
@@ -112,6 +118,7 @@ async function finishProvision(
   generation: number,
   attemptId: string,
   outcome: ProvisionOutcome,
+  lastCompletedStep: ProvisionStep | undefined,
   agentVersion: string | null,
   now: Date,
 ) {
@@ -145,6 +152,9 @@ async function finishProvision(
         db.update(nodes).set({
           bootstrapPayloadCiphertext: null,
           bootstrapDownloadTokenHash: null,
+          bootstrapDownloadExpiresAt: null,
+          bootstrapDownloadConsumedAt: null,
+          ...(lastCompletedStep ? { provisionLastCompletedStep: lastCompletedStep } : {}),
           updatedAt: now,
         }).where(and(
           eq(nodes.id, node.id),
@@ -155,7 +165,15 @@ async function finishProvision(
         instanceUpdate,
       ]);
     } else {
-      await instanceUpdate;
+      await db.batch([
+        db.update(nodes).set({ ...(lastCompletedStep ? { provisionLastCompletedStep: lastCompletedStep } : {}), updatedAt: now }).where(and(
+          eq(nodes.id, node.id),
+          eq(nodes.provisionGeneration, generation),
+          eq(nodes.provisionAttemptId, attemptId),
+          eq(nodes.nyanpassStatus, 'failed'),
+        )),
+        instanceUpdate,
+      ]);
     }
     return okResponse('duplicate');
   }
@@ -166,7 +184,10 @@ async function finishProvision(
       ...(outcome === 'succeeded' ? {
         bootstrapPayloadCiphertext: null,
         bootstrapDownloadTokenHash: null,
+        bootstrapDownloadExpiresAt: null,
+        bootstrapDownloadConsumedAt: null,
       } : {}),
+      ...(lastCompletedStep ? { provisionLastCompletedStep: lastCompletedStep } : {}),
       agentVersion,
       updatedAt: now,
     }).where(and(
@@ -182,12 +203,16 @@ async function finishProvision(
       kind: outcome === 'succeeded' ? 'nyanpass_bootstrap_succeeded' : 'nyanpass_bootstrap_failed',
       message: outcome === 'succeeded'
         ? `节点 ${node.name} 的开机安装与全部预配 Nyanpass 实例已完成`
-        : `节点 ${node.name} 的开机安装未完整成功，预配实例结果需要在 VPS 核查`,
+        : `节点 ${node.name} 的开机安装未完整成功${lastCompletedStep ? `，最后完成步骤：${provisionStepLabel(lastCompletedStep)}` : ''}，预配实例结果需要在 VPS 核查`,
       createdAt: now,
     }),
   ]);
   if (!transitioned.length) return okResponse('conflict');
   return okResponse('accepted');
+}
+
+function provisionStepLabel(step: ProvisionStep) {
+  return ({ ddns: 'DDNS', nyanpass: 'Nyanpass', bbr: 'BBR', ssh: 'SSH' } as const)[step];
 }
 
 function okResponse(disposition: 'accepted' | 'duplicate' | 'stale' | 'busy' | 'conflict') {

@@ -5,6 +5,7 @@ import { ensureSchema } from '@/db/init';
 import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { syncAliDnsRecord } from '@/lib/alidns';
 import { buildNodeStartupScript, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES } from '@/lib/install-command';
+import { bootstrapDownloadExpiry } from '@/lib/bootstrap-download';
 import { parseOfficialNyanpassCommand } from '@/lib/nyanpass-command';
 import { publicOrigin } from '@/lib/public-origin';
 import { newAgentToken, newBootstrapDownloadToken, sha256 } from '@/lib/security';
@@ -14,6 +15,7 @@ import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-o
 import { nodeResponse } from '@/lib/node-response';
 import { encryptBootstrapPayload } from '@/lib/bootstrap-payload';
 import { buildNodeStartupLauncher } from '@/lib/startup-launcher';
+import { trustedNyanpassRelease } from '@/lib/nyanpass-release';
 import { dnsOwnershipConflictMessage, findDnsOwnershipConflict, isDnsOwnershipConstraintError } from '@/lib/dns-ownership';
 
 export async function POST(request: Request) {
@@ -62,8 +64,15 @@ export async function POST(request: Request) {
   const downloadToken = newBootstrapDownloadToken();
   const id = crypto.randomUUID();
   const provisionGeneration = 1;
+  const now = new Date();
   const origin = publicOrigin(request);
-  const installCommand = buildNodeStartupScript({ nodeId: id, generation: provisionGeneration, origin, token, rootPassword, instances: preparedInstances });
+  let nyanpassRelease;
+  try {
+    nyanpassRelease = await trustedNyanpassRelease();
+  } catch {
+    return Response.json({ error: 'Nyanpass 可信发布清单配置无效，请先修正主控环境变量' }, { status: 503 });
+  }
+  const installCommand = buildNodeStartupScript({ nodeId: id, generation: provisionGeneration, origin, token, rootPassword, instances: preparedInstances, nyanpassRelease });
   if (new TextEncoder().encode(installCommand).byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES) {
     return Response.json({ error: '完整安装脚本超过 64 KiB 服务端安全上限；请减少首次预配实例，节点上线后再用远程同步添加' }, { status: 400 });
   }
@@ -89,10 +98,9 @@ export async function POST(request: Request) {
   const db = await getDb();
   const ownershipConflict = await findDnsOwnershipConflict(db, { domainName, recordV4, recordV6 });
   if (ownershipConflict) return Response.json({ error: dnsOwnershipConflictMessage(ownershipConflict) }, { status: 409 });
-  const now = new Date();
   try {
     await db.batch([
-      db.insert(nodes).values({ id, name, region, tokenHash, provider: 'alidns', domainName, recordV4, recordV6, nyanpassStatus: 'awaiting', provisionGeneration, bootstrapPayloadCiphertext, bootstrapDownloadTokenHash, createdAt: now, updatedAt: now }),
+      db.insert(nodes).values({ id, name, region, tokenHash, provider: 'alidns', domainName, recordV4, recordV6, nyanpassStatus: 'awaiting', provisionGeneration, bootstrapPayloadCiphertext, bootstrapDownloadTokenHash, bootstrapDownloadExpiresAt: bootstrapDownloadExpiry(now), createdAt: now, updatedAt: now }),
       ...preparedInstances.map((instance) => db.insert(nyanpassInstances).values({ id: instance.id, nodeId: id, name: instance.name, role: instance.role, panelUrl: instance.panelUrl, status: 'bootstrap', bootstrapGeneration: provisionGeneration, optimize: instance.optimize, createdAt: now, updatedAt: now })),
       db.insert(events).values({ nodeId: id, kind: 'node_created', message: `${user.email} 创建了节点并预配 ${preparedInstances.length} 个 Nyanpass 实例`, createdAt: now }),
     ]);

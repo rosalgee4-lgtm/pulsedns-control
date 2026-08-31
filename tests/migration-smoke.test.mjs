@@ -15,6 +15,7 @@ const migrations = [
   '0006_bootstrap_attempts.sql',
   '0007_sour_quasimodo.sql',
   '0008_tidy_patriot.sql',
+  '0009_brown_storm.sql',
 ];
 
 test('a pre-remote-sync database migrates through the v0.8.2 schema', async () => {
@@ -30,6 +31,9 @@ test('a pre-remote-sync database migrates through the v0.8.2 schema', async () =
           VALUES (?, ?, 'test', ?, 'alidns', 'example.com', 'shared', 'shared-v6', 1, 'ready', ?, ?)`);
         insertNode.run('owner-oldest', 'oldest', 'hash-oldest', 1, 1);
         insertNode.run('owner-duplicate', 'duplicate', 'hash-duplicate', 2, 2);
+      }
+      if (filename === '0009_brown_storm.sql') {
+        sqlite.prepare("UPDATE nodes SET bootstrap_download_token_hash = 'bootstrap-hash' WHERE id = 'owner-oldest'").run();
       }
       const sql = await readFile(new URL(`../drizzle/${filename}`, import.meta.url), 'utf8');
       for (const statement of sql.split('--> statement-breakpoint').map((part) => part.trim()).filter(Boolean)) {
@@ -48,6 +52,9 @@ test('a pre-remote-sync database migrates through the v0.8.2 schema', async () =
     assert.ok(nodeColumns.includes('dns_operation_expires_at'));
     assert.ok(nodeColumns.includes('bootstrap_payload_ciphertext'));
     assert.ok(nodeColumns.includes('bootstrap_download_token_hash'));
+    assert.ok(nodeColumns.includes('bootstrap_download_expires_at'));
+    assert.ok(nodeColumns.includes('bootstrap_download_consumed_at'));
+    assert.ok(nodeColumns.includes('provision_last_completed_step'));
     assert.ok(instanceColumns.includes('credential_ciphertext'));
     assert.ok(instanceColumns.includes('config_revision'));
     assert.ok(instanceColumns.includes('active_task_id'));
@@ -66,6 +73,7 @@ test('a pre-remote-sync database migrates through the v0.8.2 schema', async () =
       { id: 'owner-duplicate', sync_enabled: 0 },
     ]);
     assert.equal(sqlite.prepare("SELECT count(*) AS count FROM events WHERE node_id = 'owner-duplicate' AND kind = 'dns_ownership_conflict'").get().count, 1);
+    assert.equal(typeof sqlite.prepare("SELECT bootstrap_download_expires_at AS expiresAt FROM nodes WHERE id = 'owner-oldest'").get().expiresAt, 'number');
     assert.throws(() => sqlite.prepare(`INSERT INTO nodes
       (id, name, region, token_hash, provider, domain_name, record_v4, sync_enabled, nyanpass_status, created_at, updated_at)
       VALUES ('owner-racer', 'racer', 'test', 'hash-racer', 'alidns', 'example.com', 'shared', 1, 'ready', 3, 3)`).run(), /UNIQUE constraint failed/);

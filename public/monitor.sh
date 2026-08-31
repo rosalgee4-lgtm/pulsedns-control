@@ -342,9 +342,14 @@ retry_provision_outcome() {
         generation="${BASH_REMATCH[1]}"; attempt_id="${BASH_REMATCH[2]}"; outcome="${BASH_REMATCH[3]}"
         body=$(<"$outcome_file")
         if ! printf '%s' "$body" | jq -e --argjson generation "$generation" --arg attemptId "$attempt_id" --arg outcome "$outcome" '
-            type == "object" and (keys | sort) == (["attemptId","generation","outcome","phase","protocol"] | sort) and
+            type == "object" and
+            ((keys | sort) == (["attemptId","generation","outcome","phase","protocol"] | sort) or
+             (keys | sort) == (["attemptId","generation","lastCompletedStep","outcome","phase","protocol"] | sort)) and
             .protocol == 1 and .phase == "finish" and .generation == $generation and
-            .attemptId == $attemptId and .outcome == $outcome' >/dev/null 2>&1; then
+            .attemptId == $attemptId and .outcome == $outcome and
+            ((has("lastCompletedStep") | not) or .lastCompletedStep == "ddns" or
+             .lastCompletedStep == "nyanpass" or .lastCompletedStep == "bbr" or
+             .lastCompletedStep == "ssh")' >/dev/null 2>&1; then
             continue
         fi
         response=$(curl -sS --connect-timeout 5 --max-time 20 -X POST "${SERVER_URL}/api/v1/provision" \
@@ -425,9 +430,22 @@ validate_nyanpass_payload() {
     fi
 }
 
+validate_nyanpass_release_manifest() {
+    local installer_url="$1" installer_sha256="$2" binary_base_url="$3" binary_release="$4"
+    local amd64_sha256="$5" amd64v3_sha256="$6" arm64_sha256="$7" digest=""
+    [[ "$installer_url" == "https://dl.nyafw.com/download/nyanpass-install.sh" ]] || return 1
+    [[ "$binary_base_url" =~ ^https://dl\.nyafw\.com/download/[A-Za-z0-9._/-]+$ ]] || return 1
+    [[ "$binary_release" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || return 1
+    for digest in "$installer_sha256" "$amd64_sha256" "$amd64v3_sha256" "$arm64_sha256"; do
+        [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    done
+}
+
 poll_nyanpass_job() {
     local response="" status="" job_id="" action="" revision="" lease_token="" instance_id=""
     local service_name="" role="" panel_url="" client_token="" optimize="" optimize_env="" args="" installer="" archive="" extract_dir="" installer_log="" error_code="" install_status=1
+    local release_installer_url="" release_installer_sha256="" release_binary_base_url="" release_binary_id=""
+    local release_amd64_sha256="" release_amd64v3_sha256="" release_arm64_sha256=""
     retry_provision_outcome
     recover_local_task_state
     retry_pending_acks
@@ -442,7 +460,10 @@ poll_nyanpass_job() {
         (.job.payload.serviceName | type == "string") and
         (.job.payload.role == "inbound" or .job.payload.role == "outbound") and
         (.job.payload.panelUrl | type == "string") and (.job.payload.clientToken | type == "string") and
-        (.job.payload.optimize | type == "boolean")' >/dev/null 2>&1; then
+        (.job.payload.optimize | type == "boolean") and
+        (.job.payload.release | type == "object") and
+        ((.job.payload.release | keys | sort) == (["binaryAmd64Sha256","binaryAmd64v3Sha256","binaryArm64Sha256","binaryBaseUrl","binaryRelease","installerSha256","installerUrl"] | sort)) and
+        all(.job.payload.release[]; type == "string")' >/dev/null 2>&1; then
         return 0
     fi
 
@@ -456,13 +477,21 @@ poll_nyanpass_job() {
     panel_url=$(printf '%s' "$response" | jq -r '.job.payload.panelUrl')
     client_token=$(printf '%s' "$response" | jq -r '.job.payload.clientToken')
     optimize=$(printf '%s' "$response" | jq -r 'if .job.payload.optimize then "1" else "0" end')
+    release_installer_url=$(printf '%s' "$response" | jq -r '.job.payload.release.installerUrl')
+    release_installer_sha256=$(printf '%s' "$response" | jq -r '.job.payload.release.installerSha256')
+    release_binary_base_url=$(printf '%s' "$response" | jq -r '.job.payload.release.binaryBaseUrl')
+    release_binary_id=$(printf '%s' "$response" | jq -r '.job.payload.release.binaryRelease')
+    release_amd64_sha256=$(printf '%s' "$response" | jq -r '.job.payload.release.binaryAmd64Sha256')
+    release_amd64v3_sha256=$(printf '%s' "$response" | jq -r '.job.payload.release.binaryAmd64v3Sha256')
+    release_arm64_sha256=$(printf '%s' "$response" | jq -r '.job.payload.release.binaryArm64Sha256')
 
     if ! valid_task_uuid "$job_id" || ! valid_task_lease "$lease_token"; then
         log ERROR "主控返回了不安全的任务标识，已拒绝且不会写入本地状态"
         return 0
     fi
     if [[ "$action" != "nyanpass_apply_v1" ]] || ! valid_task_uuid "$instance_id" || [[ ! "$revision" =~ ^[1-9][0-9]*$ ]] || \
-        ! validate_nyanpass_payload "$service_name" "$role" "$panel_url" "$client_token" "$optimize"; then
+        ! validate_nyanpass_payload "$service_name" "$role" "$panel_url" "$client_token" "$optimize" || \
+        ! validate_nyanpass_release_manifest "$release_installer_url" "$release_installer_sha256" "$release_binary_base_url" "$release_binary_id" "$release_amd64_sha256" "$release_amd64v3_sha256" "$release_arm64_sha256"; then
         # The lease is already active. Persist the failure before attempting the
         # acknowledgement so a temporary control-plane outage cannot strand the
         # task in running state until its lease expires.
@@ -475,6 +504,14 @@ poll_nyanpass_job() {
         fi
         return 0
     fi
+
+    NYANPASS_INSTALL_URL="$release_installer_url"
+    NYANPASS_INSTALL_SHA256="$release_installer_sha256"
+    NYANPASS_BINARY_BASE_URL="$release_binary_base_url"
+    NYANPASS_BINARY_RELEASE="$release_binary_id"
+    NYANPASS_BINARY_AMD64_SHA256="$release_amd64_sha256"
+    NYANPASS_BINARY_AMD64V3_SHA256="$release_amd64v3_sha256"
+    NYANPASS_BINARY_ARM64_SHA256="$release_arm64_sha256"
 
     umask 077
     mkdir -p "$TASK_STATE_DIR"

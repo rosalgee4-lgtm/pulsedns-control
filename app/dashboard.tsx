@@ -33,6 +33,7 @@ type NodeRow = {
   createdAt: string; updatedAt: string;
   provider: string; domainName: string | null; syncEnabled: boolean;
   agentVersion: string | null; lastTaskPollAt: string | null; nyanpassStatus: string;
+  provisionLastCompletedStep: string | null;
 };
 type EventRow = { id: number; nodeId: string; nodeName: string; level: string; kind: string; message: string; createdAt: string };
 type NyanpassStatusValue = 'ready' | 'pending' | 'running' | 'success' | 'failed' | 'uncertain' | 'bootstrap' | 'legacy' | '等待安装';
@@ -196,7 +197,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
         recordV4: String(form.get('recordV4') || '') || null, recordV6: String(form.get('recordV6') || '') || null,
         lastSeenAt: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         provider: 'alidns', domainName: String(form.get('domainName') || '') || null,
-        syncEnabled: true, agentVersion: null, lastTaskPollAt: null, nyanpassStatus: 'awaiting',
+        syncEnabled: true, agentVersion: null, lastTaskPollAt: null, nyanpassStatus: 'awaiting', provisionLastCompletedStep: null,
       }, ...current]);
     } catch {
       setError('无法确认节点是否创建成功，请刷新页面核对后再操作。');
@@ -526,7 +527,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
       {showCreate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="create-title">
           <button className="modal-close" onClick={closeModal} aria-label="关闭" disabled={saving}>×</button>
-          {!created ? <><p className="eyebrow cyan">开机自动安装</p><h2 id="create-title">添加一个探针节点</h2><p className="modal-intro">先填好 SSH 密码和全部 Nyanpass 实例。创建后主控只返回该节点专属的脚本下载直链；平台访问直链时会取得当前版本的 Bash 脚本，并按 SSH → DDNS 验收 → 全部 Nyanpass → BBR 自动完成安装。</p>
+          {!created ? <><p className="eyebrow cyan">开机自动安装</p><h2 id="create-title">添加一个探针节点</h2><p className="modal-intro">先填好 SSH 密码和全部 Nyanpass 实例。创建后主控只返回该节点专属的脚本下载直链；平台访问直链时会取得当前版本的 Bash 脚本，并按 DDNS 验收 → 全部 Nyanpass → BBR → SSH 自动完成安装。</p>
             <form onSubmit={createNode} className="node-form">
               <label>节点名称<input name="name" required placeholder="例如：东京 · jp-01" /></label>
               <label>区域<input name="region" placeholder="ap-northeast" /></label>
@@ -542,18 +543,19 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
                 <label>官方安装命令<textarea required rows={3} autoComplete="off" spellCheck={false} value={instance.command} onChange={(event) => updateNodeNyanpass(index, 'command', event.target.value)} placeholder={'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t … -u https://…"'} /></label>
                 <label className="nyanpass-check"><input type="checkbox" checked={instance.optimize} onChange={(event) => updateNodeNyanpass(index, 'optimize', event.target.checked)} />启用原脚本 OPTIMIZE=1</label>
               </div>)}<button type="button" className="ghost-button" disabled={nodeNyanpass.length >= 16} onClick={() => setNodeNyanpass((current) => [...current, emptyNyanpassDraft()])}>＋ 添加另一个实例</button></fieldset>
-              <p className="form-hint">命令中的独立 -o 表示出口，没有 -o 表示入口。原始凭据仅以密文暂存；页面不会返回完整脚本，只返回一个节点专属下载直链。直链本身就是 Bearer 凭据，请勿公开或转发。可复制的开机启动器受 15 KiB user-data 上限约束，下载后的完整安装脚本另受 64 KiB 服务端上限保护。</p>
+              <p className="form-hint">命令中的独立 -o 表示出口，没有 -o 表示入口。原始凭据仅以密文暂存；页面不会返回完整脚本，只返回一个节点专属下载直链。直链本身就是 Bearer 凭据，请勿公开或转发。首次下载窗口为 30 分钟，成功响应后仅保留 2 分钟传输重试；后续开机使用机器上的已校验副本。</p>
+              <p className="form-hint">每份启动器只绑定一台实例，不能作为 ASG 或 Launch Template 的共享 User data；批量部署时请为每台实例分别创建节点。</p>
               {error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '创建中…' : '创建节点并生成下载直链'}</button>
             </form></>
           : <>
             <p className="eyebrow cyan">节点已创建</p>
             <h2 id="create-title">复制开机脚本</h2>
-            <p className="modal-intro"><strong>下面的内容已适配云厂商开机环境。</strong> 它会补齐 Bash、下载工具与 CA 证书，等待包管理器和网络，下载到 <code>/root</code> 后完成 SSH、DDNS、全部 Nyanpass 与 BBR；后续开机会识别完成标记，不再访问已失效的直链。</p>
+            <p className="modal-intro"><strong>下面的内容已适配云厂商开机环境。</strong> 它会先注册 cloud-init per-boot 重试，再补齐运行环境并下载到 <code>/root</code>，按 DDNS、Nyanpass、BBR、SSH 的顺序安装；失败后下次开机会复用本机脚本，成功后自动清理。</p>
             <pre className="install-command">{created.startupScript}</pre>
             <button type="button" className="primary-button wide" disabled={startupCopyFeedback === 'copying'} onClick={() => copyStartupScript(created.startupScript)}>{startupCopyFeedback === 'copying' ? '正在复制…' : startupCopyFeedback === 'success' ? '已复制开机脚本' : '复制开机脚本'}</button>
-            {startupCopyFeedback === 'success' && <p className="form-success" role="status">复制成功，可以直接粘贴到云厂商 User data。</p>}
+            {startupCopyFeedback === 'success' && <p className="form-success" role="status">已按 LF 换行复制，可以直接粘贴到云厂商 User data。若 10 分钟内没有任何 PulseDNS 日志，请检查内容是否被外部编辑器重新转换成 CRLF。</p>}
             {startupCopyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整开机脚本；剪贴板内容没有更新。</p>}
-            <p className="form-hint"><strong>节点脚本下载直链（只显示一次）：</strong>保留它可以沿用你现有脚本，或在安装前始终下载主控当前版本。成功后凭据会被擦除，直链自动失效。</p>
+            <p className="form-hint"><strong>节点脚本下载直链（只显示一次）：</strong>首次访问后会快速失效，正常重试由 <code>/root</code> 下的已校验脚本和 cloud-init per-boot 副本完成。</p>
             <pre className="install-command">{created.installUrl}</pre>
             <button type="button" className="ghost-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(created.installUrl)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制下载直链' : '复制下载直链'}</button>
             {copyFeedback === 'success' && <p className="form-success" role="status">下载直链已复制，请替换现有开机脚本中的节点脚本下载地址。</p>}
@@ -628,8 +630,12 @@ function NodesPanel({ nodes, now, onCreate, onEdit, onRemove, removingNodeId, de
     <div className="table-wrap">
       {nodes.length ? <table><thead><tr><th>节点</th><th>公网地址 / DNS</th><th>最近地址上报</th><th>状态</th><th>操作</th></tr></thead><tbody>{nodes.map((node) => {
         const hasReported = Boolean(node.lastSeenAt);
+        const bootstrapStalled = isAwaitingBootstrapStalled(node, now);
+        const bootstrapLocked = isBootstrapLockedStatus(node.nyanpassStatus);
+        const sshChanged = ['failed', 'uncertain'].includes(node.nyanpassStatus) && node.provisionLastCompletedStep === 'ssh';
         const removing = removingNodeId === node.id;
-        return <tr key={node.id}><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}</span><small>{node.region}</small></td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported ? 'badge online' : 'badge warning'}>{hasReported ? '已上报' : '等待首次上报'}</span></td><td><div className="row-actions"><button type="button" className="edit-link" disabled={removing} onClick={() => onEdit(node)}>修改</button><button type="button" className="danger-link" disabled={removing} onClick={() => onRemove(node)}>{removing ? '删除中…' : '删除节点'}</button></div></td></tr>;
+        const statusLabel = bootstrapStalled ? 'User data 未执行' : bootstrapLocked ? bootstrapStatusLabel(node.nyanpassStatus) : hasReported ? '已上报' : '等待首次上报';
+        return <tr key={node.id}><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}</span><small>{node.region}</small></td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported && !bootstrapLocked ? 'badge online' : 'badge warning'}>{statusLabel}</span>{bootstrapStalled && <small className="sync-error" role="alert">检查 User data、CRLF 和出站网络</small>}{node.provisionLastCompletedStep && bootstrapLocked && <small>最后完成：{provisionStepLabel(node.provisionLastCompletedStep)}</small>}{sshChanged && <small className="sync-error" role="alert">SSH 凭据已变更，请使用新密码核查</small>}</td><td><div className="row-actions"><button type="button" className="edit-link" disabled={removing} onClick={() => onEdit(node)}>修改</button><button type="button" className="danger-link" disabled={removing} onClick={() => onRemove(node)}>{removing ? '删除中…' : '删除节点'}</button></div></td></tr>;
       })}</tbody></table> : <EmptyState onCreate={onCreate} />}
     </div>
   </article>;
@@ -764,6 +770,14 @@ function bootstrapStatusLabel(status: string) {
   if (status === 'provisioning') return '开机安装中';
   if (status === 'failed') return '开机安装失败待恢复';
   return '开机安装结果未知';
+}
+
+function isAwaitingBootstrapStalled(node: Pick<NodeRow, 'nyanpassStatus' | 'createdAt'>, now: number) {
+  return node.nyanpassStatus === 'awaiting' && Boolean(now) && now - Date.parse(node.createdAt) >= 10 * 60 * 1000;
+}
+
+function provisionStepLabel(step: string) {
+  return ({ ddns: 'DDNS', nyanpass: 'Nyanpass', bbr: 'BBR', ssh: 'SSH' } as Record<string, string>)[step] ?? step;
 }
 
 async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit, timeoutMs = 45_000) {

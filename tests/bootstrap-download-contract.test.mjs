@@ -14,6 +14,8 @@ const [nodeRoute, downloadRoute, provisionRoute, proxy, dashboard] = await Promi
 ]);
 
 const { encryptBootstrapPayload, decryptBootstrapPayload } = await import('../lib/bootstrap-payload.ts');
+const { bootstrapDownloadExpiry, bootstrapDownloadWindow, BOOTSTRAP_DOWNLOAD_RETRY_GRACE_MS } = await import('../lib/bootstrap-download.ts');
+const { DEFAULT_NYANPASS_RELEASE, validateTrustedNyanpassRelease } = await import('../lib/nyanpass-release.ts');
 
 function handler(source, method, nextMethod) {
   const start = source.indexOf(`export async function ${method}`);
@@ -32,6 +34,7 @@ test('node creation returns only an unguessable bootstrap URL and its boot-resil
   assert.match(post, /encryptBootstrapPayload\([\s\S]*agentToken: token[\s\S]*rootPassword[\s\S]*instances/);
   assert.match(post, /sha256\(downloadToken\)/);
   assert.match(post, /bootstrapPayloadCiphertext, bootstrapDownloadTokenHash/);
+  assert.match(post, /bootstrapDownloadExpiresAt: bootstrapDownloadExpiry\(now\)/);
   assert.match(post, /const installUrl = `\$\{origin\}\/api\/v1\/bootstrap\/\$\{id\}\/\$\{downloadToken\}`/);
   assert.match(post, /const startupScript = buildNodeStartupLauncher\(id, installUrl, provisionGeneration\)/);
   assert.match(successResponse, /\n\s*installUrl,/);
@@ -41,7 +44,7 @@ test('node creation returns only an unguessable bootstrap URL and its boot-resil
   assert.match(successResponse, /Cache-Control': 'no-store'/);
 });
 
-test('bootstrap GET authenticates the link, serializes generation, and renders the current script without consuming it', () => {
+test('bootstrap GET authenticates, renders, then consumes the short-lived download window', () => {
   assert.match(downloadRoute, /\^pbs_\[a-f0-9\]\{64\}\$/);
   assert.match(downloadRoute, /const tokenHash = await sha256\(token\)/);
   assert.match(downloadRoute, /eq\(nodes\.id, nodeId\)[\s\S]*eq\(nodes\.bootstrapDownloadTokenHash, tokenHash\)/);
@@ -52,8 +55,12 @@ test('bootstrap GET authenticates the link, serializes generation, and renders t
   const decryptAt = downloadRoute.indexOf('decryptBootstrapPayload(');
   const renderAt = downloadRoute.indexOf('buildNodeStartupScript({');
   assert.ok(decryptAt >= 0 && renderAt > decryptAt, 'the latest startup builder must render a validated encrypted payload');
-  assert.match(downloadRoute.slice(renderAt), /generation: node\.generation[\s\S]*token: payload\.agentToken[\s\S]*rootPassword: payload\.rootPassword[\s\S]*instances: payload\.instances/);
+  assert.match(downloadRoute.slice(renderAt), /generation: node\.generation[\s\S]*token: payload\.agentToken[\s\S]*rootPassword: payload\.rootPassword[\s\S]*instances: payload\.instances[\s\S]*nyanpassRelease/);
   assert.match(downloadRoute, /TextEncoder\(\)\.encode\(script\)\.byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES/);
+  assert.match(downloadRoute, /bootstrapDownloadWindow\(node\.downloadExpiresAt, node\.downloadConsumedAt, now\)/);
+  assert.match(downloadRoute, /bootstrapDownloadConsumedAt: now/);
+  assert.match(downloadRoute, /bootstrapDownloadTokenHash: null/);
+  assert.ok(downloadRoute.indexOf('bootstrapDownloadConsumedAt: now') > renderAt, 'the token must be consumed only after the response script is ready');
 
   assert.match(downloadRoute, /'Cache-Control': 'no-store, private, max-age=0'/);
   assert.match(downloadRoute, /Pragma: 'no-cache'/);
@@ -62,8 +69,26 @@ test('bootstrap GET authenticates the link, serializes generation, and renders t
   assert.match(downloadRoute, /'Content-Type': 'text\/x-shellscript; charset=utf-8'/);
   assert.match(downloadRoute, /Content-Disposition/);
 
-  assert.doesNotMatch(downloadRoute, /db\.(?:update|delete)\(nodes\)/);
-  assert.doesNotMatch(downloadRoute, /bootstrapPayloadCiphertext:\s*null|bootstrapDownloadTokenHash:\s*null/);
+  assert.doesNotMatch(downloadRoute, /bootstrapPayloadCiphertext:\s*null/);
+});
+
+test('bootstrap download token has a bounded first-use and transport retry window', () => {
+  const now = new Date('2026-08-31T00:00:00Z');
+  const expiresAt = bootstrapDownloadExpiry(now);
+  assert.equal(bootstrapDownloadWindow(expiresAt, null, now).shouldConsume, true);
+  const consumedAt = new Date(now.getTime() + 1_000);
+  assert.equal(bootstrapDownloadWindow(expiresAt, consumedAt, new Date(consumedAt.getTime() + BOOTSTRAP_DOWNLOAD_RETRY_GRACE_MS - 1)).allowed, true);
+  assert.equal(bootstrapDownloadWindow(expiresAt, consumedAt, new Date(consumedAt.getTime() + BOOTSTRAP_DOWNLOAD_RETRY_GRACE_MS)).allowed, false);
+  const consumedAtExpiryEdge = new Date(expiresAt.getTime() - 1);
+  assert.equal(bootstrapDownloadWindow(expiresAt, consumedAtExpiryEdge, new Date(expiresAt.getTime() + 1)).allowed, true);
+  assert.equal(bootstrapDownloadWindow(new Date(now.getTime()), null, now).allowed, false);
+  assert.equal(bootstrapDownloadWindow(null, null, now).allowed, false);
+});
+
+test('dynamic Nyanpass trust manifests stay on the official HTTPS origin with pinned digests', () => {
+  assert.doesNotThrow(() => validateTrustedNyanpassRelease(DEFAULT_NYANPASS_RELEASE));
+  assert.throws(() => validateTrustedNyanpassRelease({ ...DEFAULT_NYANPASS_RELEASE, installerUrl: 'https://example.test/install.sh' }), /trusted dl\.nyafw\.com/);
+  assert.throws(() => validateTrustedNyanpassRelease({ ...DEFAULT_NYANPASS_RELEASE, binaryArm64Sha256: 'not-a-hash' }), /SHA-256/);
 });
 
 test('only successful provision outcomes revoke both bootstrap secrets, including duplicate success', () => {
@@ -75,11 +100,15 @@ test('only successful provision outcomes revoke both bootstrap secrets, includin
   assert.ok(duplicateStart >= 0 && transitionStart > duplicateStart, 'duplicate terminal branch missing');
   const duplicateBranch = finish.slice(duplicateStart, transitionStart);
   assert.match(duplicateBranch, /if \(outcome === 'succeeded'\)[\s\S]*db\.update\(nodes\)\.set\(\{[\s\S]*bootstrapPayloadCiphertext:\s*null[\s\S]*bootstrapDownloadTokenHash:\s*null/);
+  assert.match(duplicateBranch, /bootstrapDownloadExpiresAt:\s*null[\s\S]*bootstrapDownloadConsumedAt:\s*null/);
 
   const transition = finish.slice(transitionStart);
   assert.match(transition, /db\.update\(nodes\)\.set\(\{[\s\S]*\.\.\.\(outcome === 'succeeded' \? \{[\s\S]*bootstrapPayloadCiphertext:\s*null[\s\S]*bootstrapDownloadTokenHash:\s*null[\s\S]*\} : \{\}\)/);
 
   assert.match(finish, /const targetStatus = outcome === 'succeeded' \? 'ready' : 'failed'/);
+  assert.match(provisionRoute, /lastCompletedStep/);
+  assert.match(provisionRoute, /provisionLastCompletedStep/);
+  assert.match(provisionRoute, /ddns[\s\S]*nyanpass[\s\S]*bbr[\s\S]*ssh/);
 });
 
 test('self-hosted auth proxy publishes only the node-specific bootstrap prefix', () => {

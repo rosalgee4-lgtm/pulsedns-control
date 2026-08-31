@@ -28,7 +28,9 @@ test('copy buttons await the result and expose success or failure', () => {
   assert.match(dashboard, /复制下载直链/);
   assert.match(dashboard, /setCopyFeedback\(await copyText\(command\) \? 'success' : 'error'\)/);
   assert.match(dashboard, /setStartupCopyFeedback\(await copyText\(script\) \? 'success' : 'error'\)/);
-  assert.match(dashboard, /(?:复制成功|下载直链已复制)[\s\S]{0,80}云厂商/);
+  assert.match(dashboard, /已按 LF 换行复制[\s\S]{0,100}云厂商/);
+  assert.match(dashboard, /User data 未执行/);
+  assert.match(dashboard, /不能作为 ASG 或 Launch Template 的共享 User data/);
   assert.match(dashboard, /剪贴板内容没有更新|手动选中[^。]{0,30}链接复制/);
   assert.doesNotMatch(dashboard, /onClick=\{\(\) => navigator\.clipboard\.writeText/);
 });
@@ -55,11 +57,17 @@ test('generated cloud startup launcher is POSIX, boot-resilient, and bounded', (
   assert.match(launcher, /\/bin\/bash -n "\$download_path"/);
   assert.doesNotMatch(launcher, /\[\[/);
   assert.match(launcher, /complete_matches_generation\(\)/);
+  assert.match(launcher, /persist_per_boot\(\)/);
+  assert.match(launcher, /run_cached_script\(\)/);
+  assert.match(launcher, /scrub_completed_bootstrap\(\)/);
+  assert.match(launcher, /\/var\/lib\/cloud\/scripts\/per-boot\/pulsedns-bootstrap-/);
   assert.match(launcher, /\[ "\$stored_generation" = "\$expected_generation" \]/);
   const completeCheck = launcher.indexOf('if complete_matches_generation; then');
+  const persistCheck = launcher.lastIndexOf('\npersist_per_boot\n');
   const packageCheck = launcher.indexOf('if ! bootstrap_ready; then');
+  const cachedCheck = launcher.lastIndexOf('\nrun_cached_script || true\n');
   const downloadCheck = launcher.indexOf('while [ "$attempt" -le 36 ]');
-  assert.ok(completeCheck >= 0 && completeCheck < packageCheck && packageCheck < downloadCheck);
+  assert.ok(completeCheck >= 0 && completeCheck < persistCheck && persistCheck < packageCheck && packageCheck < cachedCheck && cachedCheck < downloadCheck);
   assert.ok(Buffer.byteLength(launcher) < 15 * 1024);
   const result = spawnSync('/bin/sh', ['-n'], { input: launcher, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
@@ -83,6 +91,7 @@ exit 99
     assert.equal(result.status, 0, result.stderr);
     assert.equal(await readFile(fixture.callsFile, 'utf8'), 'enable --now ddns-monitor\n');
     await assert.rejects(readFile(fixture.scriptPath), { code: 'ENOENT' });
+    await assert.rejects(readFile(fixture.perBootPath), { code: 'ENOENT' });
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -112,7 +121,44 @@ printf '#!/bin/bash\\nexit 0\\n' > "$output"
     assert.equal(result.status, 0, result.stderr);
     assert.equal(await readFile(fixture.countFile, 'utf8'), '3\n');
     await assert.rejects(readFile(fixture.scriptPath), { code: 'ENOENT' });
+    await assert.rejects(readFile(fixture.perBootPath), { code: 'ENOENT' });
     assert.match(await readFile(fixture.logFile, 'utf8'), /等待网络和主控下载地址就绪（2\/36）/);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('failed execution persists per-boot and reuses the cached payload without the consumed URL', async () => {
+  const fixture = await createLauncherFixture();
+  const allowSuccess = join(fixture.root, 'allow-success');
+  try {
+    await writeExecutable(join(fixture.mockBin, 'sleep'), '#!/bin/sh\nexit 0\n');
+    await writeExecutable(join(fixture.mockBin, 'curl'), '#!/bin/sh\nexit 1\n');
+    await writeExecutable(join(fixture.mockBin, 'wget'), `#!/bin/sh
+count=0
+[ ! -f "$MOCK_WGET_COUNT" ] || count=$(cat "$MOCK_WGET_COUNT")
+count=$((count + 1))
+printf '%s\\n' "$count" > "$MOCK_WGET_COUNT"
+output=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '-O' ]; then output="$2"; shift 2; else shift; fi
+done
+printf '#!/bin/bash\\n[ -f "$MOCK_ALLOW_SUCCESS" ] || exit 23\\nexit 0\\n' > "$output"
+`);
+
+    const environment = { MOCK_WGET_COUNT: fixture.countFile, MOCK_ALLOW_SUCCESS: allowSuccess };
+    const failed = runLauncher(fixture, environment);
+    assert.equal(failed.status, 23, failed.stderr);
+    assert.equal(await readFile(fixture.countFile, 'utf8'), '1\n');
+    assert.match(await readFile(fixture.perBootPath, 'utf8'), /^#!\/bin\/sh/);
+    assert.match(await readFile(fixture.scriptPath, 'utf8'), /^#!\/bin\/bash/);
+
+    await writeFile(allowSuccess, '1');
+    const retried = runLauncher(fixture, environment, fixture.perBootPath);
+    assert.equal(retried.status, 0, retried.stderr);
+    assert.equal(await readFile(fixture.countFile, 'utf8'), '1\n');
+    await assert.rejects(readFile(fixture.scriptPath), { code: 'ENOENT' });
+    await assert.rejects(readFile(fixture.perBootPath), { code: 'ENOENT' });
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -140,8 +186,8 @@ test('insecure HTTP context copies through the textarea fallback', async () => {
       execCommand(command) { assert.equal(command, 'copy'); copiedValue = textarea.value; return true; },
     } });
 
-    assert.equal(await copyText('full provision command'), true);
-    assert.equal(copiedValue, 'full provision command');
+    assert.equal(await copyText('full\r\nprovision\rcommand'), true);
+    assert.equal(copiedValue, 'full\nprovision\ncommand');
     assert.equal(appended, true);
     assert.equal(removed, true);
   } finally {
@@ -165,6 +211,9 @@ async function createLauncherFixture() {
   const logFile = join(root, 'launcher.log');
   const callsFile = join(root, 'calls.log');
   const countFile = join(root, 'wget.count');
+  const perBootDir = join(root, 'per-boot');
+  const perBootPath = join(perBootDir, `pulsedns-bootstrap-${nodeId}.sh`);
+  const launcherPath = join(root, 'user-data.sh');
   await mkdir(mockBin, { recursive: true });
   await writeFile(callsFile, '');
   await writeExecutable(join(mockBin, 'id'), '#!/bin/sh\nprintf "0\\n"\n');
@@ -181,9 +230,11 @@ async function createLauncherFixture() {
     )
     .replaceAll('/var/log/pulsedns-bootstrap-launcher.log', logFile)
     .replaceAll(`/root/pulsedns_${nodeId}_install.sh`, scriptPath)
-    .replaceAll(`/var/lib/pulsedns-bootstrap-${nodeId}`, stateDir);
+    .replaceAll(`/var/lib/pulsedns-bootstrap-${nodeId}`, stateDir)
+    .replaceAll('/var/lib/cloud/scripts/per-boot', perBootDir);
+  await writeExecutable(launcherPath, launcher);
 
-  return { root, mockBin, stateDir, scriptPath, logFile, callsFile, countFile, launcher };
+  return { root, mockBin, stateDir, scriptPath, logFile, callsFile, countFile, perBootPath, launcherPath, launcher };
 }
 
 async function writeExecutable(path, source) {
@@ -191,9 +242,8 @@ async function writeExecutable(path, source) {
   await chmod(path, 0o755);
 }
 
-function runLauncher(fixture, extraEnvironment = {}) {
-  return spawnSync('/bin/sh', ['-s'], {
-    input: fixture.launcher,
+function runLauncher(fixture, extraEnvironment = {}, launcherPath = fixture.launcherPath) {
+  return spawnSync('/bin/sh', [launcherPath], {
     encoding: 'utf8',
     env: { ...process.env, MOCK_CALLS: fixture.callsFile, ...extraEnvironment },
   });

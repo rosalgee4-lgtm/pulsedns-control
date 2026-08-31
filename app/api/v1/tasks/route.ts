@@ -5,6 +5,7 @@ import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { expireAgentTasks } from '@/lib/agent-task-lifecycle';
 import { decryptNyanpassCredential } from '@/lib/nyanpass-credential';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
+import { trustedNyanpassRelease } from '@/lib/nyanpass-release';
 import { bearerToken, newAgentToken, sha256 } from '@/lib/security';
 import { cleanText } from '@/lib/validation';
 import { expireProvisionAttempts, isBootstrapLocked } from '@/lib/provision-lifecycle';
@@ -77,6 +78,12 @@ export async function GET(request: Request) {
     await failInvalidTask(db, node.id, task.id, task.instanceId, task.revision, now);
     return idleResponse();
   }
+  let nyanpassRelease;
+  try {
+    nyanpassRelease = await trustedNyanpassRelease();
+  } catch {
+    return errorResponse('Nyanpass 可信发布清单配置无效', 503);
+  }
 
   const leaseToken = newAgentToken();
   const leaseTokenHash = await sha256(leaseToken);
@@ -132,6 +139,7 @@ export async function GET(request: Request) {
         panelUrl: task.panelUrl,
         clientToken,
         optimize: task.optimize,
+        release: nyanpassRelease,
       },
     },
   }, { headers: noStoreHeaders });

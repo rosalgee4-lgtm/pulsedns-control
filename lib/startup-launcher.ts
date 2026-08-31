@@ -1,7 +1,8 @@
 export function buildNodeStartupLauncher(nodeId: string, installUrl: string, generation: number) {
   const scriptPath = `/root/pulsedns_${nodeId}_install.sh`;
   const stateDir = `/var/lib/pulsedns-bootstrap-${nodeId}`;
-  return `#!/bin/sh
+  const perBootPath = `/var/lib/cloud/scripts/per-boot/pulsedns-bootstrap-${nodeId}.sh`;
+  const launcher = `#!/bin/sh
 set -u
 
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -15,6 +16,9 @@ state_dir=${quoteShellArg(stateDir)}
 complete_file="$state_dir/complete"
 install_url=${quoteShellArg(installUrl)}
 expected_generation=${generation}
+per_boot_dir=/var/lib/cloud/scripts/per-boot
+per_boot_path=${quoteShellArg(perBootPath)}
+per_boot_tmp="${perBootPath}.tmp.$$"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo '[PulseDNS] 开机脚本必须以 root 运行' >&2
@@ -27,10 +31,11 @@ fi
 chmod 0600 "$log_file" 2>/dev/null || true
 exec >> "$log_file" 2>&1
 
-cleanup_download() {
+cleanup_temps() {
   [ -z "$download_path" ] || rm -f "$download_path"
+  [ -z "$per_boot_tmp" ] || rm -f "$per_boot_tmp"
 }
-trap cleanup_download 0
+trap cleanup_temps 0
 trap 'exit 129' 1
 trap 'exit 130' 2
 trap 'exit 143' 15
@@ -60,6 +65,38 @@ complete_matches_generation() {
   stored_generation=''
   IFS= read -r stored_generation < "$complete_file" || return 1
   [ "$stored_generation" = "$expected_generation" ]
+}
+
+persist_per_boot() {
+  source_header=''
+  [ "$0" = "$per_boot_path" ] && return 0
+  if [ ! -r "$0" ] || ! IFS= read -r source_header < "$0" || [ "$source_header" != '#!/bin/sh' ]; then
+    echo '[PulseDNS] 无法读取当前 user-data 脚本，不能注册下次开机重试'
+    return 0
+  fi
+  if ! mkdir -p "$per_boot_dir" \
+    || ! cp "$0" "$per_boot_tmp" \
+    || ! chmod 0700 "$per_boot_tmp" \
+    || ! mv -f "$per_boot_tmp" "$per_boot_path"; then
+    echo '[PulseDNS] 无法注册 cloud-init per-boot 重试，本次仍继续安装'
+    rm -f "$per_boot_tmp"
+    return 0
+  fi
+  per_boot_tmp=''
+  echo '[PulseDNS] 已注册 cloud-init per-boot 重试，失败后将在下次开机继续'
+}
+
+scrub_completed_bootstrap() {
+  cached_userdata=''
+  rm -f "$per_boot_path"
+  for cached_userdata in /var/lib/cloud/instances/*/user-data.txt*; do
+    [ -f "$cached_userdata" ] && [ ! -L "$cached_userdata" ] || continue
+    : > "$cached_userdata"
+    chmod 0600 "$cached_userdata" 2>/dev/null || true
+  done
+  case "$0" in
+    /var/lib/cloud/instances/*/scripts/*|/var/lib/cloud/instance/scripts/*) rm -f "$0" ;;
+  esac
 }
 
 install_bootstrap_packages() {
@@ -97,21 +134,44 @@ download_once() {
   return 1
 }
 
+run_cached_script() {
+  [ -f "$script_path" ] && [ ! -L "$script_path" ] || return 1
+  if ! /bin/bash -n "$script_path"; then
+    echo '[PulseDNS] 本机缓存的节点安装脚本无效，删除后重新下载'
+    rm -f "$script_path"
+    return 1
+  fi
+  chmod 0700 "$script_path"
+  echo '[PulseDNS] 继续执行本机已校验的节点安装脚本，不再消耗下载凭据'
+  /bin/bash "$script_path"
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    rm -f "$script_path"
+    scrub_completed_bootstrap
+  fi
+  exit "$status"
+}
+
 if complete_matches_generation; then
   echo '[PulseDNS] 首次安装已经完成，恢复 DDNS 服务并跳过已失效的下载直链'
-  rm -f "$script_path"
   if command -v systemctl >/dev/null 2>&1 && systemctl enable --now ddns-monitor; then
+    rm -f "$script_path"
+    scrub_completed_bootstrap
     exit 0
   fi
   echo '[PulseDNS] 已找到完成标记，但 ddns-monitor 服务恢复失败'
   exit 1
 fi
 
+persist_per_boot
+
 if ! bootstrap_ready; then
   echo '[PulseDNS] 正在补齐 Bash、下载工具和 CA 证书'
   install_bootstrap_packages || { echo '[PulseDNS] 开机依赖安装失败'; exit 1; }
 fi
 bootstrap_ready || { echo '[PulseDNS] Bash、下载工具或 CA 证书仍不可用'; exit 1; }
+
+run_cached_script || true
 
 downloaded=0
 attempt=1
@@ -132,13 +192,11 @@ chmod 0700 "$download_path"
 mv -f "$download_path" "$script_path"
 download_path=''
 
-/bin/bash "$script_path"
-status=$?
-if [ "$status" -eq 0 ]; then
-  rm -f "$script_path"
-fi
-exit "$status"
+run_cached_script
+echo '[PulseDNS] 无法执行节点安装脚本'
+exit 1
 `;
+  return launcher.replace(/\r\n?/g, '\n');
 }
 
 function quoteShellArg(value: string) {
