@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { buildNodeStartupScript, PROBE_INSTALLER_SHA256, PROBE_INSTALLER_URL, shellArg } from '../lib/install-command.ts';
+import { buildNodeConnectCommand, buildNodeStartupScript, PROBE_INSTALLER_SHA256, PROBE_INSTALLER_URL, shellArg } from '../lib/install-command.ts';
 
 const origin = 'http://203.0.113.9:39900/0123456789abcdef0123456789abcdef';
 const nyanpassRelease = {
@@ -26,6 +26,16 @@ const command = buildNodeStartupScript({
     { name: 'tenant-out', optimize: true, args: '-o -t outbound-token -u https://ny.example.test' },
   ],
   nyanpassRelease,
+});
+
+test('node connection command is one public script plus one opaque node parameter', () => {
+  const installUrl = `${origin}/api/v1/bootstrap/11111111-2222-4333-8444-555555555555/pbs_${'a'.repeat(64)}`;
+  const connectCommand = buildNodeConnectCommand(installUrl);
+  assert.equal(connectCommand, `bash <(curl --proto '=https' --proto-redir '=https' -fLSs '${PROBE_INSTALLER_URL}') bootstrap '${installUrl}'`);
+  assert.equal(connectCommand.includes('\n'), false);
+  assert.doesNotMatch(connectCommand, /rootPassword|nyanpass|--server|--token/);
+  const result = spawnSync(process.env.BASH_EXE || 'bash', ['-n'], { input: connectCommand, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test('startup script uses the strict provision action and a pinned HTTPS installer', () => {

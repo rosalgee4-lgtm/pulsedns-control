@@ -91,7 +91,13 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 
 ### 探针安装与菜单
 
-在 Web 控制台创建节点后会得到一条节点专属脚本下载直链；页面同时生成一个适合云厂商 user-data 的短启动器。启动器使用 POSIX `/bin/sh`，显式设置开机环境 `PATH`，首次执行即把自身原子复制到 `/var/lib/cloud/scripts/per-boot/`。如果本次开机未完成，下次开机会再次调用；已有完整脚本时优先复用 `/root/pulsedns_<节点ID>_install.sh`，不会再次消耗下载凭据。当前代次完成并成功恢复 `ddns-monitor` 后，per-boot 副本、完整脚本及 cloud-init 本地 user-data 缓存会被删除。
+在 Web 控制台创建节点后，页面默认只给出一条与 Nyanpass 相同形态的“公共脚本 + 节点参数”对接命令。直接把页面生成的完整命令粘贴到目标 VPS 的 root Bash 中；不要手工替换示例占位符：
+
+```bash
+bash <(curl --proto '=https' --proto-redir '=https' -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/install.sh') bootstrap 'https://<面板入口>/api/v1/bootstrap/<节点ID>/<节点参数>'
+```
+
+公共安装器会立即显示下载和执行进度，把节点完整脚本校验后缓存为 `/root/pulsedns_<节点ID>_install.sh`；安装失败时原样重跑同一条对接命令即可优先复用缓存。全部完成后缓存自动删除。页面的高级选项仍提供适合 AWS User data 的 POSIX `/bin/sh` 启动器：它显式设置开机环境 `PATH`，首次执行即把自身原子复制到 `/var/lib/cloud/scripts/per-boot/`。如果本次开机未完成，下次开机会再次调用；当前代次完成并成功恢复 `ddns-monitor` 后，per-boot 副本、完整脚本及 cloud-init 本地 user-data 缓存会被删除。
 
 下载 Token 只有创建后 30 分钟的首次使用窗口；第一次成功生成响应后仅保留 2 分钟，供连接中断时重试传输。即使包含旧直链的 user-data 仍可从 AWS IMDS 读取，窗口结束后也不能再下载敏感 payload。未完成时启动器会校验或补齐 Bash、下载工具与 CA 证书，包管理器暂时被占用或网络未就绪时最多重试 24 次，并使用 `wget` 或 `curl` 最多重试下载 36 次。
 
@@ -110,7 +116,7 @@ umask 077
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
   curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/install.sh -o "$tmp" &&
-  test "$(sha256sum "$tmp" | awk '{print $1}')" = 'b2b6b0e372dce447d05da8ccce27f36b3b8b10ff1bac120d0e1d2f0506240aca' &&
+  test "$(sha256sum "$tmp" | awk '{print $1}')" = '6778bc23dda542bd2b442a8072dc91d09cec56ef406d8094eb64ea8067cc077a' &&
   grep -Fq '# PulseDNS / 原 DDNS 脚本兼容安装器' "$tmp" &&
   bash -n "$tmp" &&
   bash "$tmp"
@@ -129,7 +135,7 @@ umask 077
 6. 卸载 DDNS
 7. 升级现有探针，启用 Nyanpass 远程同步
 
-Web 中“添加探针节点”会先要求填写一次性 root 密码，并预配一个或多个 Nyanpass 服务名、官方命令及原脚本的 `OPTIMIZE` 选项。主控把 root 密码、节点原始令牌和规范化后的预配参数绑定 `nodeId + generation`，以 AES-GCM 加密暂存；页面只返回短时节点专属下载直链，访问时才解密并按当前代码与可信 Nyanpass 清单动态生成脚本。完整脚本执行：补齐基础环境 → 主控令牌预校验 → DDNS 安装与首次上报验收 → 全部 Nyanpass → BBR → 最后事务式配置 SSH → DDNS 复检。每完成一步都会把 `ddns`、`nyanpass`、`bbr` 或 `ssh` 随心跳和最终回执上报；面板在失败或结果未知时显示最后完成阶段，若 SSH 已完成则明确提示使用新密码核查。
+Web 中“添加探针节点”会先要求填写一次性 root 密码，并预配一个或多个 Nyanpass 服务名、官方命令及原脚本的 `OPTIMIZE` 选项。主控把 root 密码、节点原始令牌和规范化后的预配参数绑定 `nodeId + generation`，以 AES-GCM 加密暂存；页面主要返回一行公共安装脚本加节点专属参数的对接命令，并把完整 AWS User data 启动器保留为高级选项。节点访问短时参数时才解密并按当前代码与可信 Nyanpass 清单动态生成脚本。完整脚本执行：补齐基础环境 → 主控令牌预校验 → DDNS 安装与首次上报验收 → 全部 Nyanpass → BBR → 最后事务式配置 SSH → DDNS 复检。每完成一步都会把 `ddns`、`nyanpass`、`bbr` 或 `ssh` 随心跳和最终回执上报；面板在失败或结果未知时显示最后完成阶段，若 SSH 已完成则明确提示使用新密码核查。
 
 新节点创建后先显示“等待开机安装”，不能提前修改或下发额外实例。超过 10 分钟仍未开始时，面板会提示检查 User data、CRLF 和出站网络。开机脚本开始执行后每 20 秒向主控续租，并用节点 generation 与本次随机 attempt ID 绑定回执；旧脚本或另一台机器的回执不能覆盖当前结果。若机器断电或安装进程被强制终止，租约到期后会标记“结果未知”，per-boot 会在下次开机复用本机脚本，但 `started` 安全标记仍会阻止自动重复安装 Nyanpass。恢复时绝对不要先删除 `started`：先确认旧进程已经停止，再运行 `/root/pulsedns_<节点ID>_install.sh`，让它用旧 attempt ID 向主控收敛为失败；只有日志明确显示“主控已确认旧安装失败”后，才删除日志给出的精确 `started` 路径并再次运行本机脚本。下载窗口过期后不要依赖原直链。
 
@@ -137,7 +143,7 @@ Web 中“添加探针节点”会先要求填写一次性 root 密码，并预�
 
 创建完成后可在节点、DNS 记录和 Nyanpass 列表中直接修改配置。节点修改会保留原探针令牌与上报状态，并在已有公网地址时立即同步新的阿里云 DNS 映射；单独新增 Nyanpass 实例时，保存后点击“同步到机器”，探针会领取固定类型任务、安装并回传状态。一个节点可以登记多个实例，探针会逐个串行安装。实例名就是传给官方安装器的机器服务名，创建后不可直接改名，避免旧服务仍在 VPS 运行却失去登记；需要换名时应新增实例，确认新服务正常后再移除旧登记。尚未领取的任务可以安全取消；机器开始安装后不能远程取消。只有探针任务心跳离线且节点没有其他安装在运行时，排队超过 5 分钟才会自动结束并允许重试；运行租约超时则标记为“结果未知”并继续接受原探针的晚到回执，绝不会自动重复安装。总览“最近变更”和完整事件日志均支持按节点、类型、级别及关键词筛选，完整日志还可折叠。
 
-HTTP 面板上的“复制开机脚本”和“复制下载直链”按钮都包含兼容回退，复制前会把 CRLF/CR 统一为 LF，并明确显示成功或失败。没有成功提示时不要粘贴，避免使用剪贴板中残留的其他节点旧内容；若实例没有生成 `/var/log/pulsedns-bootstrap*.log`，优先检查粘贴内容是否又被外部编辑器转换为 CRLF。
+HTTP 面板上的“复制探针对接命令”和可选的“复制 AWS User data”按钮都包含兼容回退，复制前会把 CRLF/CR 统一为 LF，并明确显示成功或失败。没有成功提示时不要粘贴，避免使用剪贴板中残留的其他节点旧内容；若实例没有生成 `/var/log/pulsedns-bootstrap*.log`，先查看目标终端中的下载错误，使用 User data 时再检查内容是否被外部编辑器转换为 CRLF。
 
 首次开机 payload 中的 root 密码、原始探针 Token 和预配 Nyanpass 参数只以 AES-GCM 密文暂存，下载 Token 只保存 SHA-256 摘要与到期/首次使用时间。首次使用前最多有效 30 分钟，首次响应后最多重放 2 分钟；当前 generation 安装成功后，密文、摘要和窗口字段在同一状态更新中清空。`failed` 或 `uncertain` 时密文仍保留供同一 attempt 回执收敛，但旧下载 Token 不会长期恢复有效。为支持稍后点击同步，单独新增实例的 Nyanpass Token 使用同一主控密钥的独立加密域保存；成功安装、任务失效或结果未知后立即清除。
 
@@ -165,12 +171,12 @@ v0.7.x 及更早的探针不会轮询任务，第一次使用远程同步前必�
 
 ## Nyanpass 入口与出口
 
-Web 中添加实例时粘贴 Nyanpass 面板生成的原始命令。程序只检查 `rel_nodeclient` 参数：
+Web 中添加实例时粘贴 Nyanpass 面板生成的原始命令。程序从 `rel_nodeclient` 参数中只用独立的 `-o` 判断方向：
 
 - 参数中存在独立的 `-o`：出口。
 - 参数中不存在 `-o`：入口。
 
-不会根据 Token、面板 URL、IP 或端口猜测。创建探针时可一次添加多个面板/实例，它们仍随开机脚本自动安装；这个原流程没有改动。探针运行后再追加实例时，主控只下发 `serviceName`、入口/出口、HTTPS 面板地址、Token 和 `OPTIMIZE` 这些结构化字段；探针固定校验 Nyanpass 官方安装器及 amd64、amd64v3、arm64 对应二进制包的 SHA-256，再通过官方 `NO_DOWNLOAD=1` 路径安装，不执行上游未校验的二级下载脚本，并拒绝任意命令、脚本地址或额外参数。`OPTIMIZE=0` 会保持为空传给官方脚本，不再误触发优化；再次同步同名实例时会原子刷新 `start.sh` 中的已校验参数。
+不会根据 Token、面板 URL、IP 或端口猜测。创建探针时可一次添加多个面板/实例，命令中不含 Shell 元字符的其他官方参数（例如 `--ws-port 1145`）会原样用于首次安装。探针运行后再追加实例时，主控只下发 `serviceName`、入口/出口、HTTPS 面板地址、Token 和 `OPTIMIZE` 这些必要结构化字段；其他参数有无均不影响进出口登记。探针固定校验 Nyanpass 官方安装器及 amd64、amd64v3、arm64 对应二进制包的 SHA-256，再通过官方 `NO_DOWNLOAD=1` 路径安装，不执行上游未校验的二级下载脚本，也不接受任意命令或脚本地址。`OPTIMIZE=0` 会保持为空传给官方脚本，不再误触发优化；再次同步同名实例时会原子刷新 `start.sh` 中的已校验参数。
 
 ## DDNS API
 

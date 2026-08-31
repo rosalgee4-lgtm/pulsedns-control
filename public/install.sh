@@ -31,6 +31,7 @@ CONFIG_TMP=""
 NYANPASS_TMP=""
 NYANPASS_ARCHIVE_TMP=""
 NYANPASS_EXTRACT_TMP=""
+BOOTSTRAP_TMP=""
 MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/monitor.sh"
 MONITOR_SHA256="9cd34bc6185b4ab7e77605dc7473584b31334cbb878880d01e141d1b9b8882bb"
 
@@ -96,6 +97,7 @@ cleanup_sensitive_temps() {
     case "${NYANPASS_TMP:-}" in /tmp/nyanpass-install.*.sh) rm -f -- "$NYANPASS_TMP" ;; esac
     case "${NYANPASS_ARCHIVE_TMP:-}" in /tmp/nyanpass-binary.*.zip) rm -f -- "$NYANPASS_ARCHIVE_TMP" ;; esac
     case "${NYANPASS_EXTRACT_TMP:-}" in /tmp/nyanpass-extract.*) rm -rf -- "$NYANPASS_EXTRACT_TMP" ;; esac
+    case "${BOOTSTRAP_TMP:-}" in /root/.pulsedns-bootstrap.*) rm -f -- "$BOOTSTRAP_TMP" ;; esac
 }
 trap cleanup_sensitive_temps EXIT
 
@@ -160,6 +162,72 @@ install_deps() {
         && command -v flock >/dev/null 2>&1 \
         && command -v unzip >/dev/null 2>&1 \
         || fail "运行依赖安装后仍不完整"
+}
+
+valid_node_bootstrap_script() {
+    local candidate="$1" node_id="$2" first_line="" size=""
+    [[ -f "$candidate" && ! -L "$candidate" ]] || return 1
+    IFS= read -r first_line < "$candidate" || return 1
+    [[ "$first_line" == '#!/usr/bin/env bash' ]] || return 1
+    size=$(wc -c < "$candidate")
+    size="${size//[[:space:]]/}"
+    [[ "$size" =~ ^[0-9]+$ && $size -ge 1 && $size -le 65536 ]] || return 1
+    grep -Fq "pulsedns-bootstrap-${node_id}" "$candidate" || return 1
+    bash -n "$candidate"
+}
+
+bootstrap_node() {
+    local bootstrap_url="${1:-}" node_id="" cache_path="" port="" status=0 attempt=0 command_name=""
+    local bootstrap_re='^https?://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(:[0-9]{1,5})?(/[A-Za-z0-9._~:/@%+=,-]*)?/api/v1/bootstrap/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/(pbs_[a-f0-9]{64})$'
+    local -a protocol_args=(--proto '=https' --proto-redir '=https')
+
+    need_root
+    [[ "$bootstrap_url" =~ $bootstrap_re ]] || fail "节点参数无效，请从 PulseDNS 面板重新复制完整对接命令"
+    node_id="${BASH_REMATCH[4]}"
+    if [[ -n "${BASH_REMATCH[2]}" ]]; then
+        port="${BASH_REMATCH[2]#:}"
+        [[ $((10#$port)) -ge 1 && $((10#$port)) -le 65535 ]] || fail "节点参数中的端口无效"
+    fi
+    [[ "$bootstrap_url" == https://* ]] || protocol_args=(--proto '=http,https' --proto-redir '=http,https')
+    for command_name in curl bash mktemp grep wc chmod mv rm sleep; do
+        command -v "$command_name" >/dev/null 2>&1 || fail "缺少对接依赖：${command_name}"
+    done
+
+    cache_path="/root/pulsedns_${node_id}_install.sh"
+    if valid_node_bootstrap_script "$cache_path" "$node_id"; then
+        info "检测到已缓存的节点安装脚本，直接继续安装"
+    else
+        [[ ! -e "$cache_path" && ! -L "$cache_path" ]] || rm -f -- "$cache_path"
+        for attempt in {1..12}; do
+            BOOTSTRAP_TMP=$(mktemp "/root/.pulsedns-bootstrap.${node_id}.XXXXXX")
+            chmod 0600 "$BOOTSTRAP_TMP"
+            info "下载节点安装脚本（${attempt}/12）"
+            if curl "${protocol_args[@]}" --connect-timeout 10 --max-time 30 -fLSs "$bootstrap_url" -o "$BOOTSTRAP_TMP" \
+                && valid_node_bootstrap_script "$BOOTSTRAP_TMP" "$node_id"; then
+                chmod 0700 "$BOOTSTRAP_TMP"
+                mv -f -- "$BOOTSTRAP_TMP" "$cache_path"
+                BOOTSTRAP_TMP=""
+                break
+            fi
+            rm -f -- "$BOOTSTRAP_TMP"
+            BOOTSTRAP_TMP=""
+            warn "节点脚本暂时不可用（${attempt}/12）"
+            [[ $attempt -eq 12 ]] || sleep 5
+        done
+        valid_node_bootstrap_script "$cache_path" "$node_id" || fail "连续 12 次无法取得有效节点脚本，请检查网络后原样重跑对接命令"
+    fi
+
+    info "开始执行 PulseDNS 节点安装，过程日志会直接显示在当前终端"
+    if bash "$cache_path"; then
+        rm -f -- "$cache_path"
+        ok "PulseDNS 探针对接完成"
+        return 0
+    else
+        status=$?
+    fi
+    warn "安装未完成，已保留缓存：${cache_path}"
+    warn "修复网络或系统问题后，原样重跑对接命令即可继续"
+    return "$status"
 }
 
 select_nyanpass_binary() {
@@ -409,7 +477,7 @@ trim_space() {
 }
 
 parse_nyanpass_input() {
-    local input raw_args token="" panel_url="" full_double_re full_single_re token_re url_re
+    local input raw_args token="" panel_url="" full_double_re full_single_re token_re url_re safe_arg_re
     local seen_o=0 seen_t=0 seen_u=0 index=0 part="" next="" port=""
     local -a parts=()
     input=$(trim_space "$1")
@@ -417,6 +485,7 @@ parse_nyanpass_input() {
     full_single_re="^bash[[:space:]]+<\\(curl[[:space:]]+-fLSs[[:space:]]+https://dl\\.nyafw\\.com/download/nyanpass-install\\.sh\\)[[:space:]]+rel_nodeclient[[:space:]]+'([^']+)'[[:space:]]*$"
     token_re='^[A-Za-z0-9._~:+/=-]+$'
     url_re='^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~:/@%+=,-]*)?$'
+    safe_arg_re='^[A-Za-z0-9._~:/@%+=,-]+$'
 
     if [[ "$input" =~ $full_double_re ]]; then
         raw_args="${BASH_REMATCH[1]}"
@@ -434,7 +503,10 @@ parse_nyanpass_input() {
 
     [[ -n "$raw_args" && "$raw_args" != *$'\n'* && "$raw_args" != *$'\r'* ]] || return 1
     read -r -a parts <<< "$raw_args"
-    [[ ${#parts[@]} -ge 4 && ${#parts[@]} -le 5 ]] || return 1
+    [[ ${#parts[@]} -ge 4 && ${#parts[@]} -le 64 ]] || return 1
+    for part in "${parts[@]}"; do
+        [[ ${#part} -le 512 && "$part" =~ $safe_arg_re ]] || return 1
+    done
 
     while [[ $index -lt ${#parts[@]} ]]; do
         part="${parts[$index]}"
@@ -460,7 +532,7 @@ parse_nyanpass_input() {
                 index=$((index + 2))
                 ;;
             *)
-                return 1
+                index=$((index + 1))
                 ;;
         esac
     done
@@ -473,13 +545,8 @@ parse_nyanpass_input() {
         [[ $((10#$port)) -ge 1 && $((10#$port)) -le 65535 ]] || return 1
     fi
 
-    if [[ $seen_o -eq 1 ]]; then
-        PARSED_NYANPASS_ROLE="出口"
-        PARSED_NYANPASS_ARGS="-o -t ${token} -u ${panel_url}"
-    else
-        PARSED_NYANPASS_ROLE="入口"
-        PARSED_NYANPASS_ARGS="-t ${token} -u ${panel_url}"
-    fi
+    [[ $seen_o -eq 1 ]] && PARSED_NYANPASS_ROLE="出口" || PARSED_NYANPASS_ROLE="入口"
+    PARSED_NYANPASS_ARGS="${parts[*]}"
 }
 
 install_nyanpass_once() {
@@ -493,7 +560,7 @@ install_nyanpass_once() {
     validate_nyanpass_release_manifest
 
     if ! parse_nyanpass_input "$input"; then
-        fail "Nyanpass 命令无效。只接受官方安装命令，或 -t TOKEN -u HTTPS_URL；出口仅多一个独立的 -o 参数"
+        fail "Nyanpass 命令无效。必须包含 -t TOKEN 和 -u HTTPS_URL；独立 -o 用于识别出口，其余官方安全参数会原样保留"
     fi
     if [[ -z "$service_name" ]]; then
         [[ "$unattended" == "0" ]] || fail "无人值守安装必须提供 Nyanpass 服务名称"
@@ -1105,6 +1172,12 @@ menu() {
 ACTION="${1:-menu}"
 if [[ $# -gt 0 ]]; then
     shift
+fi
+
+if [[ "$ACTION" == "bootstrap" ]]; then
+    [[ $# -eq 1 ]] || fail "用法：bash install.sh bootstrap '<节点专属参数>'"
+    bootstrap_node "$1"
+    exit 0
 fi
 
 while [[ $# -gt 0 ]]; do

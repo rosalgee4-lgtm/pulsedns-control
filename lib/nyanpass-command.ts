@@ -26,6 +26,9 @@ export function parseNyanpassArgs(value: unknown): ParsedNyanpassCommand {
     return { ok: false, error: 'rel_nodeclient 参数格式无效' };
   }
   const tokens = value.trim().split(/[ \t]+/).filter(Boolean);
+  if (tokens.length < 4 || tokens.length > 64 || tokens.some((token) => !/^[A-Za-z0-9._~:/@%+=,-]{1,512}$/.test(token))) {
+    return { ok: false, error: 'rel_nodeclient 包含不安全或过多的参数' };
+  }
   let hasOutboundFlag = false;
   let token = '';
   let urlValue = '';
@@ -48,10 +51,10 @@ export function parseNyanpassArgs(value: unknown): ParsedNyanpassCommand {
       index += 1;
       continue;
     }
-    return { ok: false, error: 'rel_nodeclient 只允许使用一次 -o、-t 和 -u 参数' };
+    continue;
   }
 
-  if (!/^[A-Za-z0-9._:-]{8,512}$/.test(token)) {
+  if (!/^[A-Za-z0-9._~:+/=-]{8,512}$/.test(token)) {
     return { ok: false, error: '命令必须包含唯一且格式有效的 -t 节点令牌' };
   }
 

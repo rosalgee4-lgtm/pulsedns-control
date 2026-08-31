@@ -19,20 +19,21 @@ test('HTTP deployments have a synchronous clipboard fallback', () => {
 });
 
 test('copy buttons await the result and expose success or failure', () => {
-  assert.match(dashboard, /节点专属[^。；<]{0,80}下载直链/);
-  assert.match(dashboard, /直链只显示一次/);
-  assert.match(dashboard, /复制[^<]{0,20}下载直链/);
-  assert.match(dashboard, /created\.installUrl/);
+  assert.match(dashboard, /公共安装脚本 \+ 节点专属参数/);
+  assert.match(dashboard, /复制[^<]{0,20}探针对接命令/);
+  assert.doesNotMatch(dashboard, /created\.installUrl/);
   assert.doesNotMatch(dashboard, /created\.installCommand/);
+  assert.match(dashboard, /created\.connectCommand/);
   assert.match(dashboard, /created\.startupScript/);
-  assert.match(dashboard, /复制开机脚本/);
-  assert.match(dashboard, /复制下载直链/);
+  assert.match(dashboard, /复制探针对接命令/);
+  assert.match(dashboard, /复制 AWS User data/);
   assert.match(dashboard, /setCopyFeedback\(await copyText\(command\) \? 'success' : 'error'\)/);
   assert.match(dashboard, /setStartupCopyFeedback\(await copyText\(script\) \? 'success' : 'error'\)/);
-  assert.match(dashboard, /已按 LF 换行复制[\s\S]{0,100}云厂商/);
+  assert.match(dashboard, /已按 LF 换行复制[\s\S]{0,100}User data/);
+  assert.match(dashboard, /AWS User data（可选断网重试）/);
   assert.match(dashboard, /User data 未执行/);
   assert.match(dashboard, /不能作为 ASG 或 Launch Template 的共享 User data/);
-  assert.match(dashboard, /剪贴板内容没有更新|手动选中[^。]{0,30}链接复制/);
+  assert.match(dashboard, /剪贴板内容没有更新|手动选中[^。]{0,30}命令/);
   assert.doesNotMatch(dashboard, /onClick=\{\(\) => navigator\.clipboard\.writeText/);
 });
 

@@ -17,9 +17,13 @@ type NodeProvisionCommandInput = {
 };
 
 export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/install.sh';
-export const PROBE_INSTALLER_SHA256 = 'b2b6b0e372dce447d05da8ccce27f36b3b8b10ff1bac120d0e1d2f0506240aca';
+export const PROBE_INSTALLER_SHA256 = '6778bc23dda542bd2b442a8072dc91d09cec56ef406d8094eb64ea8067cc077a';
 export const MAX_CLOUD_LAUNCHER_BYTES = 15 * 1024;
 export const MAX_BOOTSTRAP_RESPONSE_BYTES = 64 * 1024;
+
+export function buildNodeConnectCommand(installUrl: string) {
+  return `bash <(curl --proto '=https' --proto-redir '=https' -fLSs ${shellArg(PROBE_INSTALLER_URL)}) bootstrap ${shellArg(installUrl)}`;
+}
 
 export function buildNodeStartupScript({ nodeId, generation, origin, token, rootPassword, instances, nyanpassRelease }: NodeProvisionCommandInput) {
   const instanceConfigWrites = instances

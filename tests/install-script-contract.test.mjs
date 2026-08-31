@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
@@ -21,6 +22,44 @@ test('boot-time dependency installation retries package locks and network startu
   assert.match(packages, /等待包管理器或网络/);
   assert.match(dependencies, /install_packages_with_retry "\$\{missing\[@\]\}"/);
   assert.match(dependencies, /运行依赖安装后仍不完整/);
+});
+
+test('compact bootstrap action validates one node parameter, caches it, and reports progress', () => {
+  const bootstrap = body('bootstrap_node');
+  const validation = body('valid_node_bootstrap_script');
+  assert.match(source, /if \[\[ "\$ACTION" == "bootstrap" \]\]; then[\s\S]*\[\[ \$# -eq 1 \]\][\s\S]*bootstrap_node "\$1"/);
+  assert.match(bootstrap, /\/api\/v1\/bootstrap\/[\s\S]*pbs_\[a-f0-9\]/);
+  assert.match(bootstrap, /\/root\/pulsedns_\$\{node_id\}_install\.sh/);
+  assert.match(bootstrap, /if valid_node_bootstrap_script "\$cache_path" "\$node_id"; then/);
+  assert.match(bootstrap, /for attempt in \{1\.\.12\}/);
+  assert.match(bootstrap, /curl "\$\{protocol_args\[@\]\}"[\s\S]*-fLSs "\$bootstrap_url" -o "\$BOOTSTRAP_TMP"/);
+  assert.match(bootstrap, /开始执行 PulseDNS 节点安装/);
+  assert.ok(bootstrap.indexOf('bash "$cache_path"') < bootstrap.lastIndexOf('rm -f -- "$cache_path"'));
+  assert.match(bootstrap, /安装未完成，已保留缓存/);
+  assert.doesNotMatch(bootstrap, /\beval\b/);
+  assert.match(validation, /65536/);
+  assert.match(validation, /grep -Fq "pulsedns-bootstrap-\$\{node_id\}"/);
+  assert.match(validation, /bash -n "\$candidate"/);
+});
+
+test('Nyanpass parser only classifies independent -o and preserves safe official extras', (context) => {
+  const bash = process.env.BASH_EXE || 'bash';
+  if (spawnSync(bash, ['--version'], { encoding: 'utf8' }).error) {
+    context.skip('Bash unavailable');
+    return;
+  }
+  const actionOffset = source.indexOf('\nACTION="${1:-menu}"');
+  assert.ok(actionOffset > 0, 'installer action dispatcher missing');
+  const harness = `${source.slice(0, actionOffset)}
+parse_nyanpass_input "$1" || exit 23
+printf '%s\\n%s\\n' "$PARSED_NYANPASS_ROLE" "$PARSED_NYANPASS_ARGS"
+`;
+  const command = 'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t 123e4567-e89b-42d3-a456-426614174000 -u https://ny.example.test --ws-port 1145"';
+  const accepted = spawnSync(bash, ['-c', harness, 'parser', command], { encoding: 'utf8' });
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(accepted.stdout, '出口\n-o -t 123e4567-e89b-42d3-a456-426614174000 -u https://ny.example.test --ws-port 1145\n');
+  const rejected = spawnSync(bash, ['-c', harness, 'parser', '-t abcdefgh -u https://ny.example.test --exec=$(id)'], { encoding: 'utf8' });
+  assert.equal(rejected.status, 23);
 });
 
 test('probe installation avoids Bash 4-only state and descriptor helpers', () => {

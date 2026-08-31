@@ -24,7 +24,7 @@ function handler(source, method, nextMethod) {
   return source.slice(start, end);
 }
 
-test('node creation returns only an unguessable bootstrap URL and its boot-resilient launcher', () => {
+test('node creation returns a compact connect command and an optional boot-resilient launcher', () => {
   const post = handler(nodeRoute, 'POST', 'PATCH');
   const successStart = post.lastIndexOf('return Response.json({');
   assert.ok(successStart >= 0, 'successful node response missing');
@@ -36,8 +36,10 @@ test('node creation returns only an unguessable bootstrap URL and its boot-resil
   assert.match(post, /bootstrapPayloadCiphertext, bootstrapDownloadTokenHash/);
   assert.match(post, /bootstrapDownloadExpiresAt: bootstrapDownloadExpiry\(now\)/);
   assert.match(post, /const installUrl = `\$\{origin\}\/api\/v1\/bootstrap\/\$\{id\}\/\$\{downloadToken\}`/);
+  assert.match(post, /const connectCommand = buildNodeConnectCommand\(installUrl\)/);
   assert.match(post, /const startupScript = buildNodeStartupLauncher\(id, installUrl, provisionGeneration\)/);
   assert.match(successResponse, /\n\s*installUrl,/);
+  assert.match(successResponse, /\n\s*connectCommand,/);
   assert.match(successResponse, /\n\s*startupScript,/);
   assert.doesNotMatch(successResponse, /\n\s*token\s*[,}:]/);
   assert.doesNotMatch(successResponse, /\n\s*installCommand\s*[,}:]/);
@@ -153,14 +155,16 @@ test('bootstrap payload encrypts round-trip and binds ciphertext to node plus ge
   }
 });
 
-test('the dashboard receives the one-time URL plus its short launcher, not the full payload', () => {
-  assert.match(dashboard, /type CreatedNode = \{[^}]*installUrl: string; startupScript: string/);
+test('the dashboard presents the compact command first and keeps cloud user-data optional', () => {
+  assert.match(dashboard, /type CreatedNode = \{[^}]*installUrl: string; connectCommand: string; startupScript: string/);
   assert.doesNotMatch(dashboard, /type CreatedNode = \{[^}]*\btoken: string/);
   assert.doesNotMatch(dashboard, /type CreatedNode = \{[^}]*installCommand: string/);
-  assert.match(dashboard, /created\.installUrl/);
+  assert.doesNotMatch(dashboard, /created\.installUrl/);
   assert.doesNotMatch(dashboard, /created\.installCommand/);
+  assert.match(dashboard, /created\.connectCommand/);
   assert.match(dashboard, /created\.startupScript/);
-  assert.match(dashboard, /现有开机脚本中的节点脚本下载地址/);
+  assert.match(dashboard, /公共安装脚本 \+ 节点专属参数/);
+  assert.match(dashboard, /<details className="advanced-install">/);
 });
 
 function restoreEnvironment(name, value) {

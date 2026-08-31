@@ -45,7 +45,7 @@ type NyanpassRow = {
   taskStatus: string | null; taskCreatedAt: string | null; taskClaimedAt: string | null; taskLeaseExpiresAt: string | null;
 };
 type NyanpassDraft = { name: string; command: string; optimize: boolean };
-type CreatedNode = { installUrl: string; startupScript: string; node: { id: string; name: string; region: string }; instances: NyanpassRow[] };
+type CreatedNode = { installUrl: string; connectCommand: string; startupScript: string; node: { id: string; name: string; region: string }; instances: NyanpassRow[] };
 type CreatedNyanpass = { instance: NyanpassRow };
 type UpdatedNode = { node: NodeRow; events: EventRow[]; warnings: string[] };
 type UpdatedNyanpass = { instance: NyanpassRow; event: EventRow };
@@ -527,7 +527,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
       {showCreate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="create-title">
           <button className="modal-close" onClick={closeModal} aria-label="关闭" disabled={saving}>×</button>
-          {!created ? <><p className="eyebrow cyan">开机自动安装</p><h2 id="create-title">添加一个探针节点</h2><p className="modal-intro">先填好 SSH 密码和全部 Nyanpass 实例。创建后主控只返回该节点专属的脚本下载直链；平台访问直链时会取得当前版本的 Bash 脚本，并按 DDNS 验收 → 全部 Nyanpass → BBR → SSH 自动完成安装。</p>
+          {!created ? <><p className="eyebrow cyan">探针对接</p><h2 id="create-title">添加一个探针节点</h2><p className="modal-intro">先填好 SSH 密码和全部 Nyanpass 实例。创建后会生成一条“公共安装脚本 + 节点专属参数”的对接命令，执行后按 DDNS 验收 → 全部 Nyanpass → BBR → SSH 自动完成安装。</p>
             <form onSubmit={createNode} className="node-form">
               <label>节点名称<input name="name" required placeholder="例如：东京 · jp-01" /></label>
               <label>区域<input name="region" placeholder="ap-northeast" /></label>
@@ -543,23 +543,26 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
                 <label>官方安装命令<textarea required rows={3} autoComplete="off" spellCheck={false} value={instance.command} onChange={(event) => updateNodeNyanpass(index, 'command', event.target.value)} placeholder={'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t … -u https://…"'} /></label>
                 <label className="nyanpass-check"><input type="checkbox" checked={instance.optimize} onChange={(event) => updateNodeNyanpass(index, 'optimize', event.target.checked)} />启用原脚本 OPTIMIZE=1</label>
               </div>)}<button type="button" className="ghost-button" disabled={nodeNyanpass.length >= 16} onClick={() => setNodeNyanpass((current) => [...current, emptyNyanpassDraft()])}>＋ 添加另一个实例</button></fieldset>
-              <p className="form-hint">命令中的独立 -o 表示出口，没有 -o 表示入口。原始凭据仅以密文暂存；页面不会返回完整脚本，只返回一个节点专属下载直链。直链本身就是 Bearer 凭据，请勿公开或转发。首次下载窗口为 30 分钟，成功响应后仅保留 2 分钟传输重试；后续开机使用机器上的已校验副本。</p>
-              <p className="form-hint">每份启动器只绑定一台实例，不能作为 ASG 或 Launch Template 的共享 User data；批量部署时请为每台实例分别创建节点。</p>
-              {error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '创建中…' : '创建节点并生成下载直链'}</button>
+              <p className="form-hint">只用独立 <code>-o</code> 识别出口，没有 <code>-o</code> 就是入口；命令中的其他官方安全参数会原样带入。原始凭据仅以密文暂存，对接命令中的节点参数属于一次性 Bearer 凭据，请勿公开或转发。</p>
+              <p className="form-hint">可选的 AWS User data 启动器只绑定一台实例，不能作为 ASG 或 Launch Template 的共享 User data；批量部署时请为每台实例分别创建节点。</p>
+              {error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '创建中…' : '创建节点并生成对接命令'}</button>
             </form></>
           : <>
             <p className="eyebrow cyan">节点已创建</p>
-            <h2 id="create-title">复制开机脚本</h2>
-            <p className="modal-intro"><strong>下面的内容已适配云厂商开机环境。</strong> 它会先注册 cloud-init per-boot 重试，再补齐运行环境并下载到 <code>/root</code>，按 DDNS、Nyanpass、BBR、SSH 的顺序安装；失败后下次开机会复用本机脚本，成功后自动清理。</p>
-            <pre className="install-command">{created.startupScript}</pre>
-            <button type="button" className="primary-button wide" disabled={startupCopyFeedback === 'copying'} onClick={() => copyStartupScript(created.startupScript)}>{startupCopyFeedback === 'copying' ? '正在复制…' : startupCopyFeedback === 'success' ? '已复制开机脚本' : '复制开机脚本'}</button>
-            {startupCopyFeedback === 'success' && <p className="form-success" role="status">已按 LF 换行复制，可以直接粘贴到云厂商 User data。若 10 分钟内没有任何 PulseDNS 日志，请检查内容是否被外部编辑器重新转换成 CRLF。</p>}
-            {startupCopyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整开机脚本；剪贴板内容没有更新。</p>}
-            <p className="form-hint"><strong>节点脚本下载直链（只显示一次）：</strong>首次访问后会快速失效，正常重试由 <code>/root</code> 下的已校验脚本和 cloud-init per-boot 副本完成。</p>
-            <pre className="install-command">{created.installUrl}</pre>
-            <button type="button" className="ghost-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(created.installUrl)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制下载直链' : '复制下载直链'}</button>
-            {copyFeedback === 'success' && <p className="form-success" role="status">下载直链已复制，请替换现有开机脚本中的节点脚本下载地址。</p>}
-            {copyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整下载直链；剪贴板内容没有更新。</p>}
+            <h2 id="create-title">复制探针对接命令</h2>
+            <p className="modal-intro">在目标 VPS 的 root Bash 中执行下面这一行。公共脚本只接收该节点的专属参数，下载和安装进度会直接显示在终端；失败后原样重跑即可继续。</p>
+            <pre className="install-command">{created.connectCommand}</pre>
+            <button type="button" className="primary-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(created.connectCommand)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制对接命令' : '复制探针对接命令'}</button>
+            {copyFeedback === 'success' && <p className="form-success" role="status">对接命令已复制，请直接粘贴到目标 VPS 的 root Bash 执行。</p>}
+            {copyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整对接命令；剪贴板内容没有更新。</p>}
+            <details className="advanced-install">
+              <summary>AWS User data（可选断网重试）</summary>
+              <p className="form-hint">需要在首次开机自动执行时使用。它会注册 cloud-init per-boot 重试并复用 <code>/root</code> 下的缓存；普通 VPS 手动对接不需要复制这一段。</p>
+              <pre className="install-command">{created.startupScript}</pre>
+              <button type="button" className="ghost-button wide" disabled={startupCopyFeedback === 'copying'} onClick={() => copyStartupScript(created.startupScript)}>{startupCopyFeedback === 'copying' ? '正在复制…' : startupCopyFeedback === 'success' ? '已复制 User data' : '复制 AWS User data'}</button>
+              {startupCopyFeedback === 'success' && <p className="form-success" role="status">已按 LF 换行复制，可以直接粘贴到云厂商 User data。</p>}
+              {startupCopyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整 User data；剪贴板内容没有更新。</p>}
+            </details>
             <button type="button" className="ghost-button wide" onClick={closeModal} disabled={saving}>完成</button>
           </>}
         </section>
