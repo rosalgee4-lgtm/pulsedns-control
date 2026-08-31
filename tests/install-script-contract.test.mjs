@@ -192,6 +192,8 @@ test('panel installer uses immutable source and README verifies the downloaded e
   assert.equal(readme.includes(panelHash), true, 'README panel command must pin the entrypoint digest');
   assert.match(panelSource, /lib\/startup-launcher\.ts/);
   assert.match(panelSource, /startupScript/);
+  assert.match(panelSource, /lib\/install-command\.ts/);
+  assert.match(panelSource, /connectCommand/);
   assert.match(panelSource, /next\/font\/google/);
   assert.match(readme, /panel-install\.sh\?v=0\.8\.2[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" install/);
   assert.match(readme, /panel-install\.sh\?v=0\.8\.2[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" update/);

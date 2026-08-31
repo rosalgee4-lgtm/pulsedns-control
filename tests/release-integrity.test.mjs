@@ -55,7 +55,9 @@ test('release version and immutable channel agree across runtime entrypoints', (
 test('self-hosted build is independent of Google Fonts and panel source checks the launcher', () => {
   assert.doesNotMatch(text('app/layout.tsx'), /next\/font\/google/);
   assert.match(text('public/panel-install.sh'), /lib\/startup-launcher\.ts/);
+  assert.match(text('public/panel-install.sh'), /lib\/install-command\.ts/);
   assert.match(text('public/panel-install.sh'), /app\/api\/admin\/nodes\/route\.ts/);
   assert.match(text('public/panel-install.sh'), /grep -Fq 'startupScript'/);
+  assert.match(text('public/panel-install.sh'), /grep -Fq 'connectCommand'/);
   assert.match(text('public/panel-install.sh'), /^SOURCE_COMMIT="[a-f0-9]{40}"$/m);
 });
