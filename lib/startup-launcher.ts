@@ -24,7 +24,7 @@ if [ "$(id -u)" -ne 0 ]; then
   echo '[PulseDNS] 开机脚本必须以 root 运行' >&2
   exit 1
 fi
-if ! : >> "$log_file"; then
+if ! printf '' 2>/dev/null >> "$log_file"; then
   echo '[PulseDNS] 无法写入开机启动日志' >&2
   exit 1
 fi
@@ -91,7 +91,10 @@ scrub_completed_bootstrap() {
   rm -f "$per_boot_path"
   for cached_userdata in /var/lib/cloud/instances/*/user-data.txt*; do
     [ -f "$cached_userdata" ] && [ ! -L "$cached_userdata" ] || continue
-    : > "$cached_userdata"
+    if ! printf '' 2>/dev/null > "$cached_userdata"; then
+      echo "[PulseDNS] 无法清空 cloud-init 本地缓存：$cached_userdata"
+      continue
+    fi
     chmod 0600 "$cached_userdata" 2>/dev/null || true
   done
   case "$0" in

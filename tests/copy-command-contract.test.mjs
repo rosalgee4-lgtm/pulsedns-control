@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -77,6 +78,10 @@ test('completed startup skips the revoked URL and restores the existing service'
   const fixture = await createLauncherFixture();
   try {
     await mkdir(fixture.stateDir, { recursive: true });
+    const cachedUserData = join(fixture.cloudInstancesDir, 'runner', 'user-data.txt');
+    await mkdir(join(fixture.cloudInstancesDir, 'runner'), { recursive: true });
+    await writeFile(cachedUserData, 'host-owned user data');
+    await chmod(cachedUserData, 0o400);
     await writeFile(join(fixture.stateDir, 'complete'), '1\nattempt\n');
     await writeFile(fixture.scriptPath, 'sensitive bootstrap payload');
     await writeExecutable(join(fixture.mockBin, 'systemctl'), `#!/bin/sh
@@ -90,6 +95,7 @@ exit 99
     const result = runLauncher(fixture);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(await readFile(fixture.callsFile, 'utf8'), 'enable --now ddns-monitor\n');
+    assert.equal(await readFile(cachedUserData, 'utf8'), 'host-owned user data');
     await assert.rejects(readFile(fixture.scriptPath), { code: 'ENOENT' });
     await assert.rejects(readFile(fixture.perBootPath), { code: 'ENOENT' });
   } finally {
@@ -212,6 +218,7 @@ async function createLauncherFixture() {
   const callsFile = join(root, 'calls.log');
   const countFile = join(root, 'wget.count');
   const perBootDir = join(root, 'per-boot');
+  const cloudInstancesDir = join(root, 'cloud-instances');
   const perBootPath = join(perBootDir, `pulsedns-bootstrap-${nodeId}.sh`);
   const launcherPath = join(root, 'user-data.sh');
   await mkdir(mockBin, { recursive: true });
@@ -231,10 +238,11 @@ async function createLauncherFixture() {
     .replaceAll('/var/log/pulsedns-bootstrap-launcher.log', logFile)
     .replaceAll(`/root/pulsedns_${nodeId}_install.sh`, scriptPath)
     .replaceAll(`/var/lib/pulsedns-bootstrap-${nodeId}`, stateDir)
-    .replaceAll('/var/lib/cloud/scripts/per-boot', perBootDir);
+    .replaceAll('/var/lib/cloud/scripts/per-boot', perBootDir)
+    .replaceAll('/var/lib/cloud/instances', cloudInstancesDir);
   await writeExecutable(launcherPath, launcher);
 
-  return { root, mockBin, stateDir, scriptPath, logFile, callsFile, countFile, perBootPath, launcherPath, launcher };
+  return { root, mockBin, stateDir, scriptPath, logFile, callsFile, countFile, perBootPath, cloudInstancesDir, launcherPath, launcher };
 }
 
 async function writeExecutable(path, source) {
@@ -243,7 +251,8 @@ async function writeExecutable(path, source) {
 }
 
 function runLauncher(fixture, extraEnvironment = {}, launcherPath = fixture.launcherPath) {
-  return spawnSync('/bin/sh', [launcherPath], {
+  const shell = existsSync('/bin/dash') ? '/bin/dash' : '/bin/sh';
+  return spawnSync(shell, [launcherPath], {
     encoding: 'utf8',
     env: { ...process.env, MOCK_CALLS: fixture.callsFile, ...extraEnvironment },
   });
