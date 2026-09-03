@@ -4,7 +4,7 @@ import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { syncAliDnsRecord } from '@/lib/alidns';
-import { buildNodeConnectCommand, buildNodeStartupScript, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES } from '@/lib/install-command';
+import { buildNodeBootstrapConfig, buildNodeConnectCommand, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES } from '@/lib/install-command';
 import { bootstrapDownloadExpiry } from '@/lib/bootstrap-download';
 import { parseOfficialNyanpassCommand } from '@/lib/nyanpass-command';
 import { publicOrigin } from '@/lib/public-origin';
@@ -72,9 +72,9 @@ export async function POST(request: Request) {
   } catch {
     return Response.json({ error: 'Nyanpass 可信发布清单配置无效，请先修正主控环境变量' }, { status: 503 });
   }
-  const installCommand = buildNodeStartupScript({ nodeId: id, generation: provisionGeneration, origin, token, rootPassword, instances: preparedInstances, nyanpassRelease });
-  if (new TextEncoder().encode(installCommand).byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES) {
-    return Response.json({ error: '完整安装脚本超过 64 KiB 服务端安全上限；请减少首次预配实例，节点上线后再用远程同步添加' }, { status: 400 });
+  const bootstrapConfig = buildNodeBootstrapConfig({ nodeId: id, generation: provisionGeneration, origin, token, rootPassword, instances: preparedInstances, nyanpassRelease });
+  if (new TextEncoder().encode(bootstrapConfig).byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES) {
+    return Response.json({ error: '节点配置数据超过 64 KiB 服务端安全上限；请减少首次预配实例，节点上线后再用远程同步添加' }, { status: 400 });
   }
   let bootstrapPayloadCiphertext = '';
   try {

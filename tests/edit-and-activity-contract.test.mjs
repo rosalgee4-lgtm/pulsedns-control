@@ -101,7 +101,7 @@ test('node creation returns the optimize flag for every bootstrapped instance', 
 
   assert.match(response, /instances: preparedInstances\.map\(\(instance\) => \(\{[\s\S]*optimize: instance\.optimize/);
   assert.match(post, /\[\\x00-\\x1f\\x7f\]/);
-  assert.match(post, /TextEncoder\(\)\.encode\(installCommand\)\.byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES/);
+  assert.match(post, /TextEncoder\(\)\.encode\(bootstrapConfig\)\.byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES/);
   assert.match(post, /TextEncoder\(\)\.encode\(startupScript\)\.byteLength > MAX_CLOUD_LAUNCHER_BYTES/);
   assert.ok(post.indexOf('byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES') < post.indexOf('db.insert(nodes)'));
   assert.ok(post.indexOf('byteLength > MAX_CLOUD_LAUNCHER_BYTES') < post.indexOf('db.insert(nodes)'));

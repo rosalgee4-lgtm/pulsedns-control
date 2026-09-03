@@ -32,6 +32,27 @@ NYANPASS_TMP=""
 NYANPASS_ARCHIVE_TMP=""
 NYANPASS_EXTRACT_TMP=""
 BOOTSTRAP_TMP=""
+BOOTSTRAP_CONFIG_PATH=""
+BOOTSTRAP_INSTALLER_PATH=""
+BOOTSTRAP_RUN_CONFIG=""
+BOOTSTRAP_NODE_ID=""
+BOOTSTRAP_GENERATION=""
+BOOTSTRAP_STATE_DIR=""
+BOOTSTRAP_ATTEMPT_FILE=""
+BOOTSTRAP_STARTED_FILE=""
+BOOTSTRAP_COMPLETE_FILE=""
+BOOTSTRAP_STAGE_FILE=""
+BOOTSTRAP_ATTEMPT_ID=""
+BOOTSTRAP_HEARTBEAT_PID=""
+BOOTSTRAP_PROVISION_PID=""
+BOOTSTRAP_DISPOSITION=""
+BOOTSTRAP_STARTED=0
+BOOTSTRAP_TERMINAL_WRITTEN=0
+BOOTSTRAP_LOCK_FILE="/run/pulsedns-bootstrap.lock"
+BOOTSTRAP_LOG_FILE="/var/log/pulsedns-bootstrap.log"
+PROBE_INSTALLER_URL=""
+PROBE_INSTALLER_SHA256=""
+EXPECTED_PROBE_INSTALLER_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/install.sh"
 MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/monitor.sh"
 MONITOR_SHA256="9cd34bc6185b4ab7e77605dc7473584b31334cbb878880d01e141d1b9b8882bb"
 
@@ -98,6 +119,7 @@ cleanup_sensitive_temps() {
     case "${NYANPASS_ARCHIVE_TMP:-}" in /tmp/nyanpass-binary.*.zip) rm -f -- "$NYANPASS_ARCHIVE_TMP" ;; esac
     case "${NYANPASS_EXTRACT_TMP:-}" in /tmp/nyanpass-extract.*) rm -rf -- "$NYANPASS_EXTRACT_TMP" ;; esac
     case "${BOOTSTRAP_TMP:-}" in /root/.pulsedns-bootstrap.*) rm -f -- "$BOOTSTRAP_TMP" ;; esac
+    case "${BOOTSTRAP_RUN_CONFIG:-}" in /var/lib/pulsedns-bootstrap-*/.provision-config.*) rm -f -- "$BOOTSTRAP_RUN_CONFIG" ;; esac
 }
 trap cleanup_sensitive_temps EXIT
 
@@ -164,70 +186,537 @@ install_deps() {
         || fail "运行依赖安装后仍不完整"
 }
 
-valid_node_bootstrap_script() {
-    local candidate="$1" node_id="$2" first_line="" size=""
-    [[ -f "$candidate" && ! -L "$candidate" ]] || return 1
-    IFS= read -r first_line < "$candidate" || return 1
-    [[ "$first_line" == '#!/usr/bin/env bash' ]] || return 1
-    size=$(wc -c < "$candidate")
+probe_bootstrap_commands_ready() {
+    local command_name=""
+    for command_name in curl sha256sum flock setsid tee sed tr mktemp install chmod chown stat mv rm sleep grep awk wc bash systemctl; do
+        command -v "$command_name" >/dev/null 2>&1 || return 1
+    done
+}
+
+probe_bootstrap_ca_bundle_ready() {
+    [[ -s /etc/ssl/certs/ca-certificates.crt \
+        || -s /etc/pki/tls/certs/ca-bundle.crt \
+        || -s /etc/ssl/ca-bundle.pem \
+        || -s /etc/ssl/cert.pem ]]
+}
+
+install_probe_bootstrap_packages() {
+    local attempt=0
+    for attempt in {1..24}; do
+        if command -v apt-get >/dev/null 2>&1; then
+            if apt-get update -qq \
+                && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates coreutils util-linux sed grep gawk; then
+                return 0
+            fi
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y -q curl ca-certificates coreutils util-linux sed grep gawk && return 0
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y -q curl ca-certificates coreutils util-linux sed grep gawk && return 0
+        elif command -v apk >/dev/null 2>&1; then
+            apk add --no-cache curl ca-certificates coreutils util-linux sed grep gawk && return 0
+        else
+            echo '[PulseDNS] 未找到支持的包管理器，无法安装探针对接环境'
+            return 1
+        fi
+        echo "[PulseDNS] 开机环境暂时无法安装，等待包管理器或网络（${attempt}/24）"
+        [[ $attempt -eq 24 ]] || sleep 5
+    done
+    return 1
+}
+
+ensure_probe_bootstrap_environment() {
+    probe_bootstrap_commands_ready && probe_bootstrap_ca_bundle_ready && return 0
+    echo '[PulseDNS] 安装探针对接所需环境：curl、CA 证书、coreutils、util-linux'
+    install_probe_bootstrap_packages || return 1
+    probe_bootstrap_commands_ready && probe_bootstrap_ca_bundle_ready
+}
+
+clear_bootstrap_config_values() {
+    SERVER_URL=""
+    TOKEN=""
+    ROOT_PASSWORD=""
+    APPLY_BBR=""
+    PROBE_INSTALLER_URL=""
+    PROBE_INSTALLER_SHA256=""
+    NYANPASS_INSTALL_URL=""
+    NYANPASS_INSTALL_SHA256=""
+    NYANPASS_BINARY_BASE_URL=""
+    NYANPASS_BINARY_RELEASE=""
+    NYANPASS_BINARY_AMD64_SHA256=""
+    NYANPASS_BINARY_AMD64V3_SHA256=""
+    NYANPASS_BINARY_ARM64_SHA256=""
+    NYANPASS_BATCH_NAMES=()
+    NYANPASS_BATCH_OPTIMIZES=()
+    NYANPASS_BATCH_INPUTS=()
+}
+
+load_bootstrap_config() {
+    local config_path="$1" expected_node_id="$2" metadata="" size="" value="" count="" expected="" index=0 offset=0
+    local -a values=()
+    [[ -f "$config_path" && ! -L "$config_path" ]] || return 1
+    metadata=$(stat -c '%a:%u' "$config_path" 2>/dev/null || true)
+    [[ "$metadata" == "600:0" ]] || return 1
+    size=$(wc -c < "$config_path")
     size="${size//[[:space:]]/}"
     [[ "$size" =~ ^[0-9]+$ && $size -ge 1 && $size -le 65536 ]] || return 1
-    grep -Fq "pulsedns-bootstrap-${node_id}" "$candidate" || return 1
-    bash -n "$candidate"
+    while IFS= read -r -d '' value; do
+        values[${#values[@]}]="$value"
+    done < "$config_path"
+    [[ -z "$value" ]] || return 1
+    [[ ${#values[@]} -ge 16 && "${values[0]}" == "PULSEDNS_BOOTSTRAP_V1" ]] || return 1
+    [[ "${values[1]}" == "$expected_node_id" ]] || return 1
+    [[ "${values[1]}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || return 1
+    [[ "${values[2]}" =~ ^[1-9][0-9]*$ && ${#values[2]} -le 10 ]] || return 1
+    [[ "${values[6]}" == "$EXPECTED_PROBE_INSTALLER_URL" ]] || return 1
+    [[ "${values[7]}" =~ ^[0-9a-f]{64}$ ]] || return 1
+    count="${values[15]}"
+    [[ "$count" =~ ^[1-9][0-9]*$ && $((10#$count)) -le 16 ]] || return 1
+    expected=$((16 + 10#$count * 3))
+    [[ ${#values[@]} -eq $expected ]] || return 1
+
+    BOOTSTRAP_NODE_ID="${values[1]}"
+    BOOTSTRAP_GENERATION="${values[2]}"
+    SERVER_URL="${values[3]}"
+    TOKEN="${values[4]}"
+    ROOT_PASSWORD="${values[5]}"
+    PROBE_INSTALLER_URL="${values[6]}"
+    PROBE_INSTALLER_SHA256="${values[7]}"
+    NYANPASS_INSTALL_URL="${values[8]}"
+    NYANPASS_INSTALL_SHA256="${values[9]}"
+    NYANPASS_BINARY_BASE_URL="${values[10]}"
+    NYANPASS_BINARY_RELEASE="${values[11]}"
+    NYANPASS_BINARY_AMD64_SHA256="${values[12]}"
+    NYANPASS_BINARY_AMD64V3_SHA256="${values[13]}"
+    NYANPASS_BINARY_ARM64_SHA256="${values[14]}"
+    NYANPASS_BATCH_NAMES=()
+    NYANPASS_BATCH_OPTIMIZES=()
+    NYANPASS_BATCH_INPUTS=()
+    for ((index = 0; index < count; index++)); do
+        offset=$((16 + index * 3))
+        NYANPASS_BATCH_NAMES[${#NYANPASS_BATCH_NAMES[@]}]="${values[$offset]}"
+        NYANPASS_BATCH_OPTIMIZES[${#NYANPASS_BATCH_OPTIMIZES[@]}]="${values[$((offset + 1))]}"
+        NYANPASS_BATCH_INPUTS[${#NYANPASS_BATCH_INPUTS[@]}]="${values[$((offset + 2))]}"
+    done
+    values=()
+}
+
+valid_bootstrap_config() {
+    local config_path="$1" expected_node_id="$2"
+    if ! load_bootstrap_config "$config_path" "$expected_node_id"; then
+        clear_bootstrap_config_values
+        return 1
+    fi
+    APPLY_BBR="1"
+    if ! (trap - EXIT; validate_provision_request) >/dev/null 2>&1; then
+        clear_bootstrap_config_values
+        return 1
+    fi
+}
+
+valid_probe_installer() {
+    local candidate="$1" metadata="" size="" digest=""
+    [[ -f "$candidate" && ! -L "$candidate" ]] || return 1
+    metadata=$(stat -c '%a:%u' "$candidate" 2>/dev/null || true)
+    [[ "$metadata" == "700:0" ]] || return 1
+    size=$(wc -c < "$candidate")
+    size="${size//[[:space:]]/}"
+    [[ "$size" =~ ^[0-9]+$ && $size -ge 1 && $size -le 262144 ]] || return 1
+    grep -Fq '# PulseDNS / 原 DDNS 脚本兼容安装器' "$candidate" || return 1
+    bash -n "$candidate" || return 1
+    digest=$(sha256sum "$candidate" | awk '{print $1}')
+    [[ "$digest" == "$PROBE_INSTALLER_SHA256" ]]
+}
+
+prepare_probe_installer_cache() {
+    local attempt=0 downloaded=0
+    if valid_probe_installer "$BOOTSTRAP_INSTALLER_PATH"; then
+        info "检测到已校验的固定探针安装器"
+        return 0
+    fi
+    [[ ! -e "$BOOTSTRAP_INSTALLER_PATH" && ! -L "$BOOTSTRAP_INSTALLER_PATH" ]] || rm -f -- "$BOOTSTRAP_INSTALLER_PATH"
+    for attempt in {1..12}; do
+        BOOTSTRAP_TMP=$(mktemp "/root/.pulsedns-bootstrap.installer.${BOOTSTRAP_NODE_ID}.XXXXXX")
+        chmod 0700 "$BOOTSTRAP_TMP"
+        info "下载固定探针安装器（${attempt}/12）"
+        if curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 30 -fLSs "$PROBE_INSTALLER_URL" -o "$BOOTSTRAP_TMP" \
+            && valid_probe_installer "$BOOTSTRAP_TMP"; then
+            mv -f -- "$BOOTSTRAP_TMP" "$BOOTSTRAP_INSTALLER_PATH"
+            BOOTSTRAP_TMP=""
+            downloaded=1
+            break
+        fi
+        rm -f -- "$BOOTSTRAP_TMP"
+        BOOTSTRAP_TMP=""
+        warn "固定探针安装器暂时不可用（${attempt}/12）"
+        [[ $attempt -eq 12 ]] || sleep 5
+    done
+    [[ $downloaded -eq 1 ]] && valid_probe_installer "$BOOTSTRAP_INSTALLER_PATH" \
+        || fail "连续 12 次无法取得有效固定探针安装器，请检查网络后原样重跑对接命令"
+}
+
+valid_bootstrap_attempt_id() {
+    [[ "$1" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
+}
+
+load_bootstrap_attempt_state() {
+    local file="$1" stored_generation=""
+    [[ -f "$file" && ! -L "$file" ]] || return 1
+    IFS= read -r stored_generation < "$file" || return 1
+    BOOTSTRAP_ATTEMPT_ID=$(sed -n '2p' "$file") || return 1
+    [[ "$stored_generation" == "$BOOTSTRAP_GENERATION" ]] && valid_bootstrap_attempt_id "$BOOTSTRAP_ATTEMPT_ID"
+}
+
+write_bootstrap_attempt_state() {
+    local target="$1" state_tmp=""
+    state_tmp=$(mktemp "$BOOTSTRAP_STATE_DIR/.attempt.XXXXXX")
+    printf '%s\n%s\n' "$BOOTSTRAP_GENERATION" "$BOOTSTRAP_ATTEMPT_ID" > "$state_tmp"
+    chmod 0600 "$state_tmp"
+    mv -f -- "$state_tmp" "$target"
+}
+
+current_bootstrap_step() {
+    local step=""
+    [[ -f "$BOOTSTRAP_STAGE_FILE" && ! -L "$BOOTSTRAP_STAGE_FILE" ]] || return 0
+    IFS= read -r step < "$BOOTSTRAP_STAGE_FILE" || return 0
+    case "$step" in ddns|nyanpass|bbr|ssh) printf '%s' "$step" ;; esac
+}
+
+report_bootstrap_message() {
+    local phase="$1" outcome="${2:-}" body="" response="" last_completed_step="" disposition=""
+    BOOTSTRAP_DISPOSITION=""
+    last_completed_step=$(current_bootstrap_step)
+    if [[ "$phase" == "finish" ]]; then
+        if [[ -n "$last_completed_step" ]]; then
+            body=$(printf '{"protocol":1,"phase":"finish","generation":%s,"attemptId":"%s","outcome":"%s","lastCompletedStep":"%s"}' "$BOOTSTRAP_GENERATION" "$BOOTSTRAP_ATTEMPT_ID" "$outcome" "$last_completed_step")
+        else
+            body=$(printf '{"protocol":1,"phase":"finish","generation":%s,"attemptId":"%s","outcome":"%s"}' "$BOOTSTRAP_GENERATION" "$BOOTSTRAP_ATTEMPT_ID" "$outcome")
+        fi
+    elif [[ -n "$last_completed_step" ]]; then
+        body=$(printf '{"protocol":1,"phase":"%s","generation":%s,"attemptId":"%s","lastCompletedStep":"%s"}' "$phase" "$BOOTSTRAP_GENERATION" "$BOOTSTRAP_ATTEMPT_ID" "$last_completed_step")
+    else
+        body=$(printf '{"protocol":1,"phase":"%s","generation":%s,"attemptId":"%s"}' "$phase" "$BOOTSTRAP_GENERATION" "$BOOTSTRAP_ATTEMPT_ID")
+    fi
+    response=$(curl -sS --connect-timeout 5 --max-time 20 -X POST \
+        "$SERVER_URL/api/v1/provision" \
+        -H 'Content-Type: application/json' \
+        -H "X-Agent-Version: $VERSION" \
+        -H "X-Secret-Token: $TOKEN" \
+        -d "$body" 2>/dev/null || true)
+    printf '%s' "$response" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' || return 1
+    if [[ "$phase" == "finish" ]]; then
+        for disposition in accepted duplicate stale; do
+            if printf '%s' "$response" | grep -Eq "\"disposition\"[[:space:]]*:[[:space:]]*\"$disposition\""; then
+                BOOTSTRAP_DISPOSITION="$disposition"
+                return 0
+            fi
+        done
+    else
+        for disposition in accepted duplicate; do
+            if printf '%s' "$response" | grep -Eq "\"disposition\"[[:space:]]*:[[:space:]]*\"$disposition\""; then
+                BOOTSTRAP_DISPOSITION="$disposition"
+                return 0
+            fi
+        done
+    fi
+    return 1
+}
+
+persist_bootstrap_outcome() {
+    local outcome="$1" outcome_tmp="" outcome_file="" last_completed_step=""
+    install -d -m 0700 "$PROVISION_OUTCOME_DIR" || return 1
+    outcome_file="$PROVISION_OUTCOME_DIR/$BOOTSTRAP_GENERATION.$BOOTSTRAP_ATTEMPT_ID.$outcome.json"
+    outcome_tmp=$(mktemp "$PROVISION_OUTCOME_DIR/.provision.XXXXXX") || return 1
+    last_completed_step=$(current_bootstrap_step)
+    if [[ -n "$last_completed_step" ]]; then
+        printf '{"protocol":1,"phase":"finish","generation":%s,"attemptId":"%s","outcome":"%s","lastCompletedStep":"%s"}\n' \
+            "$BOOTSTRAP_GENERATION" "$BOOTSTRAP_ATTEMPT_ID" "$outcome" "$last_completed_step" > "$outcome_tmp" || {
+                rm -f -- "$outcome_tmp"
+                return 1
+            }
+    else
+        printf '{"protocol":1,"phase":"finish","generation":%s,"attemptId":"%s","outcome":"%s"}\n' \
+            "$BOOTSTRAP_GENERATION" "$BOOTSTRAP_ATTEMPT_ID" "$outcome" > "$outcome_tmp" || {
+                rm -f -- "$outcome_tmp"
+                return 1
+            }
+    fi
+    if [[ ! -s "$outcome_tmp" ]] \
+        || ! chmod 0600 "$outcome_tmp" \
+        || ! mv -f -- "$outcome_tmp" "$outcome_file"; then
+        rm -f -- "$outcome_tmp"
+        return 1
+    fi
+    printf '%s' "$outcome_file"
+}
+
+deliver_bootstrap_outcome() {
+    local outcome="$1" outcome_file="$2"
+    if report_bootstrap_message finish "$outcome"; then
+        rm -f -- "$outcome_file"
+        return 0
+    fi
+    return 1
+}
+
+bootstrap_heartbeat_loop() {
+    local parent_pid="$1"
+    while kill -0 "$parent_pid" 2>/dev/null; do
+        sleep 20
+        kill -0 "$parent_pid" 2>/dev/null || return 0
+        report_bootstrap_message heartbeat || true
+    done
+}
+
+stop_bootstrap_heartbeat() {
+    [[ -n "$BOOTSTRAP_HEARTBEAT_PID" ]] || return 0
+    kill "$BOOTSTRAP_HEARTBEAT_PID" 2>/dev/null || true
+    wait "$BOOTSTRAP_HEARTBEAT_PID" 2>/dev/null || true
+    BOOTSTRAP_HEARTBEAT_PID=""
+}
+
+stop_bootstrap_process_group() {
+    local signal="${1:-TERM}" attempt=0
+    [[ -n "$BOOTSTRAP_PROVISION_PID" ]] || return 0
+    kill -s "$signal" -- "-$BOOTSTRAP_PROVISION_PID" 2>/dev/null \
+        || kill -s "$signal" "$BOOTSTRAP_PROVISION_PID" 2>/dev/null \
+        || true
+    for attempt in {1..50}; do
+        kill -0 -- "-$BOOTSTRAP_PROVISION_PID" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 -- "-$BOOTSTRAP_PROVISION_PID" 2>/dev/null; then
+        kill -KILL -- "-$BOOTSTRAP_PROVISION_PID" 2>/dev/null || true
+    fi
+    wait "$BOOTSTRAP_PROVISION_PID" 2>/dev/null || true
+    BOOTSTRAP_PROVISION_PID=""
+}
+
+bootstrap_on_signal() {
+    local signal="$1" exit_code="$2" background_pid="${!:-}"
+    trap - INT TERM HUP
+    set +e
+    if [[ -z "$BOOTSTRAP_PROVISION_PID" && -n "$background_pid" && "$background_pid" != "$BOOTSTRAP_HEARTBEAT_PID" ]]; then
+        BOOTSTRAP_PROVISION_PID="$background_pid"
+    fi
+    echo "[PulseDNS] 收到 $signal，正在停止当前安装进程组"
+    stop_bootstrap_process_group "$signal"
+    exit "$exit_code"
+}
+
+bootstrap_runtime_cleanup() {
+    case "$BOOTSTRAP_RUN_CONFIG" in "$BOOTSTRAP_STATE_DIR"/.provision-config.*) rm -f -- "$BOOTSTRAP_RUN_CONFIG" ;; esac
+    BOOTSTRAP_RUN_CONFIG=""
+    exec 9>&-
+    cleanup_sensitive_temps
+}
+
+bootstrap_on_exit() {
+    local status="$?" outcome_file="" terminal_outcome="failed"
+    trap - EXIT INT TERM HUP
+    set +e
+    stop_bootstrap_process_group TERM
+    stop_bootstrap_heartbeat
+    if [[ $BOOTSTRAP_STARTED -eq 1 && $BOOTSTRAP_TERMINAL_WRITTEN -eq 0 ]]; then
+        if [[ -f "$BOOTSTRAP_COMPLETE_FILE" ]] && load_bootstrap_attempt_state "$BOOTSTRAP_COMPLETE_FILE"; then
+            terminal_outcome="succeeded"
+        fi
+        if outcome_file=$(persist_bootstrap_outcome "$terminal_outcome"); then
+            BOOTSTRAP_TERMINAL_WRITTEN=1
+            deliver_bootstrap_outcome "$terminal_outcome" "$outcome_file" \
+                || echo '[PulseDNS] 最终回执已落盘；DDNS 探针会在网络恢复后重试发送'
+        else
+            echo '[PulseDNS] 无法持久化最终回执；本地状态标记仍保留，下次运行会重试'
+        fi
+    fi
+    bootstrap_runtime_cleanup
+    exit "$status"
+}
+
+write_bootstrap_provision_config() {
+    local index=0
+    BOOTSTRAP_RUN_CONFIG=$(mktemp "$BOOTSTRAP_STATE_DIR/.provision-config.XXXXXX")
+    chmod 0600 "$BOOTSTRAP_RUN_CONFIG"
+    {
+        printf '%s\0' 'PULSEDNS_PROVISION_V2' "$SERVER_URL" "$TOKEN" "$ROOT_PASSWORD" \
+            "$NYANPASS_INSTALL_URL" "$NYANPASS_INSTALL_SHA256" "$NYANPASS_BINARY_BASE_URL" \
+            "$NYANPASS_BINARY_RELEASE" "$NYANPASS_BINARY_AMD64_SHA256" \
+            "$NYANPASS_BINARY_AMD64V3_SHA256" "$NYANPASS_BINARY_ARM64_SHA256" \
+            "${#NYANPASS_BATCH_NAMES[@]}"
+        for ((index = 0; index < ${#NYANPASS_BATCH_NAMES[@]}; index++)); do
+            printf '%s\0' "${NYANPASS_BATCH_NAMES[$index]}" \
+                "${NYANPASS_BATCH_OPTIMIZES[$index]}" \
+                "${NYANPASS_BATCH_INPUTS[$index]}"
+        done
+    } > "$BOOTSTRAP_RUN_CONFIG"
+}
+
+remove_completed_bootstrap_cache() {
+    rm -f -- "$BOOTSTRAP_CONFIG_PATH" "$BOOTSTRAP_INSTALLER_PATH"
+    clear_bootstrap_config_values
+}
+
+run_probe_bootstrap() {
+    local attempt=0 start_accepted=0 failed_acknowledged=0 outcome_file="" stale_config="" provision_status=0
+    need_root
+    APPLY_BBR="1"
+    validate_provision_request
+    BOOTSTRAP_STATE_DIR="/var/lib/pulsedns-bootstrap-${BOOTSTRAP_NODE_ID}"
+    BOOTSTRAP_ATTEMPT_FILE="$BOOTSTRAP_STATE_DIR/attempt"
+    BOOTSTRAP_STARTED_FILE="$BOOTSTRAP_STATE_DIR/started"
+    BOOTSTRAP_COMPLETE_FILE="$BOOTSTRAP_STATE_DIR/complete"
+    BOOTSTRAP_STAGE_FILE="$BOOTSTRAP_STATE_DIR/stage"
+    [[ ! -L "$BOOTSTRAP_STATE_DIR" ]] || fail "节点安装状态目录不能是符号链接"
+
+    printf '' >> "$BOOTSTRAP_LOG_FILE" || fail "无法写入探针对接日志"
+    chmod 0600 "$BOOTSTRAP_LOG_FILE"
+    exec > >(tee -a "$BOOTSTRAP_LOG_FILE") 2>&1
+    exec 9>"$BOOTSTRAP_LOCK_FILE"
+    if ! flock -n 9; then
+        fail "另一个安装进程正在运行，本次退出"
+    fi
+    trap bootstrap_on_exit EXIT
+    trap 'bootstrap_on_signal INT 130' INT
+    trap 'bootstrap_on_signal TERM 143' TERM
+    trap 'bootstrap_on_signal HUP 129' HUP
+    install -d -m 0700 "$BOOTSTRAP_STATE_DIR" "$PROVISION_OUTCOME_DIR"
+    shopt -s nullglob
+    for stale_config in "$BOOTSTRAP_STATE_DIR"/.provision-config.*; do
+        [[ -f "$stale_config" && ! -L "$stale_config" ]] && rm -f -- "$stale_config"
+    done
+    shopt -u nullglob
+
+    if [[ -f "$BOOTSTRAP_COMPLETE_FILE" ]]; then
+        load_bootstrap_attempt_state "$BOOTSTRAP_COMPLETE_FILE" || fail "完成标记损坏或不属于当前节点配置"
+        echo '[PulseDNS] 首次安装已经完成，跳过重复安装'
+        if outcome_file=$(persist_bootstrap_outcome succeeded); then
+            BOOTSTRAP_TERMINAL_WRITTEN=1
+            deliver_bootstrap_outcome succeeded "$outcome_file" || echo '[PulseDNS] 完成回执暂未送达，DDNS 探针将在后台重试'
+        else
+            fail "无法持久化完成回执；请再次运行同一对接命令重试"
+        fi
+        systemctl enable --now "$SERVICE_NAME" || fail "无法恢复 DDNS 探针服务"
+        remove_completed_bootstrap_cache
+        return 0
+    fi
+
+    if [[ -f "$BOOTSTRAP_STARTED_FILE" ]]; then
+        load_bootstrap_attempt_state "$BOOTSTRAP_STARTED_FILE" || fail "中断标记损坏或不属于当前节点配置"
+        BOOTSTRAP_STARTED=1
+        echo '[PulseDNS] 上次安装在中途停止；为避免重复安装 Nyanpass，本次不会自动重跑'
+        if outcome_file=$(persist_bootstrap_outcome failed); then
+            BOOTSTRAP_TERMINAL_WRITTEN=1
+            if deliver_bootstrap_outcome failed "$outcome_file" \
+                && [[ "$BOOTSTRAP_DISPOSITION" == "accepted" || "$BOOTSTRAP_DISPOSITION" == "duplicate" ]]; then
+                failed_acknowledged=1
+            else
+                echo '[PulseDNS] 主控尚未确认旧安装已结束；不要删除 started 标记，网络和主控恢复后原样重跑同一命令'
+            fi
+        else
+            echo '[PulseDNS] 无法持久化失败回执；started 标记仍保留，下次运行会重试'
+        fi
+        if [[ $failed_acknowledged -eq 1 ]]; then
+            echo "[PulseDNS] 主控已确认旧安装失败。确认旧进程已停止后，删除 $BOOTSTRAP_STARTED_FILE，再原样运行同一命令开始新尝试"
+        fi
+        return 1
+    fi
+
+    if [[ -f "$BOOTSTRAP_ATTEMPT_FILE" ]]; then
+        load_bootstrap_attempt_state "$BOOTSTRAP_ATTEMPT_FILE" || fail "尝试标记损坏或不属于当前节点配置"
+    else
+        [[ -r /proc/sys/kernel/random/uuid ]] || fail "无法生成本次安装 ID"
+        BOOTSTRAP_ATTEMPT_ID=$(tr 'A-F' 'a-f' < /proc/sys/kernel/random/uuid)
+        valid_bootstrap_attempt_id "$BOOTSTRAP_ATTEMPT_ID" || fail "本次安装 ID 无效"
+        rm -f -- "$BOOTSTRAP_STAGE_FILE"
+        write_bootstrap_attempt_state "$BOOTSTRAP_ATTEMPT_FILE"
+    fi
+
+    for attempt in {1..36}; do
+        if report_bootstrap_message start; then
+            start_accepted=1
+            break
+        fi
+        echo "[PulseDNS] 等待主控接受探针对接（${attempt}/36）"
+        [[ $attempt -eq 36 ]] || sleep 5
+    done
+    [[ $start_accepted -eq 1 ]] || fail "主控未接受本次探针对接，未修改机器"
+    mv -f -- "$BOOTSTRAP_ATTEMPT_FILE" "$BOOTSTRAP_STARTED_FILE"
+    BOOTSTRAP_STARTED=1
+    bootstrap_heartbeat_loop "$$" &
+    BOOTSTRAP_HEARTBEAT_PID=$!
+
+    write_bootstrap_provision_config
+    set +e
+    set +m
+    PULSEDNS_PROVISION_STAGE_FILE="$BOOTSTRAP_STAGE_FILE" \
+        setsid bash "$BOOTSTRAP_INSTALLER_PATH" provision --provision-config "$BOOTSTRAP_RUN_CONFIG" --bbr '1' &
+    BOOTSTRAP_PROVISION_PID=$!
+    wait "$BOOTSTRAP_PROVISION_PID"
+    provision_status=$?
+    BOOTSTRAP_PROVISION_PID=""
+    rm -f -- "$BOOTSTRAP_RUN_CONFIG"
+    BOOTSTRAP_RUN_CONFIG=""
+    set -e
+    [[ $provision_status -eq 0 ]] || return "$provision_status"
+
+    mv -f -- "$BOOTSTRAP_STARTED_FILE" "$BOOTSTRAP_COMPLETE_FILE"
+    stop_bootstrap_heartbeat
+    if outcome_file=$(persist_bootstrap_outcome succeeded); then
+        BOOTSTRAP_TERMINAL_WRITTEN=1
+        deliver_bootstrap_outcome succeeded "$outcome_file" || echo '[PulseDNS] 安装已完成，但回执暂未送达；DDNS 探针将在后台重试'
+    else
+        fail "安装已完成但无法持久化回执；完成标记仍保留，下次运行会重试"
+    fi
+    remove_completed_bootstrap_cache
+    echo '[PulseDNS] 首次探针对接全部完成'
 }
 
 bootstrap_node() {
-    local bootstrap_url="${1:-}" node_id="" cache_path="" port="" status=0 attempt=0 command_name=""
+    local bootstrap_url="${1:-}" port="" attempt=0 downloaded=0
     local bootstrap_re='^https?://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(:[0-9]{1,5})?(/[A-Za-z0-9._~:/@%+=,-]*)?/api/v1/bootstrap/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/(pbs_[a-f0-9]{64})$'
     local -a protocol_args=(--proto '=https' --proto-redir '=https')
 
     need_root
+    umask 077
     [[ "$bootstrap_url" =~ $bootstrap_re ]] || fail "节点参数无效，请从 PulseDNS 面板重新复制完整对接命令"
-    node_id="${BASH_REMATCH[4]}"
+    BOOTSTRAP_NODE_ID="${BASH_REMATCH[4]}"
     if [[ -n "${BASH_REMATCH[2]}" ]]; then
         port="${BASH_REMATCH[2]#:}"
         [[ $((10#$port)) -ge 1 && $((10#$port)) -le 65535 ]] || fail "节点参数中的端口无效"
     fi
     [[ "$bootstrap_url" == https://* ]] || protocol_args=(--proto '=http,https' --proto-redir '=http,https')
-    for command_name in curl bash mktemp grep wc chmod mv rm sleep; do
-        command -v "$command_name" >/dev/null 2>&1 || fail "缺少对接依赖：${command_name}"
-    done
+    ensure_probe_bootstrap_environment || fail "连续 24 次无法安装探针对接环境"
 
-    cache_path="/root/pulsedns_${node_id}_install.sh"
-    if valid_node_bootstrap_script "$cache_path" "$node_id"; then
-        info "检测到已缓存的节点安装脚本，直接继续安装"
+    BOOTSTRAP_CONFIG_PATH="/root/pulsedns_${BOOTSTRAP_NODE_ID}_bootstrap.config"
+    BOOTSTRAP_INSTALLER_PATH="/root/pulsedns_${BOOTSTRAP_NODE_ID}_installer.sh"
+    if valid_bootstrap_config "$BOOTSTRAP_CONFIG_PATH" "$BOOTSTRAP_NODE_ID"; then
+        info "检测到已缓存的节点配置数据，直接继续对接"
     else
-        [[ ! -e "$cache_path" && ! -L "$cache_path" ]] || rm -f -- "$cache_path"
+        [[ ! -e "$BOOTSTRAP_CONFIG_PATH" && ! -L "$BOOTSTRAP_CONFIG_PATH" ]] || rm -f -- "$BOOTSTRAP_CONFIG_PATH"
         for attempt in {1..12}; do
-            BOOTSTRAP_TMP=$(mktemp "/root/.pulsedns-bootstrap.${node_id}.XXXXXX")
+            BOOTSTRAP_TMP=$(mktemp "/root/.pulsedns-bootstrap.config.${BOOTSTRAP_NODE_ID}.XXXXXX")
             chmod 0600 "$BOOTSTRAP_TMP"
-            info "下载节点安装脚本（${attempt}/12）"
+            info "下载节点配置数据（${attempt}/12）"
             if curl "${protocol_args[@]}" --connect-timeout 10 --max-time 30 -fLSs "$bootstrap_url" -o "$BOOTSTRAP_TMP" \
-                && valid_node_bootstrap_script "$BOOTSTRAP_TMP" "$node_id"; then
-                chmod 0700 "$BOOTSTRAP_TMP"
-                mv -f -- "$BOOTSTRAP_TMP" "$cache_path"
+                && valid_bootstrap_config "$BOOTSTRAP_TMP" "$BOOTSTRAP_NODE_ID"; then
+                mv -f -- "$BOOTSTRAP_TMP" "$BOOTSTRAP_CONFIG_PATH"
                 BOOTSTRAP_TMP=""
+                downloaded=1
                 break
             fi
+            clear_bootstrap_config_values
             rm -f -- "$BOOTSTRAP_TMP"
             BOOTSTRAP_TMP=""
-            warn "节点脚本暂时不可用（${attempt}/12）"
+            warn "节点配置数据暂时不可用（${attempt}/12）"
             [[ $attempt -eq 12 ]] || sleep 5
         done
-        valid_node_bootstrap_script "$cache_path" "$node_id" || fail "连续 12 次无法取得有效节点脚本，请检查网络后原样重跑对接命令"
+        [[ $downloaded -eq 1 ]] || fail "连续 12 次无法取得有效节点配置数据，请检查网络后原样重跑对接命令"
+        valid_bootstrap_config "$BOOTSTRAP_CONFIG_PATH" "$BOOTSTRAP_NODE_ID" \
+            || fail "缓存的节点配置数据校验失败"
     fi
 
-    info "开始执行 PulseDNS 节点安装，过程日志会直接显示在当前终端"
-    if bash "$cache_path"; then
-        rm -f -- "$cache_path"
-        ok "PulseDNS 探针对接完成"
-        return 0
-    else
-        status=$?
-    fi
-    warn "安装未完成，已保留缓存：${cache_path}"
-    warn "修复网络或系统问题后，原样重跑对接命令即可继续"
-    return "$status"
+    prepare_probe_installer_cache
+    info "开始执行 PulseDNS 探针对接，过程日志会直接显示在当前终端"
+    run_probe_bootstrap
 }
 
 select_nyanpass_binary() {
@@ -1174,8 +1663,8 @@ if [[ $# -gt 0 ]]; then
     shift
 fi
 
-if [[ "$ACTION" == "bootstrap" ]]; then
-    [[ $# -eq 1 ]] || fail "用法：bash install.sh bootstrap '<节点专属参数>'"
+if [[ "$ACTION" == "probe" || "$ACTION" == "bootstrap" ]]; then
+    [[ $# -eq 1 ]] || fail "用法：bash install.sh probe '<节点专属参数>'"
     bootstrap_node "$1"
     exit 0
 fi

@@ -247,7 +247,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
   async function syncNyanpassInstance(instance: NyanpassRow) {
     const node = nodes.find((item) => item.id === instance.nodeId);
     if (node && isBootstrapLockedStatus(node.nyanpassStatus)) {
-      setNyanpassErrors((current) => ({ ...current, [instance.id]: '节点的开机预配尚未安全完成，请先执行或按日志恢复同一份开机脚本。' }));
+      setNyanpassErrors((current) => ({ ...current, [instance.id]: '节点的首次预配尚未安全完成，请先执行或按日志恢复同一条探针对接命令。' }));
       return;
     }
     if (!node || !supportsRemoteSync(node.agentVersion)) {
@@ -533,7 +533,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
               <label>区域<input name="region" placeholder="ap-northeast" /></label>
               <label>一次性 root 密码<input name="rootPassword" type="password" required minLength={8} maxLength={128} autoComplete="new-password" placeholder="8-128 个字符" /></label>
               <p className="form-hint">root 密码只会随开机安装凭据加密暂存，不会进入节点列表、事件或日志；安装成功后主控会立即擦除。</p>
-              <p className="form-hint">原脚本的 23 项 BBR + fq/sysctl 参数固定启用，动态生成的脚本会显式携带 <code>--bbr 1</code>；覆盖前仍会备份 `/etc/sysctl.conf`。</p>
+              <p className="form-hint">原脚本的 23 项 BBR + fq/sysctl 参数固定启用，公共安装器会在内部显式调用 <code>--bbr 1</code>；覆盖前仍会备份 `/etc/sysctl.conf`。</p>
               <label>阿里云主域名<input name="domainName" placeholder="example.com" /></label>
               <div className="form-grid"><label>IPv4 主机记录<input name="recordV4" placeholder="home 或 @" /></label><label>IPv6 主机记录<input name="recordV6" placeholder="home 或 @" /></label></div>
               <p className="form-hint">例如 home.example.com：主域名填 example.com，主机记录填 home；根域名填 @。</p>
@@ -550,7 +550,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
           : <>
             <p className="eyebrow cyan">节点已创建</p>
             <h2 id="create-title">复制探针对接命令</h2>
-            <p className="modal-intro">在目标 VPS 的 root Bash 中执行下面这一行。公共脚本只接收该节点的专属参数，下载和安装进度会直接显示在终端；失败后原样重跑即可继续。</p>
+            <p className="modal-intro">在目标 VPS 的 root Bash 中执行下面这一行。公共脚本只接收该节点的专属参数，配置下载和安装进度会直接显示在终端；失败后原样重跑即可继续。</p>
             <pre className="install-command">{created.connectCommand}</pre>
             <button type="button" className="primary-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(created.connectCommand)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制对接命令' : '复制探针对接命令'}</button>
             {copyFeedback === 'success' && <p className="form-success" role="status">对接命令已复制，请直接粘贴到目标 VPS 的 root Bash 执行。</p>}

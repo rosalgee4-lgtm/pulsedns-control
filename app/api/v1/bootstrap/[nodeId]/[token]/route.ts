@@ -4,7 +4,7 @@ import { ensureSchema } from '@/db/init';
 import { nodes } from '@/db/schema';
 import { decryptBootstrapPayload } from '@/lib/bootstrap-payload';
 import { bootstrapDownloadWindow } from '@/lib/bootstrap-download';
-import { buildNodeStartupScript, MAX_BOOTSTRAP_RESPONSE_BYTES } from '@/lib/install-command';
+import { buildNodeBootstrapConfig, MAX_BOOTSTRAP_RESPONSE_BYTES } from '@/lib/install-command';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
 import { trustedNyanpassRelease } from '@/lib/nyanpass-release';
 import { publicOrigin } from '@/lib/public-origin';
@@ -73,7 +73,7 @@ export async function GET(
     } catch {
       return new Response('Nyanpass trusted release manifest is unavailable.\n', { status: 503, headers: noStoreHeaders });
     }
-    const script = buildNodeStartupScript({
+    const config = buildNodeBootstrapConfig({
       nodeId: node.id,
       generation: node.generation,
       origin: publicOrigin(request),
@@ -82,8 +82,8 @@ export async function GET(
       instances: payload.instances,
       nyanpassRelease,
     });
-    if (new TextEncoder().encode(script).byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES) {
-      return new Response('完整安装脚本超过 64 KiB 服务端安全上限，请联系管理员更新配置。\n', { status: 409, headers: noStoreHeaders });
+    if (new TextEncoder().encode(config).byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES) {
+      return new Response('节点配置数据超过 64 KiB 服务端安全上限，请联系管理员更新配置。\n', { status: 409, headers: noStoreHeaders });
     }
     if (downloadWindow.shouldConsume) {
       const [consumed] = await db.update(nodes).set({ bootstrapDownloadConsumedAt: now }).where(and(
@@ -93,11 +93,11 @@ export async function GET(
       )).returning({ id: nodes.id });
       if (!consumed) return notFound();
     }
-    return new Response(script, {
+    return new Response(config, {
       headers: {
         ...noStoreHeaders,
-        'Content-Type': 'text/x-shellscript; charset=utf-8',
-        'Content-Disposition': `attachment; filename="pulsedns-${node.id}.sh"`,
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename="pulsedns-${node.id}.config"`,
       },
     });
   } finally {

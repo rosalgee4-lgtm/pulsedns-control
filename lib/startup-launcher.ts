@@ -1,5 +1,8 @@
+import { PROBE_INSTALLER_SHA256, PROBE_INSTALLER_URL } from '@/lib/install-command';
+
 export function buildNodeStartupLauncher(nodeId: string, installUrl: string, generation: number) {
-  const scriptPath = `/root/pulsedns_${nodeId}_install.sh`;
+  const scriptPath = `/root/pulsedns_${nodeId}_installer.sh`;
+  const configPath = `/root/pulsedns_${nodeId}_bootstrap.config`;
   const stateDir = `/var/lib/pulsedns-bootstrap-${nodeId}`;
   const perBootPath = `/var/lib/cloud/scripts/per-boot/pulsedns-bootstrap-${nodeId}.sh`;
   const launcher = `#!/bin/sh
@@ -11,10 +14,13 @@ umask 077
 
 log_file=/var/log/pulsedns-bootstrap-launcher.log
 script_path=${quoteShellArg(scriptPath)}
+config_path=${quoteShellArg(configPath)}
 download_path="${scriptPath}.download.$$"
 state_dir=${quoteShellArg(stateDir)}
 complete_file="$state_dir/complete"
-install_url=${quoteShellArg(installUrl)}
+installer_url=${quoteShellArg(PROBE_INSTALLER_URL)}
+installer_sha256=${quoteShellArg(PROBE_INSTALLER_SHA256)}
+node_parameter=${quoteShellArg(installUrl)}
 expected_generation=${generation}
 per_boot_dir=/var/lib/cloud/scripts/per-boot
 per_boot_path=${quoteShellArg(perBootPath)}
@@ -52,12 +58,16 @@ bash_ready() {
   /bin/bash -c '[ "\${BASH_VERSINFO[0]:-0}" -ge 3 ]' >/dev/null 2>&1
 }
 
-downloader_ready() {
-  command -v wget >/dev/null 2>&1 || command -v curl >/dev/null 2>&1
+installer_tools_ready() {
+  command -v curl >/dev/null 2>&1 \
+    && command -v sha256sum >/dev/null 2>&1 \
+    && command -v grep >/dev/null 2>&1 \
+    && command -v wc >/dev/null 2>&1 \
+    && command -v tr >/dev/null 2>&1
 }
 
 bootstrap_ready() {
-  bash_ready && ca_bundle_ready && downloader_ready
+  bash_ready && ca_bundle_ready && installer_tools_ready
 }
 
 complete_matches_generation() {
@@ -107,17 +117,17 @@ install_bootstrap_packages() {
   while [ "$attempt" -le 24 ]; do
     if command -v apt-get >/dev/null 2>&1; then
       if apt-get update -qq \
-        && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash wget ca-certificates; then
+        && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash curl ca-certificates coreutils grep; then
         return 0
       fi
     elif command -v dnf >/dev/null 2>&1; then
-      dnf install -y -q bash wget ca-certificates && return 0
+      dnf install -y -q bash curl ca-certificates coreutils grep && return 0
     elif command -v yum >/dev/null 2>&1; then
-      yum install -y -q bash wget ca-certificates && return 0
+      yum install -y -q bash curl ca-certificates coreutils grep && return 0
     elif command -v apk >/dev/null 2>&1; then
-      apk add --no-cache bash wget ca-certificates && return 0
+      apk add --no-cache bash curl ca-certificates coreutils grep && return 0
     else
-      echo '[PulseDNS] 未找到支持的包管理器，无法安装 Bash、下载工具和 CA 证书'
+      echo '[PulseDNS] 未找到支持的包管理器，无法安装 Bash、curl、校验工具和 CA 证书'
       return 1
     fi
     echo "[PulseDNS] 开机依赖暂时无法安装，等待包管理器或网络（$attempt/24）"
@@ -128,28 +138,34 @@ install_bootstrap_packages() {
 }
 
 download_once() {
-  if command -v wget >/dev/null 2>&1; then
-    wget -q -T 20 -t 1 -O "$download_path" "$install_url" && return 0
-  fi
-  if command -v curl >/dev/null 2>&1; then
-    curl --connect-timeout 10 --max-time 30 -fLSs "$install_url" -o "$download_path" && return 0
-  fi
-  return 1
+  curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 30 -fLSs "$installer_url" -o "$download_path"
 }
 
-run_cached_script() {
+valid_installer() {
   [ -f "$script_path" ] && [ ! -L "$script_path" ] || return 1
-  if ! /bin/bash -n "$script_path"; then
-    echo '[PulseDNS] 本机缓存的节点安装脚本无效，删除后重新下载'
+  size=$(wc -c < "$script_path")
+  size=$(printf '%s' "$size" | tr -d '[:space:]')
+  [ -n "$size" ] && [ "$size" -ge 1 ] 2>/dev/null && [ "$size" -le 262144 ] 2>/dev/null || return 1
+  grep -Fq '# PulseDNS / 原 DDNS 脚本兼容安装器' "$script_path" || return 1
+  /bin/bash -n "$script_path" || return 1
+  actual_sha256=$(sha256sum "$script_path")
+  actual_sha256=\${actual_sha256%% *}
+  [ "$actual_sha256" = "$installer_sha256" ]
+}
+
+run_cached_installer() {
+  [ -f "$script_path" ] && [ ! -L "$script_path" ] || return 1
+  if ! valid_installer; then
+    echo '[PulseDNS] 本机缓存的固定探针安装器无效，删除后重新下载'
     rm -f "$script_path"
     return 1
   fi
   chmod 0700 "$script_path"
-  echo '[PulseDNS] 继续执行本机已校验的节点安装脚本，不再消耗下载凭据'
-  /bin/bash "$script_path"
+  echo '[PulseDNS] 使用本机已校验的固定探针安装器'
+  /bin/bash "$script_path" probe "$node_parameter"
   status=$?
   if [ "$status" -eq 0 ]; then
-    rm -f "$script_path"
+    rm -f "$script_path" "$config_path"
     scrub_completed_bootstrap
   fi
   exit "$status"
@@ -158,7 +174,7 @@ run_cached_script() {
 if complete_matches_generation; then
   echo '[PulseDNS] 首次安装已经完成，恢复 DDNS 服务并跳过已失效的下载直链'
   if command -v systemctl >/dev/null 2>&1 && systemctl enable --now ddns-monitor; then
-    rm -f "$script_path"
+    rm -f "$script_path" "$config_path"
     scrub_completed_bootstrap
     exit 0
   fi
@@ -169,12 +185,12 @@ fi
 persist_per_boot
 
 if ! bootstrap_ready; then
-  echo '[PulseDNS] 正在补齐 Bash、下载工具和 CA 证书'
+  echo '[PulseDNS] 正在补齐 Bash、curl、校验工具和 CA 证书'
   install_bootstrap_packages || { echo '[PulseDNS] 开机依赖安装失败'; exit 1; }
 fi
-bootstrap_ready || { echo '[PulseDNS] Bash、下载工具或 CA 证书仍不可用'; exit 1; }
+bootstrap_ready || { echo '[PulseDNS] Bash、curl、校验工具或 CA 证书仍不可用'; exit 1; }
 
-run_cached_script || true
+run_cached_installer || true
 
 downloaded=0
 attempt=1
@@ -184,19 +200,19 @@ while [ "$attempt" -le 36 ]; do
     downloaded=1
     break
   fi
-  echo "[PulseDNS] 等待网络和主控下载地址就绪（$attempt/36）"
+  echo "[PulseDNS] 等待网络和 GitHub 固定安装器就绪（$attempt/36）"
   attempt=$((attempt + 1))
   [ "$attempt" -gt 36 ] || sleep 5
 done
-[ "$downloaded" -eq 1 ] || { echo '[PulseDNS] 无法下载节点安装脚本'; exit 1; }
+[ "$downloaded" -eq 1 ] || { echo '[PulseDNS] 无法下载固定探针安装器'; exit 1; }
 
 chmod 0700 "$download_path"
-/bin/bash -n "$download_path" || { echo '[PulseDNS] 下载的节点安装脚本语法无效'; exit 1; }
 mv -f "$download_path" "$script_path"
 download_path=''
+valid_installer || { rm -f "$script_path"; echo '[PulseDNS] 固定探针安装器完整性校验失败'; exit 1; }
 
-run_cached_script
-echo '[PulseDNS] 无法执行节点安装脚本'
+run_cached_installer
+echo '[PulseDNS] 无法执行固定探针安装器'
 exit 1
 `;
   return launcher.replace(/\r\n?/g, '\n');

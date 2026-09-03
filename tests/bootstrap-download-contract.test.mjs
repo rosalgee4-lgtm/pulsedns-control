@@ -36,6 +36,8 @@ test('node creation returns a compact connect command and an optional boot-resil
   assert.match(post, /bootstrapPayloadCiphertext, bootstrapDownloadTokenHash/);
   assert.match(post, /bootstrapDownloadExpiresAt: bootstrapDownloadExpiry\(now\)/);
   assert.match(post, /const installUrl = `\$\{origin\}\/api\/v1\/bootstrap\/\$\{id\}\/\$\{downloadToken\}`/);
+  assert.match(post, /const bootstrapConfig = buildNodeBootstrapConfig\(\{/);
+  assert.match(post, /TextEncoder\(\)\.encode\(bootstrapConfig\)\.byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES/);
   assert.match(post, /const connectCommand = buildNodeConnectCommand\(installUrl\)/);
   assert.match(post, /const startupScript = buildNodeStartupLauncher\(id, installUrl, provisionGeneration\)/);
   assert.match(successResponse, /\n\s*installUrl,/);
@@ -46,7 +48,7 @@ test('node creation returns a compact connect command and an optional boot-resil
   assert.match(successResponse, /Cache-Control': 'no-store'/);
 });
 
-test('bootstrap GET authenticates, renders, then consumes the short-lived download window', () => {
+test('bootstrap GET authenticates, renders configuration data, then consumes the download window', () => {
   assert.match(downloadRoute, /\^pbs_\[a-f0-9\]\{64\}\$/);
   assert.match(downloadRoute, /const tokenHash = await sha256\(token\)/);
   assert.match(downloadRoute, /eq\(nodes\.id, nodeId\)[\s\S]*eq\(nodes\.bootstrapDownloadTokenHash, tokenHash\)/);
@@ -55,21 +57,22 @@ test('bootstrap GET authenticates, renders, then consumes the short-lived downlo
   assert.match(downloadRoute, /new Set\(\['awaiting', 'provisioning', 'failed', 'uncertain'\]\)/);
 
   const decryptAt = downloadRoute.indexOf('decryptBootstrapPayload(');
-  const renderAt = downloadRoute.indexOf('buildNodeStartupScript({');
-  assert.ok(decryptAt >= 0 && renderAt > decryptAt, 'the latest startup builder must render a validated encrypted payload');
+  const renderAt = downloadRoute.indexOf('buildNodeBootstrapConfig({');
+  assert.ok(decryptAt >= 0 && renderAt > decryptAt, 'the configuration builder must render the validated encrypted payload');
   assert.match(downloadRoute.slice(renderAt), /generation: node\.generation[\s\S]*token: payload\.agentToken[\s\S]*rootPassword: payload\.rootPassword[\s\S]*instances: payload\.instances[\s\S]*nyanpassRelease/);
-  assert.match(downloadRoute, /TextEncoder\(\)\.encode\(script\)\.byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES/);
+  assert.match(downloadRoute, /TextEncoder\(\)\.encode\(config\)\.byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES/);
   assert.match(downloadRoute, /bootstrapDownloadWindow\(node\.downloadExpiresAt, node\.downloadConsumedAt, now\)/);
   assert.match(downloadRoute, /bootstrapDownloadConsumedAt: now/);
   assert.match(downloadRoute, /bootstrapDownloadTokenHash: null/);
-  assert.ok(downloadRoute.indexOf('bootstrapDownloadConsumedAt: now') > renderAt, 'the token must be consumed only after the response script is ready');
+  assert.ok(downloadRoute.indexOf('bootstrapDownloadConsumedAt: now') > renderAt, 'the token must be consumed only after configuration data is ready');
 
   assert.match(downloadRoute, /'Cache-Control': 'no-store, private, max-age=0'/);
   assert.match(downloadRoute, /Pragma: 'no-cache'/);
   assert.match(downloadRoute, /'Referrer-Policy': 'no-referrer'/);
   assert.match(downloadRoute, /'X-Content-Type-Options': 'nosniff'/);
-  assert.match(downloadRoute, /'Content-Type': 'text\/x-shellscript; charset=utf-8'/);
-  assert.match(downloadRoute, /Content-Disposition/);
+  assert.match(downloadRoute, /'Content-Type': 'application\/octet-stream'/);
+  assert.match(downloadRoute, /Content-Disposition[\s\S]*pulsedns-\$\{node\.id\}\.config/);
+  assert.doesNotMatch(downloadRoute, /buildNodeStartupScript|text\/x-shellscript|\.id\}\.sh/);
 
   assert.doesNotMatch(downloadRoute, /bootstrapPayloadCiphertext:\s*null/);
 });
