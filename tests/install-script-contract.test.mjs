@@ -270,6 +270,10 @@ test('panel installer uses immutable source and README verifies the downloaded e
   assert.match(panelSource, /startupScript/);
   assert.match(panelSource, /lib\/install-command\.ts/);
   assert.match(panelSource, /connectCommand/);
+  assert.match(panelSource, /buildNodeBootstrapConfig/);
+  assert.match(panelSource, /application\/octet-stream/);
+  assert.match(panelSource, /public\/install\.sh/);
+  assert.match(panelSource, /"\$ACTION" == "probe"/);
   assert.match(panelSource, /next\/font\/google/);
   assert.match(readme, /panel-install\.sh\?v=0\.8\.2[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" install/);
   assert.match(readme, /panel-install\.sh\?v=0\.8\.2[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" update/);

@@ -4,7 +4,7 @@ set -euo pipefail
 
 VERSION="0.8.2"
 REPOSITORY="rosalgee4-lgtm/pulsedns-control"
-SOURCE_COMMIT="bb75884c15afc38014bf07c497d3f9d67a6b288f"
+SOURCE_COMMIT="fd858f16db5d385ce7f8beed1e994bb7b3a8f332"
 SOURCE_LOCK_SHA256="5eb19c49c5aa8a469f9992be3d361e6913af2afdc49df3f30d271865f16a49f1"
 SOURCE_OG_SHA256="3e0d82b4901fe73d4bc6a6209275283d39a0cf4084fea6625fba18d0e627de55"
 INSTALL_ROOT="/opt/pulsedns-control"
@@ -184,13 +184,21 @@ download_and_build_panel() {
 
     [[ -s "${release_dir}/package.json" && -s "${release_dir}/pnpm-lock.yaml" && \
         -s "${release_dir}/public/og.png" && -s "${release_dir}/lib/install-command.ts" && \
-        -s "${release_dir}/lib/startup-launcher.ts" && \
-        -s "${release_dir}/app/api/admin/nodes/route.ts" ]] || \
+        -s "${release_dir}/lib/startup-launcher.ts" && -s "${release_dir}/public/install.sh" && \
+        -s "${release_dir}/app/api/admin/nodes/route.ts" && \
+        -s "${release_dir}/app/api/v1/bootstrap/[nodeId]/[token]/route.ts" ]] || \
         fail "下载的源码不完整：缺少必要文件"
     grep -Fq 'startupScript' "${release_dir}/app/api/admin/nodes/route.ts" || \
         fail "下载的源码不完整：缺少开机脚本返回逻辑"
     grep -Fq 'connectCommand' "${release_dir}/app/api/admin/nodes/route.ts" || \
         fail "下载的源码不完整：缺少探针对接命令返回逻辑"
+    grep -Fq 'buildNodeBootstrapConfig' "${release_dir}/lib/install-command.ts" || \
+        fail "下载的源码不完整：缺少节点配置生成器"
+    grep -Fq "'Content-Type': 'application/octet-stream'" \
+        "${release_dir}/app/api/v1/bootstrap/[nodeId]/[token]/route.ts" || \
+        fail "下载的源码不完整：节点参数接口没有返回配置数据"
+    grep -Fq 'if [[ "$ACTION" == "probe"' "${release_dir}/public/install.sh" || \
+        fail "下载的源码不完整：固定探针安装器缺少 probe 动作"
     if grep -Fq 'next/font/google' "${release_dir}/app/layout.tsx"; then
         fail "下载的源码仍依赖在线 Google 字体，拒绝在自托管环境构建"
     fi
