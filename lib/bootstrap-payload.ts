@@ -1,5 +1,5 @@
 import { controlPlaneEncryptionSecret } from '@/lib/control-plane-secret';
-import { parseNyanpassArgs } from '@/lib/nyanpass-command';
+import { parseNyanpassArgs, validNyanpassServiceName } from '@/lib/nyanpass-command';
 import type { ProvisionedNyanpassInstance } from '@/lib/install-command';
 
 export type BootstrapPayload = {
@@ -67,7 +67,7 @@ function validatePayload(value: unknown): asserts value is BootstrapPayload {
   const names = new Set<string>();
   for (const instance of payload.instances) {
     if (!instance || typeof instance !== 'object' || typeof instance.name !== 'string'
-      || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/.test(instance.name) || names.has(instance.name)
+      || !validNyanpassServiceName(instance.name) || names.has(instance.name)
       || typeof instance.optimize !== 'boolean' || typeof instance.args !== 'string') {
       throw new Error('开机脚本凭据内容无效');
     }

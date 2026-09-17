@@ -15,7 +15,7 @@ export async function expireAgentTasks(
   const queuedConditions = [
     eq(agentTasks.status, 'queued'),
     // updatedAt is the current enqueue time; a canceled/failed task may be
-    // deliberately queued again without losing its stable task id.
+    // deliberately queued again for a fresh execution.
     lt(agentTasks.updatedAt, queuedCutoff),
     // A healthy probe may legitimately be busy installing another instance
     // for up to ten minutes. Only classify the queue as offline once its task

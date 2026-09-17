@@ -7,12 +7,16 @@ import test from 'node:test';
 const files = Object.fromEntries(await Promise.all([
   'README.md',
   'app/api/admin/nodes/route.ts',
+  'app/api/admin/nyanpass/route.ts',
+  'app/api/admin/nyanpass/sync/route.ts',
   'app/dashboard.tsx',
   'app/globals.css',
   'app/layout.tsx',
   'lib/bootstrap-payload.ts',
   'lib/install-command.ts',
   'lib/node-response.ts',
+  'lib/nyanpass-command.ts',
+  'lib/nyanpass-credential.ts',
   'lib/startup-launcher.ts',
   'package.json',
   'pnpm-lock.yaml',
@@ -80,7 +84,7 @@ test('documented downloads and deployed panel source use matching immutable payl
     assert.equal(createHash('sha256').update(published).digest('hex'), digest(path), `${commit}:${path} differs from documented checksum`);
   }
   const sourceCommit = capture('public/panel-install.sh', /^SOURCE_COMMIT="([a-f0-9]{40})"$/m);
-  for (const name of ['app/api/admin/nodes/route.ts', 'app/dashboard.tsx', 'app/globals.css', 'lib/bootstrap-payload.ts', 'lib/install-command.ts', 'lib/node-response.ts', 'lib/startup-launcher.ts', 'package.json']) {
+  for (const name of ['app/api/admin/nodes/route.ts', 'app/api/admin/nyanpass/route.ts', 'app/api/admin/nyanpass/sync/route.ts', 'app/dashboard.tsx', 'app/globals.css', 'lib/bootstrap-payload.ts', 'lib/install-command.ts', 'lib/node-response.ts', 'lib/nyanpass-command.ts', 'lib/nyanpass-credential.ts', 'lib/startup-launcher.ts', 'package.json']) {
     const deployed = execFileSync('git', ['show', `${sourceCommit}:${name}`], { cwd: new URL('..', import.meta.url), encoding: 'utf8' });
     assert.equal(deployed, text(name), `panel installer would deploy stale ${name}`);
   }

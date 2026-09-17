@@ -6,7 +6,7 @@ import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { syncAliDnsRecord } from '@/lib/alidns';
 import { buildNodeBootstrapConfig, buildNodeConnectCommand, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES } from '@/lib/install-command';
 import { bootstrapDownloadExpiry, bootstrapDownloadWindow, BOOTSTRAP_DOWNLOAD_RETRY_GRACE_MS } from '@/lib/bootstrap-download';
-import { parseOfficialNyanpassCommand } from '@/lib/nyanpass-command';
+import { parseOfficialNyanpassCommand, validNyanpassServiceName } from '@/lib/nyanpass-command';
 import { publicOrigin } from '@/lib/public-origin';
 import { newAgentToken, newBootstrapDownloadToken, sha256 } from '@/lib/security';
 import { cleanText, normalizeDnsRr, normalizeDomainName, validDnsRr, validDomainName } from '@/lib/validation';
@@ -51,8 +51,8 @@ export async function POST(request: Request) {
     if (!input || typeof input !== 'object') return Response.json({ error: 'Nyanpass 实例参数无效' }, { status: 400 });
     const entry = input as Record<string, unknown>;
     const instanceName = cleanText(entry.name, 48);
-    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/.test(instanceName)) {
-      return Response.json({ error: 'Nyanpass 实例名只能包含字母、数字、点、下划线和短横线' }, { status: 400 });
+    if (!validNyanpassServiceName(instanceName)) {
+      return Response.json({ error: 'Nyanpass 实例名无效或属于系统保留名称；不要使用 systemd 单元后缀' }, { status: 400 });
     }
     if (instanceNames.has(instanceName)) return Response.json({ error: `Nyanpass 实例名重复：${instanceName}` }, { status: 400 });
     const parsed = parseOfficialNyanpassCommand(entry.command);

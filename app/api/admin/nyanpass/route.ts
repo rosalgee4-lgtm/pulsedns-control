@@ -6,7 +6,7 @@ import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { expireAgentTasks } from '@/lib/agent-task-lifecycle';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
 import { nodeResponse } from '@/lib/node-response';
-import { parseOfficialNyanpassCommand } from '@/lib/nyanpass-command';
+import { parseOfficialNyanpassCommand, validNyanpassServiceName } from '@/lib/nyanpass-command';
 import { encryptNyanpassCredential } from '@/lib/nyanpass-credential';
 import { expireProvisionAttempts, isBootstrapLocked } from '@/lib/provision-lifecycle';
 import { cleanText } from '@/lib/validation';
@@ -71,7 +71,7 @@ export async function POST(request: Request) {
   const optimize = body?.optimize === true || body?.optimize === 'on';
   const parsedCommand = parseOfficialNyanpassCommand(body?.command);
   if (!nodeId) return Response.json({ error: '请选择所属探针节点' }, { status: 400 });
-  if (!validServiceName(name)) return Response.json({ error: '实例名只能包含字母、数字、点、下划线和短横线' }, { status: 400 });
+  if (!validNyanpassServiceName(name)) return Response.json({ error: '实例名须为 1-48 位字母、数字、点、下划线或短横线，不能使用系统保留名称或单元后缀' }, { status: 400 });
   if (!parsedCommand.ok) return Response.json({ error: parsedCommand.error }, { status: 400 });
 
   await ensureSchema();
@@ -135,7 +135,7 @@ export async function PATCH(request: Request) {
   const optimize = body?.optimize === true || body?.optimize === 'on';
   const confirmUncertain = body?.confirmUncertain === 'checked';
   if (!id) return Response.json({ error: '缺少实例 ID' }, { status: 400 });
-  if (!validServiceName(name)) return Response.json({ error: '实例名只能包含字母、数字、点、下划线和短横线' }, { status: 400 });
+  if (!validNyanpassServiceName(name)) return Response.json({ error: '实例名须为 1-48 位字母、数字、点、下划线或短横线，不能使用系统保留名称或单元后缀' }, { status: 400 });
 
   await ensureSchema();
   const db = await getDb();
@@ -287,10 +287,6 @@ function instanceResponse(instance: {
     taskClaimedAt: instance.taskClaimedAt?.toISOString() ?? null,
     taskLeaseExpiresAt: instance.taskLeaseExpiresAt?.toISOString() ?? null,
   };
-}
-
-function validServiceName(value: string) {
-  return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/.test(value);
 }
 
 function safeEncryptionError(error: unknown) {

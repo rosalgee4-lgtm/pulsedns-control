@@ -3,6 +3,17 @@ export type ParsedNyanpassCommand =
   | { ok: false; error: string };
 
 const officialInstallerUrl = 'https://dl.nyafw.com/download/nyanpass-install.sh';
+
+export function validNyanpassServiceName(value: string) {
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/.test(value)
+    && !['ddns-monitor', 'pulsedns-control', 'ssh', 'sshd'].includes(value)
+    && !value.startsWith('systemd-')
+    && !/\.(?:service|socket|target|timer|path|mount|automount|swap|slice|scope)$/.test(value);
+}
+
+export function validNyanpassToken(value: string) {
+  return /^[A-Za-z0-9._~:+/=-]{8,512}$/.test(value);
+}
 const escapedInstallerUrl = escapeRegExp(officialInstallerUrl);
 const officialCommandPattern = new RegExp(
   `^bash[ \\t]+<\\([ \\t]*curl[ \\t]+-fLSs[ \\t]+(?:${escapedInstallerUrl}|"${escapedInstallerUrl}"|'${escapedInstallerUrl}')[ \\t]*\\)[ \\t]+rel_nodeclient[ \\t]+(?:"([^"\\r\\n]*)"|'([^'\\r\\n]*)')[ \\t]*$`,
@@ -54,7 +65,7 @@ export function parseNyanpassArgs(value: unknown): ParsedNyanpassCommand {
     continue;
   }
 
-  if (!/^[A-Za-z0-9._~:+/=-]{8,512}$/.test(token)) {
+  if (!validNyanpassToken(token)) {
     return { ok: false, error: '命令必须包含唯一且格式有效的 -t 节点令牌' };
   }
 

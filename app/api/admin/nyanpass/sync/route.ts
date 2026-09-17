@@ -83,12 +83,15 @@ export async function POST(request: Request) {
   const now = existingTask
     ? new Date(Math.max(requestTime.getTime(), existingTask.updatedAt.getTime() + 1))
     : requestTime;
-  const taskId = existingTask?.id ?? crypto.randomUUID();
+  // A retry is a new execution; local receipts from the previous lease must
+  // never be mistaken for this attempt's started/done markers.
+  const taskId = crypto.randomUUID();
   const expectedActiveTask = instance.activeTaskId ? eq(nyanpassInstances.activeTaskId, instance.activeTaskId) : isNull(nyanpassInstances.activeTaskId);
   try {
     if (existingTask && reusable) {
       await db.batch([
         db.update(agentTasks).set({
+          id: taskId,
           status: 'queued',
           leaseTokenHash: null,
           leaseExpiresAt: null,
@@ -98,12 +101,13 @@ export async function POST(request: Request) {
           updatedAt: now,
           claimedAt: null,
           finishedAt: null,
-        }).where(and(eq(agentTasks.id, taskId), eq(agentTasks.status, existingTask.status), eq(agentTasks.revision, instance.configRevision))),
+        }).where(and(eq(agentTasks.id, existingTask.id), eq(agentTasks.status, existingTask.status), eq(agentTasks.revision, instance.configRevision))),
         db.update(nyanpassInstances).set({ status: 'pending', activeTaskId: taskId, syncError: null, updatedAt: now }).where(and(
           eq(nyanpassInstances.id, id),
           eq(nyanpassInstances.status, instance.status),
           eq(nyanpassInstances.configRevision, instance.configRevision),
           expectedActiveTask,
+          exists(db.select({ id: agentTasks.id }).from(agentTasks).where(and(eq(agentTasks.id, taskId), eq(agentTasks.status, 'queued')))),
         )),
       ]);
     } else {

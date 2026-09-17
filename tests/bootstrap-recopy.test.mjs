@@ -22,6 +22,9 @@ process.env.PULSEDNS_TEST_ADMIN = '1';
 const { POST } = await import('../app/api/admin/nodes/route.ts');
 const { GET } = await import('../app/api/v1/bootstrap/[nodeId]/[token]/route.ts');
 const { POST: provision } = await import('../app/api/v1/provision/route.ts');
+const { POST: addInstance } = await import('../app/api/admin/nyanpass/route.ts');
+const { POST: queue, DELETE: cancel } = await import('../app/api/admin/nyanpass/sync/route.ts');
+const { GET: poll, POST: acknowledge } = await import('../app/api/v1/tasks/route.ts');
 const { getLocalSqlite } = await import('../db/index.ts');
 const { decryptBootstrapPayload, encryptBootstrapPayload } = await import('../lib/bootstrap-payload.ts');
 after(async () => { (await getLocalSqlite()).close(); await rm(root, { recursive: true, force: true }); });
@@ -164,4 +167,63 @@ test('unattended recovery accepts a new attempt after failure and ignores late o
   assert.equal(after.token_hash, before.token_hash);
   assert.equal(after.bootstrap_payload_ciphertext, null);
   assert.equal((await download(installUrl)).status, 404);
+});
+
+test('node and instance creation reject service names that could replace managed or system units', async () => {
+  for (const name of ['ddns-monitor', 'ssh', 'sshd', 'pulsedns-control', 'systemd-resolved', 'tenant.service', 'tenant.target']) {
+    const response = await POST(request({name: 'reserved-test', rootPassword: 'test-password-123',
+      nyanpass: [{name, command: 'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-t abcdefgh -u https://ny.example.test"'}],
+    }));
+    assert.equal(response.status, 400, name);
+    const instance = await addInstance(request({nodeId: crypto.randomUUID(), name,
+      command: 'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-t abcdefgh -u https://ny.example.test"',
+    }));
+    assert.equal(instance.status, 400, name);
+  }
+});
+
+test('failed and canceled tasks get fresh execution IDs, and old receipts cannot poison a retry', async () => {
+  const created = await createNode();
+  const node = await stored(created.node.id);
+  const payload = await decryptBootstrapPayload(node.bootstrap_payload_ciphertext, {nodeId: node.id, generation: 1});
+  const sqlite = await getLocalSqlite();
+  sqlite.prepare("UPDATE nodes SET nyanpass_status = 'ready', agent_version = '0.8.3', last_task_poll_at = ? WHERE id = ?").run(Date.now(), node.id);
+  const clientToken = 'abcdefgh~+123/456=';
+  const savedResponse = await addInstance(request({nodeId: node.id, name: 'retry-test',
+    command: `bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-t ${clientToken} -u https://ny.example.test"`,
+  }));
+  assert.equal(savedResponse.status, 201);
+  const {instance} = await savedResponse.json();
+  const agentRequest = (body) => new Request('https://master.example.test/api/v1/tasks', {
+    method: body ? 'POST' : 'GET', headers: {'Content-Type': 'application/json', 'X-Secret-Token': payload.agentToken, 'X-Agent-Version': '0.8.3'},
+    ...(body ? {body: JSON.stringify(body)} : {}),
+  });
+  assert.equal((await queue(request({id: instance.id}))).status, 200);
+  const firstResponse = await poll(agentRequest());
+  const firstBody = await firstResponse.json();
+  assert.equal(firstResponse.status, 200, JSON.stringify(firstBody));
+  assert.equal(firstBody.status, 'job', JSON.stringify({body: firstBody,
+    task: sqlite.prepare('SELECT id, status, error_code FROM agent_tasks WHERE instance_id = ?').get(instance.id),
+    instance: sqlite.prepare('SELECT status, active_task_id, config_revision FROM nyanpass_instances WHERE id = ?').get(instance.id),
+    node: sqlite.prepare('SELECT nyanpass_status, dns_operation_id FROM nodes WHERE id = ?').get(node.id),
+  }));
+  const first = firstBody.job;
+  assert.equal(first.payload.clientToken, clientToken);
+  const oldAck = {jobId: first.id, leaseToken: first.leaseToken, outcome: 'failed', errorCode: 'installer_download'};
+  assert.equal((await acknowledge(agentRequest(oldAck))).status, 200);
+  const requeued = await (await queue(request({id: instance.id}))).json();
+  assert.notEqual(requeued.instance.activeTaskId, first.id);
+  assert.equal((await acknowledge(agentRequest(oldAck))).status, 404);
+  const second = (await (await poll(agentRequest())).json()).job;
+  assert.notEqual(second.id, first.id);
+  assert.notEqual(second.leaseToken, first.leaseToken);
+  assert.equal(second.payload.clientToken, clientToken);
+  assert.equal((await acknowledge(agentRequest({...oldAck, jobId: second.id, leaseToken: second.leaseToken}))).status, 200);
+  const third = await (await queue(request({id: instance.id}))).json();
+  assert.equal((await cancel(new Request(`https://master.example.test/api/admin/nyanpass/sync?id=${instance.id}`, {method: 'DELETE'}))).status, 200);
+  const fourth = await (await queue(request({id: instance.id}))).json();
+  assert.notEqual(fourth.instance.activeTaskId, third.instance.activeTaskId);
+  const finalJob = (await (await poll(agentRequest())).json()).job;
+  assert.equal((await acknowledge(agentRequest({jobId: finalJob.id, leaseToken: finalJob.leaseToken, outcome: 'succeeded'}))).status, 200);
+  assert.equal(sqlite.prepare('SELECT status FROM nyanpass_instances WHERE id = ?').get(instance.id).status, 'success');
 });

@@ -1,4 +1,5 @@
 import { controlPlaneEncryptionSecret } from '@/lib/control-plane-secret';
+import { validNyanpassToken } from '@/lib/nyanpass-command';
 
 type CredentialContext = {
   nodeId: string;
@@ -27,7 +28,7 @@ export async function decryptNyanpassCredential(value: string, context: Credenti
   if (iv.length !== 12 || !ciphertext.length) throw new Error('同步凭据格式无效');
   const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: aad(context) }, await encryptionKey(secret), ciphertext);
   const token = new TextDecoder().decode(plaintext);
-  if (!/^[A-Za-z0-9._:-]{8,512}$/.test(token)) throw new Error('同步凭据内容无效');
+  if (!validNyanpassToken(token)) throw new Error('同步凭据内容无效');
   return token;
 }
 
