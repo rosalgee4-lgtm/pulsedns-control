@@ -52,8 +52,8 @@ BOOTSTRAP_LOCK_FILE="/run/pulsedns-bootstrap.lock"
 BOOTSTRAP_LOG_FILE="/var/log/pulsedns-bootstrap.log"
 PROBE_INSTALLER_URL=""
 PROBE_INSTALLER_SHA256=""
-EXPECTED_PROBE_INSTALLER_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/install.sh"
-MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/monitor.sh"
+EXPECTED_PROBE_INSTALLER_URL_RE='^https://raw\.githubusercontent\.com/rosalgee4-lgtm/pulsedns-control/[0-9a-f]{40}/public/install\.sh$'
+MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/79e0ae4eabb4afb02bd249cfb5f6e295b9d4c951/public/monitor.sh"
 MONITOR_SHA256="9cd34bc6185b4ab7e77605dc7473584b31334cbb878880d01e141d1b9b8882bb"
 
 NYANPASS_INSTALL_URL="${PULSEDNS_NYANPASS_INSTALLER_URL:-https://dl.nyafw.com/download/nyanpass-install.sh}"
@@ -267,7 +267,7 @@ load_bootstrap_config() {
     [[ "${values[1]}" == "$expected_node_id" ]] || return 1
     [[ "${values[1]}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || return 1
     [[ "${values[2]}" =~ ^[1-9][0-9]*$ && ${#values[2]} -le 10 ]] || return 1
-    [[ "${values[6]}" == "$EXPECTED_PROBE_INSTALLER_URL" ]] || return 1
+    [[ "${values[6]}" =~ $EXPECTED_PROBE_INSTALLER_URL_RE ]] || return 1
     [[ "${values[7]}" =~ ^[0-9a-f]{64}$ ]] || return 1
     count="${values[15]}"
     [[ "$count" =~ ^[1-9][0-9]*$ && $((10#$count)) -le 16 ]] || return 1
@@ -460,6 +460,8 @@ deliver_bootstrap_outcome() {
 
 bootstrap_heartbeat_loop() {
     local parent_pid="$1"
+    # Only the installer owns the lock; heartbeat children may outlive it.
+    exec 9>&-
     while kill -0 "$parent_pid" 2>/dev/null; do
         sleep 20
         kill -0 "$parent_pid" 2>/dev/null || return 0
