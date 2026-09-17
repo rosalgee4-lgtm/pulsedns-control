@@ -9,7 +9,7 @@ set -euo pipefail
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.8.2"
+VERSION="0.8.3"
 SERVER_URL="${SERVER_URL:-}"
 TOKEN="${TOKEN:-}"
 ROOT_PASSWORD="${ROOT_PASSWORD:-}"
@@ -53,8 +53,8 @@ BOOTSTRAP_LOG_FILE="/var/log/pulsedns-bootstrap.log"
 PROBE_INSTALLER_URL=""
 PROBE_INSTALLER_SHA256=""
 EXPECTED_PROBE_INSTALLER_URL_RE='^https://raw\.githubusercontent\.com/rosalgee4-lgtm/pulsedns-control/[0-9a-f]{40}/public/install\.sh$'
-MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/79e0ae4eabb4afb02bd249cfb5f6e295b9d4c951/public/monitor.sh"
-MONITOR_SHA256="9cd34bc6185b4ab7e77605dc7473584b31334cbb878880d01e141d1b9b8882bb"
+MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/bd4a9f4d275a31c92d75759ee0fa9cd3040dd540/public/monitor.sh"
+MONITOR_SHA256="973d1a4c3180f2c67e62f554e757f46c60016980a6f3741397ef0d36408ebe42"
 
 NYANPASS_INSTALL_URL="${PULSEDNS_NYANPASS_INSTALLER_URL:-https://dl.nyafw.com/download/nyanpass-install.sh}"
 NYANPASS_INSTALL_SHA256="${PULSEDNS_NYANPASS_INSTALLER_SHA256:-ece867743399c6a4c262ca31292b79d81a97b0a6efa98ef309f75fdd3e5ca624}"
@@ -571,11 +571,7 @@ run_probe_bootstrap() {
 
     printf '' >> "$BOOTSTRAP_LOG_FILE" || fail "无法写入探针对接日志"
     chmod 0600 "$BOOTSTRAP_LOG_FILE"
-    exec > >(tee -a "$BOOTSTRAP_LOG_FILE") 2>&1
-    exec 9>"$BOOTSTRAP_LOCK_FILE"
-    if ! flock -n 9; then
-        fail "另一个安装进程正在运行，本次退出"
-    fi
+    exec > >(exec 9>&-; exec tee -a "$BOOTSTRAP_LOG_FILE") 2>&1
     trap bootstrap_on_exit EXIT
     trap 'bootstrap_on_signal INT 130' INT
     trap 'bootstrap_on_signal TERM 143' TERM
@@ -616,10 +612,17 @@ run_probe_bootstrap() {
         else
             echo '[PulseDNS] 无法持久化失败回执；started 标记仍保留，下次运行会重试'
         fi
-        if [[ $failed_acknowledged -eq 1 ]]; then
-            echo "[PulseDNS] 主控已确认旧安装失败。确认旧进程已停止后，删除 $BOOTSTRAP_STARTED_FILE，再原样运行同一命令开始新尝试"
+        if [[ $failed_acknowledged -ne 1 ]]; then return 1; fi
+        echo '[PulseDNS] 主控已确认旧安装失败；重试可能重新安装此前已完成的 Nyanpass 实例'
+        if ! confirm_bootstrap_retry; then
+            echo '[PulseDNS] 中断标记已保留。请在目标 VPS 的交互式终端执行新版一键命令，核查旧安装后确认重试'
+            return 1
         fi
-        return 1
+        [[ ! -e "$BOOTSTRAP_ATTEMPT_FILE" && ! -L "$BOOTSTRAP_ATTEMPT_FILE" ]] || fail "发现冲突的安装尝试标记，请先核查状态目录"
+        mv -- "$BOOTSTRAP_STARTED_FILE" "$BOOTSTRAP_STATE_DIR/failed.$BOOTSTRAP_ATTEMPT_ID"
+        BOOTSTRAP_STARTED=0
+        BOOTSTRAP_TERMINAL_WRITTEN=0
+        BOOTSTRAP_ATTEMPT_ID=""
     fi
 
     if [[ -f "$BOOTSTRAP_ATTEMPT_FILE" ]]; then
@@ -672,6 +675,13 @@ run_probe_bootstrap() {
     echo '[PulseDNS] 首次探针对接全部完成'
 }
 
+confirm_bootstrap_retry() {
+    local answer=""
+    [[ -t 0 ]] || return 1
+    read -r -p '[PulseDNS] 确认旧安装已停止，并允许重试？输入 RETRY：' answer || return 1
+    [[ "$answer" == "RETRY" ]]
+}
+
 bootstrap_node() {
     local bootstrap_url="${1:-}" port="" attempt=0 downloaded=0
     local bootstrap_re='^https?://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(:[0-9]{1,5})?(/[A-Za-z0-9._~:/@%+=,-]*)?/api/v1/bootstrap/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/(pbs_[a-f0-9]{64})$'
@@ -687,6 +697,8 @@ bootstrap_node() {
     fi
     [[ "$bootstrap_url" == https://* ]] || protocol_args=(--proto '=http,https' --proto-redir '=http,https')
     ensure_probe_bootstrap_environment || fail "连续 24 次无法安装探针对接环境"
+    exec 9>"$BOOTSTRAP_LOCK_FILE"
+    flock -n 9 || fail "另一个安装进程正在运行，本次退出"
 
     BOOTSTRAP_CONFIG_PATH="/root/pulsedns_${BOOTSTRAP_NODE_ID}_bootstrap.config"
     BOOTSTRAP_INSTALLER_PATH="/root/pulsedns_${BOOTSTRAP_NODE_ID}_installer.sh"
