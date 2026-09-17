@@ -66,6 +66,19 @@ test('download URLs pin actual Git objects, not movable release branches', () =>
   }
 });
 
+test('documented downloads and deployed panel source use matching immutable payloads', () => {
+  const urls = [...text('README.md').matchAll(/https:\/\/raw\.githubusercontent\.com\/rosalgee4-lgtm\/pulsedns-control\/([^/\s]+)\/(public\/(?:panel-install|install|update)\.sh)/g)];
+  assert.ok(urls.length >= 5);
+  for (const [, commit, path] of urls) {
+    assert.match(commit, /^[a-f0-9]{40}$/);
+    const published = execFileSync('git', ['show', `${commit}:${path}`], { cwd: new URL('..', import.meta.url) });
+    assert.equal(createHash('sha256').update(published).digest('hex'), digest(path), `${commit}:${path} differs from documented checksum`);
+  }
+  const sourceCommit = capture('public/panel-install.sh', /^SOURCE_COMMIT="([a-f0-9]{40})"$/m);
+  const deployed = execFileSync('git', ['show', `${sourceCommit}:lib/install-command.ts`], { cwd: new URL('..', import.meta.url), encoding: 'utf8' });
+  assert.equal(deployed, text('lib/install-command.ts'), 'panel installer would deploy stale probe download URLs');
+});
+
 test('self-hosted build is independent of Google Fonts and panel source checks the launcher', () => {
   assert.doesNotMatch(text('app/layout.tsx'), /next\/font\/google/);
   assert.match(text('public/panel-install.sh'), /lib\/startup-launcher\.ts/);
