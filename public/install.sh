@@ -600,7 +600,7 @@ run_probe_bootstrap() {
     if [[ -f "$BOOTSTRAP_STARTED_FILE" ]]; then
         load_bootstrap_attempt_state "$BOOTSTRAP_STARTED_FILE" || fail "中断标记损坏或不属于当前节点配置"
         BOOTSTRAP_STARTED=1
-        echo '[PulseDNS] 上次安装在中途停止；为避免重复安装 Nyanpass，本次不会自动重跑'
+        echo '[PulseDNS] 上次安装在中途停止，正在向主控确认旧尝试已结束'
         if outcome_file=$(persist_bootstrap_outcome failed); then
             BOOTSTRAP_TERMINAL_WRITTEN=1
             if deliver_bootstrap_outcome failed "$outcome_file" \
@@ -613,11 +613,7 @@ run_probe_bootstrap() {
             echo '[PulseDNS] 无法持久化失败回执；started 标记仍保留，下次运行会重试'
         fi
         if [[ $failed_acknowledged -ne 1 ]]; then return 1; fi
-        echo '[PulseDNS] 主控已确认旧安装失败；重试可能重新安装此前已完成的 Nyanpass 实例'
-        if ! confirm_bootstrap_retry; then
-            echo '[PulseDNS] 中断标记已保留。请在目标 VPS 的交互式终端执行新版一键命令，核查旧安装后确认重试'
-            return 1
-        fi
+        echo '[PulseDNS] 主控已确认旧安装失败，自动使用原配置重试；Nyanpass 将按原服务名重新安装或修复'
         [[ ! -e "$BOOTSTRAP_ATTEMPT_FILE" && ! -L "$BOOTSTRAP_ATTEMPT_FILE" ]] || fail "发现冲突的安装尝试标记，请先核查状态目录"
         mv -- "$BOOTSTRAP_STARTED_FILE" "$BOOTSTRAP_STATE_DIR/failed.$BOOTSTRAP_ATTEMPT_ID"
         BOOTSTRAP_STARTED=0
@@ -673,13 +669,6 @@ run_probe_bootstrap() {
     fi
     remove_completed_bootstrap_cache
     echo '[PulseDNS] 首次探针对接全部完成'
-}
-
-confirm_bootstrap_retry() {
-    local answer=""
-    [[ -t 0 ]] || return 1
-    read -r -p '[PulseDNS] 确认旧安装已停止，并允许重试？输入 RETRY：' answer || return 1
-    [[ "$answer" == "RETRY" ]]
 }
 
 bootstrap_node() {
