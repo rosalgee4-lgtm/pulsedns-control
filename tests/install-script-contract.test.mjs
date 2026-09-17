@@ -87,7 +87,7 @@ test('Bash 3 parser reads the config protocol exactly and rejects trailing bytes
   const fields = [
     'PULSEDNS_BOOTSTRAP_V1', nodeId, '3',
     'https://master.example.test', 'pd_token_value', 'password with spaces',
-    'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/install.sh',
+    'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/fd858f16db5d385ce7f8beed1e994bb7b3a8f332/public/install.sh',
     'a'.repeat(64), 'https://dl.nyafw.com/download/nyanpass-install.sh', 'b'.repeat(64),
     'https://dl.nyafw.com/download/zf-contract', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
     'c'.repeat(64), 'd'.repeat(64), 'e'.repeat(64), '2',
@@ -113,6 +113,45 @@ exit 0
     const result = spawnSync(bash, ['-s', '--', validPath, invalidPath], { input: harness, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, `${nodeId}|3|password with spaces|2\ntenant-out|1|-o -t outbound-token -u https://ny.example.test --ws-port 1145\n`);
+    for (const installerUrl of [
+      fields[6].replace(/[a-f0-9]{40}/, 'release-v0.8.2'),
+      fields[6].replace('rosalgee4-lgtm', 'another-owner'),
+      `${fields[6]}?ref=main`,
+      fields[6].replace('https:', 'http:'),
+    ]) {
+      const invalidFields = [...fields];
+      invalidFields[6] = installerUrl;
+      await writeFile(validPath, `${invalidFields.join('\0')}\0`);
+      const rejected = spawnSync(bash, ['-s', '--', validPath, invalidPath], { input: harness, encoding: 'utf8' });
+      assert.equal(rejected.status, 23, installerUrl);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('heartbeat descendants cannot keep the bootstrap lock open after exit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pulsedns-heartbeat-'));
+  try {
+    const harness = `set -eu
+bootstrap_heartbeat_loop() {
+${body('bootstrap_heartbeat_loop')}
+}
+sleep() {
+  if ( : >&9 ) 2>/dev/null; then exit 23; fi
+  printf 'heartbeat-lock-closed\\n'
+  exit 0
+}
+exec 9>"$1"
+bootstrap_heartbeat_loop "$$" &
+wait $!
+printf 'parent-lock-open\\n' >&9
+`;
+    const lockPath = join(root, 'bootstrap.lock');
+    const result = spawnSync(process.env.BASH_EXE || 'bash', ['-s', '--', lockPath], { input: harness, encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, 'heartbeat-lock-closed\n');
+    assert.equal(await readFile(lockPath, 'utf8'), 'parent-lock-open\n');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

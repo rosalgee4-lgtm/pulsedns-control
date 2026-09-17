@@ -95,7 +95,7 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 在 Web 控制台创建节点后，页面默认只给出一条与 Nyanpass 相同形态的“公共脚本 + 节点参数”对接命令。直接把页面生成的完整命令粘贴到目标 VPS 的 root Bash 中；不要手工替换示例占位符：
 
 ```bash
-bash <(curl --proto '=https' --proto-redir '=https' -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/install.sh') probe 'https://<面板入口>/api/v1/bootstrap/<节点ID>/<节点参数>'
+bash <(curl --proto '=https' --proto-redir '=https' -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/d215a1f3d12b55b0c2dcd7d57e9b047c3c9fda6a/public/install.sh') probe 'https://<面板入口>/api/v1/bootstrap/<节点ID>/<节点参数>'
 ```
 
 这条命令只有固定公共脚本和一个节点参数。公共安装器会把接口返回的配置数据校验后以 `0600` 缓存为 `/root/pulsedns_<节点ID>_bootstrap.config`，并把通过 SHA-256 校验的同一固定安装器以 `0700` 缓存为 `/root/pulsedns_<节点ID>_installer.sh`；接口不会再生成或返回另一份 Shell 脚本。安装失败时原样重跑同一条对接命令即可优先复用两份缓存，全部完成后自动删除。页面的高级选项仍提供适合 AWS User data 的 POSIX `/bin/sh` 启动器：它显式设置开机环境 `PATH`，首次执行即把自身原子复制到 `/var/lib/cloud/scripts/per-boot/`。如果本次开机未完成，下次开机会再次调用；当前代次完成并成功恢复 `ddns-monitor` 后，per-boot 副本、节点配置、固定安装器及 cloud-init 本地 user-data 缓存会被删除。
@@ -116,8 +116,8 @@ umask 077
 (
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
-  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/install.sh -o "$tmp" &&
-  test "$(sha256sum "$tmp" | awk '{print $1}')" = '151f1888742f806d3aef801b98aeb89dc2b202d09c60a7f67d161f382e87e1f3' &&
+  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/d215a1f3d12b55b0c2dcd7d57e9b047c3c9fda6a/public/install.sh -o "$tmp" &&
+  test "$(sha256sum "$tmp" | awk '{print $1}')" = 'b1fbb11d58f71fdd74589500d9fe46de9659e8cca8abec9d5312269e17ffd560' &&
   grep -Fq '# PulseDNS / 原 DDNS 脚本兼容安装器' "$tmp" &&
   bash -n "$tmp" &&
   bash "$tmp"
@@ -160,13 +160,13 @@ HTTP 面板上的“复制探针对接命令”和可选的“复制 AWS User da
 (
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
-  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/update.sh -o "$tmp" &&
-  test "$(sha256sum "$tmp" | awk '{print $1}')" = 'cb205c5eb429d2f77d56169fb5d7afac549aa46cf6d3d7d8ab70cd4572dcec17' &&
+  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/d215a1f3d12b55b0c2dcd7d57e9b047c3c9fda6a/public/update.sh -o "$tmp" &&
+  test "$(sha256sum "$tmp" | awk '{print $1}')" = 'b62f06aec75ba3e3e80a9737cee730604b8ec2fc444e8b4afd664a82c9982ef2' &&
   bash "$tmp"
 )
 ```
 
-升级器支持 HTTPS 地址，以及带端口和 32 位随机路径的 HTTP 主控地址。它先补齐 `curl`、`jq`、`coreutils` 与 `util-linux`，再从 GitHub HTTPS 的 `release-v0.8.2` 发布通道下载专用 `monitor.sh` 并校验代码内固定的 SHA-256；不会从 HTTP 主控执行 root 脚本，也不会下载或执行完整安装器。它只替换 DDNS 探针，不接受新的主控地址或令牌，也不改 systemd 单元、配置、SSH、BBR 或 Nyanpass。配置、IP 缓存和日志不会被清空；运行中的服务会重启并继续正常检测，若公网 IP 此时已经变化，仍会按原逻辑上报并更新 DNS。停止的服务保持停止。新版启动失败时会恢复旧探针，并在 `/opt/ddns-monitor/monitor.sh.previous` 保留上一版本。
+升级器支持 HTTPS 地址，以及带端口和 32 位随机路径的 HTTP 主控地址。它先补齐 `curl`、`jq`、`coreutils` 与 `util-linux`，再从固定 Git 提交的 GitHub HTTPS 地址下载专用 `monitor.sh` 并校验代码内固定的 SHA-256；不会从 HTTP 主控执行 root 脚本，也不会下载或执行完整安装器。它只替换 DDNS 探针，不接受新的主控地址或令牌，也不改 systemd 单元、配置、SSH、BBR 或 Nyanpass。配置、IP 缓存和日志不会被清空；运行中的服务会重启并继续正常检测，若公网 IP 此时已经变化，仍会按原逻辑上报并更新 DNS。停止的服务保持停止。新版启动失败时会恢复旧探针，并在 `/opt/ddns-monitor/monitor.sh.previous` 保留上一版本。
 
 v0.7.x 及更早的探针不会轮询任务，第一次使用远程同步前必须升级一次。Nyanpass 页面会按节点版本显示“先升级探针”，并生成保留现有 `/etc/ddns-monitor.conf` 的一次性升级命令。v0.8.0 之后，探针每轮独立检查任务；官方安装器最长运行 10 分钟，超时后再给 30 秒强制终止进程组，但在后台锁中串行执行，不会暂停原来的 IP 检测。
 

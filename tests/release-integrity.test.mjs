@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
@@ -40,16 +41,29 @@ test('release scripts and documentation pin every published SHA-256', () => {
   assert.equal(capture('public/panel-install.sh', /^SOURCE_OG_SHA256="([a-f0-9]{64})"$/m), digest('public/og.png'));
 });
 
-test('release version and immutable channel agree across runtime entrypoints', () => {
+test('release version agrees across runtime entrypoints', () => {
   const version = JSON.parse(text('package.json')).version;
   assert.equal(version, '0.8.2');
   for (const name of ['public/install.sh', 'public/monitor.sh', 'public/panel-install.sh']) {
     assert.equal(capture(name, /^VERSION="([0-9]+\.[0-9]+\.[0-9]+)"$/m), version);
   }
-  assert.match(text('lib/install-command.ts'), new RegExp(`release-v${version.replaceAll('.', '\\.')}\\/public\\/install\\.sh`));
-  assert.match(text('public/install.sh'), new RegExp(`release-v${version.replaceAll('.', '\\.')}\\/public\\/monitor\\.sh`));
-  assert.match(text('public/update.sh'), new RegExp(`release-v${version.replaceAll('.', '\\.')}\\/public\\/monitor\\.sh`));
   assert.match(text('app/dashboard.tsx'), new RegExp(`v${version.replaceAll('.', '\\.')}`));
+});
+
+test('download URLs pin actual Git objects, not movable release branches', () => {
+  const downloads = [
+    ['lib/install-command.ts', /PROBE_INSTALLER_URL = '([^']+)'/, 'public/install.sh'],
+    ['public/install.sh', /^MONITOR_DOWNLOAD_URL="([^"]+)"$/m, 'public/monitor.sh'],
+    ['public/update.sh', /^MONITOR_DOWNLOAD_URL="([^"]+)"$/m, 'public/monitor.sh'],
+  ];
+  for (const [name, pattern, path] of downloads) {
+    const url = capture(name, pattern);
+    const match = url.match(/^https:\/\/raw\.githubusercontent\.com\/rosalgee4-lgtm\/pulsedns-control\/([a-f0-9]{40})\/(public\/[a-z-]+\.sh)$/);
+    assert.ok(match, `${name}: mutable or untrusted download URL`);
+    assert.equal(match[2], path);
+    const published = execFileSync('git', ['show', `${match[1]}:${path}`], { cwd: new URL('..', import.meta.url) });
+    assert.equal(createHash('sha256').update(published).digest('hex'), digest(path), `${url}: pinned commit has different bytes`);
+  }
 });
 
 test('self-hosted build is independent of Google Fonts and panel source checks the launcher', () => {

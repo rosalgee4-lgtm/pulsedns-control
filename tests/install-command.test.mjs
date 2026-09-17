@@ -89,7 +89,7 @@ test('bootstrap configuration rejects NUL bytes instead of truncating a field', 
 });
 
 test('fixed probe installer URL and digest match the published installer', () => {
-  assert.match(PROBE_INSTALLER_URL, /^https:\/\/raw\.githubusercontent\.com\/rosalgee4-lgtm\/pulsedns-control\/release-v0\.8\.2\/public\/install\.sh$/);
+  assert.match(PROBE_INSTALLER_URL, /^https:\/\/raw\.githubusercontent\.com\/rosalgee4-lgtm\/pulsedns-control\/[a-f0-9]{40}\/public\/install\.sh$/);
   const installer = readFileSync(new URL('../public/install.sh', import.meta.url));
   assert.equal(PROBE_INSTALLER_SHA256, createHash('sha256').update(installer).digest('hex'));
   assert.equal(shellArg("a'b"), "'a'\\''b'");

@@ -16,8 +16,8 @@ type NodeBootstrapConfigInput = {
   nyanpassRelease: TrustedNyanpassRelease;
 };
 
-export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/release-v0.8.2/public/install.sh';
-export const PROBE_INSTALLER_SHA256 = '151f1888742f806d3aef801b98aeb89dc2b202d09c60a7f67d161f382e87e1f3';
+export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/d215a1f3d12b55b0c2dcd7d57e9b047c3c9fda6a/public/install.sh';
+export const PROBE_INSTALLER_SHA256 = 'b1fbb11d58f71fdd74589500d9fe46de9659e8cca8abec9d5312269e17ffd560';
 export const MAX_CLOUD_LAUNCHER_BYTES = 15 * 1024;
 export const MAX_BOOTSTRAP_RESPONSE_BYTES = 64 * 1024;
 
