@@ -94,6 +94,9 @@ for (const scenario of ['fresh', 'accepted', 'duplicate', 'unacknowledged', 'sta
       await mkdir(stateDir);
       await writeFile(join(root, 'uuid'), `${newAttempt}\n`);
       await writeFile(join(root, 'calls'), '');
+      await writeFile(join(root, 'ddns.conf'), 'fixture');
+      await writeFile(join(root, 'monitor.sh'), 'fixture');
+      await writeFile(join(root, 'ddns.service'), `ExecStart=/bin/bash ${root}/monitor.sh --run\n`);
       if (scenario !== 'fresh') await writeFile(scenario === 'complete' ? complete : started, `3\n${oldAttempt}\n`);
       if (scenario === 'conflict') await writeFile(join(stateDir, 'attempt'), `3\n${newAttempt}\n`);
       const actionOffset = source.indexOf('\nACTION="${1:-menu}"');
@@ -108,10 +111,17 @@ BOOTSTRAP_GENERATION=3
 BOOTSTRAP_LOCK_FILE="$FIXTURE_ROOT/lock"
 BOOTSTRAP_LOG_FILE="$FIXTURE_ROOT/bootstrap.log"
 PROVISION_OUTCOME_DIR="$FIXTURE_ROOT/outcomes"
+CONFIG_FILE="$FIXTURE_ROOT/ddns.conf"
+INSTALL_PATH="$FIXTURE_ROOT/monitor.sh"
+SERVICE_FILE="$FIXTURE_ROOT/ddns.service"
 need_root() { :; }
 ensure_probe_bootstrap_environment() { :; }
 validate_provision_request() { :; }
 valid_bootstrap_config() { printf 'cache\\n' >> "$FIXTURE_ROOT/calls"; }
+refresh_bootstrap_config() { :; }
+load_ddns_config() { :; }
+validate_ddns_config() { :; }
+stat() { printf '600:0:1\\n'; }
 prepare_probe_installer_cache() { :; }
 flock() { [[ "$SCENARIO" != lock-busy ]]; }
 systemctl() { printf 'service %s\\n' "$*" >> "$FIXTURE_ROOT/calls"; }

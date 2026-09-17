@@ -53,8 +53,8 @@ BOOTSTRAP_LOG_FILE="/var/log/pulsedns-bootstrap.log"
 PROBE_INSTALLER_URL=""
 PROBE_INSTALLER_SHA256=""
 EXPECTED_PROBE_INSTALLER_URL_RE='^https://raw\.githubusercontent\.com/rosalgee4-lgtm/pulsedns-control/[0-9a-f]{40}/public/install\.sh$'
-MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/bd4a9f4d275a31c92d75759ee0fa9cd3040dd540/public/monitor.sh"
-MONITOR_SHA256="973d1a4c3180f2c67e62f554e757f46c60016980a6f3741397ef0d36408ebe42"
+MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/afe9f7bba526de572a8e92d8d491463221b3e56d/public/monitor.sh"
+MONITOR_SHA256="4b42f2b497d714271aaadd6dc1c49028fb66e5d4d7d4057ae499856c6288373f"
 
 NYANPASS_INSTALL_URL="${PULSEDNS_NYANPASS_INSTALLER_URL:-https://dl.nyafw.com/download/nyanpass-install.sh}"
 NYANPASS_INSTALL_SHA256="${PULSEDNS_NYANPASS_INSTALLER_SHA256:-ece867743399c6a4c262ca31292b79d81a97b0a6efa98ef309f75fdd3e5ca624}"
@@ -557,6 +557,44 @@ remove_completed_bootstrap_cache() {
     clear_bootstrap_config_values
 }
 
+restore_completed_probe() {
+    local metadata="" outcome_file=""
+    metadata=$(stat -c '%a:%u:%h' "$BOOTSTRAP_COMPLETE_FILE" 2>/dev/null || true)
+    [[ ! -L "$BOOTSTRAP_STATE_DIR" && ! -L "$BOOTSTRAP_COMPLETE_FILE" && "$metadata" == '600:0:1' ]] || fail "完成标记不安全"
+    IFS= read -r BOOTSTRAP_GENERATION < "$BOOTSTRAP_COMPLETE_FILE" || fail "完成标记损坏"
+    [[ "$BOOTSTRAP_GENERATION" =~ ^[1-9][0-9]*$ && ${#BOOTSTRAP_GENERATION} -le 10 ]] || fail "完成标记代次无效"
+    load_bootstrap_attempt_state "$BOOTSTRAP_COMPLETE_FILE" || fail "完成标记损坏"
+    [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" && -f "$INSTALL_PATH" && ! -L "$INSTALL_PATH" ]] || fail "安装已完成，但探针文件缺失；请使用升级命令修复"
+    [[ -f "$SERVICE_FILE" && ! -L "$SERVICE_FILE" ]] \
+        && grep -Fqx "ExecStart=/bin/bash ${INSTALL_PATH} --run" "$SERVICE_FILE" || fail "探针服务配置不匹配，拒绝恢复其他服务"
+    load_ddns_config
+    validate_ddns_config
+    outcome_file=$(persist_bootstrap_outcome succeeded) || fail "无法持久化完成回执，请原样重跑"
+    deliver_bootstrap_outcome succeeded "$outcome_file" || warn "完成回执暂未送达，探针将在后台重试"
+    systemctl enable --now "$SERVICE_NAME" || fail "无法恢复 DDNS 探针服务"
+    remove_completed_bootstrap_cache
+    info "首次安装已经完成，已恢复 DDNS 服务并跳过失效的下载凭据"
+}
+
+refresh_bootstrap_config() {
+    local bootstrap_url="$1" cached_generation="$BOOTSTRAP_GENERATION" cached_server="$SERVER_URL" cached_token="$TOKEN"
+    shift
+    BOOTSTRAP_TMP=$(mktemp "/root/.pulsedns-bootstrap.config.${BOOTSTRAP_NODE_ID}.XXXXXX")
+    chmod 0600 "$BOOTSTRAP_TMP"
+    if curl "$@" --connect-timeout 10 --max-time 30 -fLSs "$bootstrap_url" -o "$BOOTSTRAP_TMP"; then
+        valid_bootstrap_config "$BOOTSTRAP_TMP" "$BOOTSTRAP_NODE_ID" || fail "主控返回的刷新配置无效，原缓存未改变"
+        [[ "$BOOTSTRAP_GENERATION" == "$cached_generation" && "$SERVER_URL" == "$cached_server" && "$TOKEN" == "$cached_token" ]] \
+            || fail "刷新配置与本机节点身份不一致，原缓存未改变"
+        mv -f -- "$BOOTSTRAP_TMP" "$BOOTSTRAP_CONFIG_PATH"
+        BOOTSTRAP_TMP=""
+        info "已刷新固定安装器与 Nyanpass 可信发布配置"
+    else
+        rm -f -- "$BOOTSTRAP_TMP"
+        BOOTSTRAP_TMP=""
+        info "下载凭据已失效或网络暂不可用，使用原缓存继续恢复"
+    fi
+}
+
 run_probe_bootstrap() {
     local attempt=0 start_accepted=0 failed_acknowledged=0 outcome_file="" stale_config="" provision_status=0
     need_root
@@ -691,8 +729,16 @@ bootstrap_node() {
 
     BOOTSTRAP_CONFIG_PATH="/root/pulsedns_${BOOTSTRAP_NODE_ID}_bootstrap.config"
     BOOTSTRAP_INSTALLER_PATH="/root/pulsedns_${BOOTSTRAP_NODE_ID}_installer.sh"
+    BOOTSTRAP_STATE_DIR="/var/lib/pulsedns-bootstrap-${BOOTSTRAP_NODE_ID}"
+    BOOTSTRAP_COMPLETE_FILE="$BOOTSTRAP_STATE_DIR/complete"
+    BOOTSTRAP_STAGE_FILE="$BOOTSTRAP_STATE_DIR/stage"
+    if [[ -e "$BOOTSTRAP_COMPLETE_FILE" || -L "$BOOTSTRAP_COMPLETE_FILE" ]]; then
+        restore_completed_probe
+        return 0
+    fi
     if valid_bootstrap_config "$BOOTSTRAP_CONFIG_PATH" "$BOOTSTRAP_NODE_ID"; then
         info "检测到已缓存的节点配置数据，直接继续对接"
+        refresh_bootstrap_config "$bootstrap_url" "${protocol_args[@]}"
     else
         [[ ! -e "$BOOTSTRAP_CONFIG_PATH" && ! -L "$BOOTSTRAP_CONFIG_PATH" ]] || rm -f -- "$BOOTSTRAP_CONFIG_PATH"
         for attempt in {1..12}; do
@@ -754,9 +800,38 @@ verify_nyanpass_archive() {
     [[ -f "$extract_dir/rel_nodeclient" && ! -L "$extract_dir/rel_nodeclient" ]]
 }
 
+valid_nyanpass_service_name() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$ ]] || return 1
+    case "$1" in
+        ddns-monitor|pulsedns-control|ssh|sshd|systemd-*|*.service|*.socket|*.target|*.timer|*.path|*.mount|*.automount|*.swap|*.slice|*.scope) return 1 ;;
+    esac
+}
+
+validate_nyanpass_target() {
+    local service_name="$1" target_dir="/opt/$1" unit_state="" unit="" entries=""
+    valid_nyanpass_service_name "$service_name" || return 1
+    [[ ! -L "$target_dir" && ( ! -e "$target_dir" || -d "$target_dir" ) ]] || return 1
+    unit_state=$(systemctl show "$service_name.service" -p LoadState --value 2>/dev/null || true)
+    case "$unit_state" in
+        not-found) ;;
+        loaded)
+            unit=$(systemctl cat "$service_name.service" 2>/dev/null) || return 1
+            printf '%s\n' "$unit" | grep -Fqx 'Description=nyanpass' || return 1
+            printf '%s\n' "$unit" | grep -Fqx "WorkingDirectory=$target_dir" || return 1
+            printf '%s\n' "$unit" | grep -Fqx "ExecStart=/bin/bash $target_dir/start.sh" || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    if [[ -d "$target_dir" ]]; then
+        entries=$(ls -A "$target_dir") || return 1
+        [[ -z "$entries" || ( -f "$target_dir/rel_nodeclient" && ! -L "$target_dir/rel_nodeclient" ) ]] || return 1
+    fi
+}
+
 stage_nyanpass_binary() {
     local service_name="$1" binary="$2" target_dir="" candidate=""
     target_dir="/opt/$service_name"
+    validate_nyanpass_target "$service_name" || return 1
     [[ ! -L "$target_dir" ]] || return 1
     install -d -m 0755 "$target_dir"
     candidate=$(mktemp "$target_dir/.rel_nodeclient.pulsedns.XXXXXX") || return 1
@@ -1061,11 +1136,12 @@ install_nyanpass_once() {
         read -r -p "是否优化系统参数 [输入 y 优化] : " optimize_answer
         [[ "$optimize_answer" =~ ^[Yy]$ ]] && optimize="1" || optimize="0"
     fi
-    if [[ ! "$service_name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$ ]]; then
-        fail "Nyanpass 服务名称只能包含字母、数字、点、下划线和短横线"
+    if ! valid_nyanpass_service_name "$service_name"; then
+        fail "Nyanpass 服务名称无效或属于系统保留名称"
     fi
     [[ "$optimize" == "0" || "$optimize" == "1" ]] || fail "Nyanpass OPTIMIZE 只能为 0 或 1"
     [[ "$unattended" == "0" || "$unattended" == "1" ]] || fail "Nyanpass 无人值守标记无效"
+    validate_nyanpass_target "$service_name" || fail "Nyanpass 目标被其他服务或目录占用，拒绝覆盖：$service_name"
 
     installer=$(mktemp /tmp/nyanpass-install.XXXXXX.sh)
     NYANPASS_TMP="$installer"
@@ -1453,9 +1529,17 @@ install_ddns_service() {
 
 upgrade_ddns_agent() {
     need_root
+    install_deps
+    exec 9>"$BOOTSTRAP_LOCK_FILE"
+    flock -n 9 || fail "开机安装或其他升级正在运行，暂不升级探针"
+    exec 8>"$TASK_LOCK_FILE"
+    info "等待 Nyanpass 任务结束后升级探针（最多 15 分钟）"
+    flock -w 900 8 || fail "Nyanpass 任务仍在运行，未停止或修改探针"
     [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] || fail "未找到现有 DDNS 探针配置"
     load_ddns_config
     install_ddns_service
+    exec 8>&-
+    exec 9>&-
     log INFO "探针已升级到 v${VERSION}，现在可以领取 Nyanpass 同步任务"
 }
 
@@ -1521,7 +1605,7 @@ validate_provision_request() {
         name="${NYANPASS_BATCH_NAMES[$index]}"
         optimize="${NYANPASS_BATCH_OPTIMIZES[$index]}"
         input="${NYANPASS_BATCH_INPUTS[$index]}"
-        [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$ ]] || fail "Nyanpass 服务名称无效：$name"
+        valid_nyanpass_service_name "$name" || fail "Nyanpass 服务名称无效或属于系统保留名称：$name"
         [[ "$optimize" == "0" || "$optimize" == "1" ]] || fail "Nyanpass OPTIMIZE 只能为 0 或 1"
         parse_nyanpass_input "$input" || fail "Nyanpass 命令无效：$name"
     done
@@ -1592,6 +1676,7 @@ load_provision_config() {
 }
 
 provision_node() {
+    local index=0 name=""
     need_root
     validate_provision_request
     install_deps
@@ -1602,6 +1687,10 @@ provision_node() {
     # retry after a partial failure.
     exec 8>"$TASK_LOCK_FILE"
     flock 8
+    for ((index = 0; index < ${#NYANPASS_BATCH_NAMES[@]}; index++)); do
+        name="${NYANPASS_BATCH_NAMES[$index]}"
+        validate_nyanpass_target "$name" || fail "Nyanpass 目标被其他服务或目录占用，拒绝覆盖：$name"
+    done
     log INFO "开始 Web 一键安装；外部依赖完成后才会修改 SSH 登录凭据..."
     fix_locale
     install_ddns_service
