@@ -70,7 +70,7 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 准备一台使用 systemd、glibc 2.28 或更高版本的 x86_64/arm64 Linux VPS，并确保至少有 2 GiB 可用磁盘及 768 MiB 可用内存与 swap；Alpine/musl、Docker、WSL 和 chroot 不受支持。安装器会自动识别公网 IPv4、询问 HTTP 端口（默认 `3100`），并生成 32 位随机访问路径；不需要域名、证书邮箱或 GitHub Token。只需向自己的来源 IP 放行所选端口，然后以 root 执行：
 
 ```bash
-( set -eu; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT; curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/a49acd23bce8793dd18bc22e2d031e7742270656/public/panel-install.sh?v=0.8.3' -o "$tmp"; printf '%s  %s\n' 'ea550d307d4f3ba70b23d24e7943f3fec4af90eb5240c84228d1b8e91b32ba8d' "$tmp" | sha256sum -c -; bash "$tmp" install )
+( set -eu; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT; curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/0a57e8fcd8b1d4eccdc271cf426826936d589de9/public/panel-install.sh?v=0.8.3' -o "$tmp"; printf '%s  %s\n' '99e9b41d70801018b2d8dd827962d6c268e9c436a1ee319fb05d7ce5c4789cf4' "$tmp" | sha256sum -c -; bash "$tmp" install )
 ```
 
 脚本会询问端口、管理员账号和阿里云 AccessKey，随后自动安装经过校验的 Node.js、构建 PulseDNS、创建本地 SQLite 数据库、配置管理员 Basic Auth 并注册 systemd 服务。Caddy、域名和 HTTPS 证书流程已完全移除。完成后会显示类似 `http://203.0.113.10:3100/32位随机路径` 的唯一入口；直接访问 IP 与端口根路径不能进入面板。再次不带参数运行同一脚本会打开操作菜单：
@@ -83,7 +83,7 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 一键升级命令：
 
 ```bash
-( set -eu; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT; curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/a49acd23bce8793dd18bc22e2d031e7742270656/public/panel-install.sh?v=0.8.3' -o "$tmp"; printf '%s  %s\n' 'ea550d307d4f3ba70b23d24e7943f3fec4af90eb5240c84228d1b8e91b32ba8d' "$tmp" | sha256sum -c -; bash "$tmp" update )
+( set -eu; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT; curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/0a57e8fcd8b1d4eccdc271cf426826936d589de9/public/panel-install.sh?v=0.8.3' -o "$tmp"; printf '%s  %s\n' '99e9b41d70801018b2d8dd827962d6c268e9c436a1ee319fb05d7ce5c4789cf4' "$tmp" | sha256sum -c -; bash "$tmp" update )
 ```
 
 面板数据保存在 `/var/lib/pulsedns-control/pulsedns.db`；管理员密码、阿里云凭据和独立生成的远程任务与开机凭据加密密钥保存在权限为 `0600` 的 `/etc/pulsedns-control.env`。密钥还会以 `0600` 权限单独保存在 `/var/lib/pulsedns-control/task-encryption.key`，以便卸载程序但保留数据库后仍能恢复待处理任务；升级旧面板时会自动补齐并校验该密钥。
@@ -100,7 +100,7 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 界面生成的命令包含真实节点参数和当前发布摘要；下面只演示结构，不要直接执行占位符：
 
 ```bash
-( set -eu; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT; curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/ecf458b934025995c8ce8c44b65fb41bd8702dec/public/install.sh' -o "$tmp"; printf '%s  %s\n' '7b50a540e41e88c0b74f2d030e27602a13cf5857745e9bd597d0512154c8704c' "$tmp" | sha256sum -c -; bash "$tmp" probe '<节点参数>' )
+( set -eu; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT; curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/a22513d836cd8c69213825bf191bfe26527e143f/public/install.sh' -o "$tmp"; printf '%s  %s\n' 'f353a03d2dc672f18455c65860b39bb0071bbc01fe7975395bb713ce88923179' "$tmp" | sha256sum -c -; bash "$tmp" probe '<节点参数>' )
 ```
 
 公共安装器会把接口返回的配置数据校验后以 `0600` 缓存为 `/root/pulsedns_<节点ID>_bootstrap.config`，并把通过 SHA-256 校验的同一固定安装器以 `0700` 缓存为 `/root/pulsedns_<节点ID>_installer.sh`；接口不会生成或返回另一份 Shell 脚本。开机启动器显式设置 `PATH`，首次执行即把自身原子复制到 `/var/lib/cloud/scripts/per-boot/`，并使用独立的 `_entrypoint.sh` 缓存，避免与安装器缓存互相覆盖。如果本次开机未完成，下次开机会再次调用；当前代次完成并成功恢复 `ddns-monitor` 后，敏感缓存与 per-boot 副本会被删除，仅清理包含本节点参数的 cloud-init 本地 user-data，不清理无关启动内容。
@@ -121,8 +121,8 @@ umask 077
 (
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
-  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/ecf458b934025995c8ce8c44b65fb41bd8702dec/public/install.sh -o "$tmp" &&
-  printf '%s  %s\n' '7b50a540e41e88c0b74f2d030e27602a13cf5857745e9bd597d0512154c8704c' "$tmp" | sha256sum -c - &&
+  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/a22513d836cd8c69213825bf191bfe26527e143f/public/install.sh -o "$tmp" &&
+  printf '%s  %s\n' 'f353a03d2dc672f18455c65860b39bb0071bbc01fe7975395bb713ce88923179' "$tmp" | sha256sum -c - &&
   grep -Fq '# PulseDNS / 原 DDNS 脚本兼容安装器' "$tmp" &&
   bash -n "$tmp" &&
   bash "$tmp"
@@ -145,9 +145,13 @@ Web 中“添加探针节点”会先要求填写一次性 root 密码，并预�
 
 新节点创建后先显示“等待开机安装”，不能提前修改或下发额外实例。超过 10 分钟仍未开始时，面板会提示检查 User data、CRLF 和出站网络。固定安装器开始执行后每 20 秒向主控续租，并用节点 generation 与本次随机 attempt ID 绑定回执；旧参数或另一台机器的回执不能覆盖当前结果。若机器断电或安装进程被强制终止，租约到期后会标记“结果未知”，per-boot 会在下次开机复用本机固定安装器和配置。探针对接全程无人值守：取得本机安装锁、主控确认旧尝试失败后，自动归档 `started` 并以新 attempt ID 重试，不再要求输入 `RETRY` 或手工删除标记。已完成的节点跳过重复安装；锁被占用、主控未确认、回执过期或本地标记冲突时，保留状态并报错退出，不强制重装。重试使用原配置和服务名，可能重新执行已完成部分的 Nyanpass 安装，但不会创建另一组实例；Nyanpass 安装继续由机器级任务锁串行保护。每次调用最多开始一次新尝试，不在失败后无限循环。只要配置已成功缓存，即使下载窗口随后过期也能完成旧回执收敛。旧版已下载的启动脚本不会自动变化，需从更新后的面板重新取得命令。
 
+重新执行对接命令时，安装器会尝试用本次下载凭据刷新已有缓存中的固定安装器和 Nyanpass 可信清单；只接受节点、代次、主控地址和探针令牌一致的有效配置。下载窗口过期或网络不可用时保留原缓存继续恢复，返回无效或身份不符的配置则报错退出，不覆盖旧缓存。已完成的节点优先检查本机完成标记和服务文件，补发完成回执并恢复 DDNS，不再访问已经撤销的配置下载链接。
+
 每份启动器只绑定一个 `nodeId + token`，不能在 ASG 或 Launch Template 中作为多台实例共享的 User data。批量部署时必须为每台实例单独创建节点；当前版本没有节点池或 AWS Instance Identity Document 认领接口。
 
 创建完成后可在节点、DNS 记录和 Nyanpass 列表中直接修改配置。节点修改会保留原探针令牌与上报状态，并在已有公网地址时立即同步新的阿里云 DNS 映射；单独新增 Nyanpass 实例时，保存后点击“同步到机器”，探针会领取固定类型任务、安装并回传状态。一个节点可以登记多个实例，探针会逐个串行安装。实例名就是传给官方安装器的机器服务名，创建后不可直接改名，避免旧服务仍在 VPS 运行却失去登记；需要换名时应新增实例，确认新服务正常后再移除旧登记。尚未领取的任务可以安全取消；机器开始安装后不能远程取消。只有探针任务心跳离线且节点没有其他安装在运行时，排队超过 5 分钟才会自动结束并允许重试；运行租约超时则标记为“结果未知”并继续接受原探针的晚到回执，绝不会自动重复安装。总览“最近变更”和完整事件日志均支持按节点、类型、级别及关键词筛选，完整日志还可折叠。
+
+实例名不能使用 `ddns-monitor`、`pulsedns-control`、`ssh`、`sshd`、`systemd-*` 或 systemd 单元后缀。机器端还会拒绝被其他服务、非 Nyanpass 目录或符号链接占用的目标，已有 Nyanpass 服务仍可按原名修复。失败或取消后重新排队使用新的执行 ID，旧租约回执和本地状态文件不能污染新尝试；不新增实例记录或数据库表。
 
 HTTP 面板上的“复制下载并运行命令”和“复制开机脚本”按钮都包含兼容回退，复制前会把 CRLF/CR 统一为 LF，并明确显示成功或失败。没有成功提示时不要粘贴，避免使用剪贴板中残留的其他节点旧内容；若实例没有生成 `/var/log/pulsedns-bootstrap*.log`，先查看目标终端中的下载错误，使用 User data 时再检查内容是否被外部编辑器转换为 CRLF。
 
@@ -159,14 +163,16 @@ HTTP 面板上的“复制下载并运行命令”和“复制开机脚本”按
 
 ## 升级 DDNS 探针
 
+两个升级入口（`agent-upgrade` 和独立升级脚本）都会先取得开机安装锁，再等待当前 Nyanpass 任务结束，最多等待 15 分钟。锁占用或等待超时会报错退出，不替换或重启正在安装任务的探针。
+
 使用当前 PulseDNS 安装器部署的节点可运行独立升级脚本：
 
 ```bash
 (
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
-  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/aecec67954c30a4ef4aa5460896a4e2eb34ea5be/public/update.sh -o "$tmp" &&
-  printf '%s  %s\n' '4e5b1a91033051a17dbb7c4897942a8555e7c443c5f17af68b0517b74b5590c0' "$tmp" | sha256sum -c - &&
+  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/a22513d836cd8c69213825bf191bfe26527e143f/public/update.sh -o "$tmp" &&
+  printf '%s  %s\n' 'edfedd95da06baf4b2879bb19cefe0b6af1a88e45374cc87f435e917684f9ee7' "$tmp" | sha256sum -c - &&
   bash "$tmp"
 )
 ```
