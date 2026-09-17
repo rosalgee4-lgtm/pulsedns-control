@@ -117,9 +117,38 @@ verify_nyanpass_archive() {
     [[ -f "$extract_dir/rel_nodeclient" && ! -L "$extract_dir/rel_nodeclient" ]]
 }
 
+valid_nyanpass_service_name() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$ ]] || return 1
+    case "$1" in
+        ddns-monitor|pulsedns-control|ssh|sshd|systemd-*|*.service|*.socket|*.target|*.timer|*.path|*.mount|*.automount|*.swap|*.slice|*.scope) return 1 ;;
+    esac
+}
+
+validate_nyanpass_target() {
+    local service_name="$1" target_dir="/opt/$1" unit_state="" unit="" entries=""
+    valid_nyanpass_service_name "$service_name" || return 1
+    [[ ! -L "$target_dir" && ( ! -e "$target_dir" || -d "$target_dir" ) ]] || return 1
+    unit_state=$(systemctl show "$service_name.service" -p LoadState --value 2>/dev/null || true)
+    case "$unit_state" in
+        not-found) ;;
+        loaded)
+            unit=$(systemctl cat "$service_name.service" 2>/dev/null) || return 1
+            printf '%s\n' "$unit" | grep -Fqx 'Description=nyanpass' || return 1
+            printf '%s\n' "$unit" | grep -Fqx "WorkingDirectory=$target_dir" || return 1
+            printf '%s\n' "$unit" | grep -Fqx "ExecStart=/bin/bash $target_dir/start.sh" || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    if [[ -d "$target_dir" ]]; then
+        entries=$(ls -A "$target_dir") || return 1
+        [[ -z "$entries" || ( -f "$target_dir/rel_nodeclient" && ! -L "$target_dir/rel_nodeclient" ) ]] || return 1
+    fi
+}
+
 stage_nyanpass_binary() {
     local service_name="$1" binary="$2" target_dir="" candidate=""
     target_dir="/opt/$service_name"
+    validate_nyanpass_target "$service_name" || return 1
     [[ ! -L "$target_dir" ]] || return 1
     install -d -m 0755 "$target_dir"
     candidate=$(mktemp "$target_dir/.rel_nodeclient.pulsedns.XXXXXX") || return 1
@@ -417,9 +446,9 @@ recover_local_task_state() {
 
 validate_nyanpass_payload() {
     local service_name="$1" role="$2" panel_url="$3" client_token="$4" optimize="$5" authority="" port=""
-    [[ "$service_name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$ ]] || return 1
+    valid_nyanpass_service_name "$service_name" || return 1
     [[ "$role" == "inbound" || "$role" == "outbound" ]] || return 1
-    [[ "$client_token" =~ ^[A-Za-z0-9._:-]{8,512}$ ]] || return 1
+    [[ "$client_token" =~ ^[A-Za-z0-9._~:+/=-]+$ && ${#client_token} -ge 8 && ${#client_token} -le 512 ]] || return 1
     [[ "$optimize" == "0" || "$optimize" == "1" ]] || return 1
     [[ "$panel_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~:/@%+=,-]*)?$ ]] || return 1
     authority="${panel_url#https://}"
@@ -491,7 +520,8 @@ poll_nyanpass_job() {
     fi
     if [[ "$action" != "nyanpass_apply_v1" ]] || ! valid_task_uuid "$instance_id" || [[ ! "$revision" =~ ^[1-9][0-9]*$ ]] || \
         ! validate_nyanpass_payload "$service_name" "$role" "$panel_url" "$client_token" "$optimize" || \
-        ! validate_nyanpass_release_manifest "$release_installer_url" "$release_installer_sha256" "$release_binary_base_url" "$release_binary_id" "$release_amd64_sha256" "$release_amd64v3_sha256" "$release_arm64_sha256"; then
+        ! validate_nyanpass_release_manifest "$release_installer_url" "$release_installer_sha256" "$release_binary_base_url" "$release_binary_id" "$release_amd64_sha256" "$release_amd64v3_sha256" "$release_arm64_sha256" || \
+        ! validate_nyanpass_target "$service_name"; then
         # The lease is already active. Persist the failure before attempting the
         # acknowledgement so a temporary control-plane outage cannot strand the
         # task in running state until its lease expires.
