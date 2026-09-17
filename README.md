@@ -100,7 +100,7 @@ ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 界面生成的命令包含真实节点参数和当前发布摘要；下面只演示结构，不要直接执行占位符：
 
 ```bash
-( set -eu; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT; curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/aecec67954c30a4ef4aa5460896a4e2eb34ea5be/public/install.sh' -o "$tmp"; printf '%s  %s\n' '5195a7f5938df2d997c09a48b564183c150cf73d385d966077ea2de60c06ccdb' "$tmp" | sha256sum -c -; bash "$tmp" probe '<节点参数>' )
+( set -eu; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT; curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/ecf458b934025995c8ce8c44b65fb41bd8702dec/public/install.sh' -o "$tmp"; printf '%s  %s\n' '7b50a540e41e88c0b74f2d030e27602a13cf5857745e9bd597d0512154c8704c' "$tmp" | sha256sum -c -; bash "$tmp" probe '<节点参数>' )
 ```
 
 公共安装器会把接口返回的配置数据校验后以 `0600` 缓存为 `/root/pulsedns_<节点ID>_bootstrap.config`，并把通过 SHA-256 校验的同一固定安装器以 `0700` 缓存为 `/root/pulsedns_<节点ID>_installer.sh`；接口不会生成或返回另一份 Shell 脚本。开机启动器显式设置 `PATH`，首次执行即把自身原子复制到 `/var/lib/cloud/scripts/per-boot/`，并使用独立的 `_entrypoint.sh` 缓存，避免与安装器缓存互相覆盖。如果本次开机未完成，下次开机会再次调用；当前代次完成并成功恢复 `ddns-monitor` 后，敏感缓存与 per-boot 副本会被删除，仅清理包含本节点参数的 cloud-init 本地 user-data，不清理无关启动内容。
@@ -121,8 +121,8 @@ umask 077
 (
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
-  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/aecec67954c30a4ef4aa5460896a4e2eb34ea5be/public/install.sh -o "$tmp" &&
-  printf '%s  %s\n' '5195a7f5938df2d997c09a48b564183c150cf73d385d966077ea2de60c06ccdb' "$tmp" | sha256sum -c - &&
+  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/ecf458b934025995c8ce8c44b65fb41bd8702dec/public/install.sh -o "$tmp" &&
+  printf '%s  %s\n' '7b50a540e41e88c0b74f2d030e27602a13cf5857745e9bd597d0512154c8704c' "$tmp" | sha256sum -c - &&
   grep -Fq '# PulseDNS / 原 DDNS 脚本兼容安装器' "$tmp" &&
   bash -n "$tmp" &&
   bash "$tmp"
@@ -143,7 +143,7 @@ umask 077
 
 Web 中“添加探针节点”会先要求填写一次性 root 密码，并预配一个或多个 Nyanpass 服务名、官方命令及原脚本的 `OPTIMIZE` 选项。主控把 root 密码、节点原始令牌、下载凭据和规范化后的预配参数绑定 `nodeId + generation`，以 AES-GCM 加密暂存；页面并列提供开机脚本和下载后运行的一键命令。节点访问短时参数时，主控才解密并返回当前可信清单组成的有界配置数据。固定安装器执行：补齐基础环境 → 主控令牌预校验 → DDNS 安装与首次上报验收 → 全部 Nyanpass → BBR → 最后事务式配置 SSH → DDNS 复检。每完成一步都会把 `ddns`、`nyanpass`、`bbr` 或 `ssh` 随心跳和最终回执上报；面板在失败或结果未知时显示最后完成阶段，若 SSH 已完成则明确提示使用新密码核查。
 
-新节点创建后先显示“等待开机安装”，不能提前修改或下发额外实例。超过 10 分钟仍未开始时，面板会提示检查 User data、CRLF 和出站网络。固定安装器开始执行后每 20 秒向主控续租，并用节点 generation 与本次随机 attempt ID 绑定回执；旧参数或另一台机器的回执不能覆盖当前结果。若机器断电或安装进程被强制终止，租约到期后会标记“结果未知”，per-boot 会在下次开机复用本机固定安装器和配置，但 `started` 安全标记仍会阻止自动重复安装 Nyanpass。恢复时不要手工删除 `started`：先确认旧进程已停止，在面板重新复制新版一键命令并在 VPS 交互终端执行。主控确认旧尝试失败后，安装器会提示输入 `RETRY`，明确确认后才归档旧标记并开始新尝试；非交互开机环境不会自动确认。已有 Nyanpass 安装可能被重复执行，必须先核查 VPS。只要配置已成功缓存，即使下载窗口随后过期也能完成旧回执收敛。
+新节点创建后先显示“等待开机安装”，不能提前修改或下发额外实例。超过 10 分钟仍未开始时，面板会提示检查 User data、CRLF 和出站网络。固定安装器开始执行后每 20 秒向主控续租，并用节点 generation 与本次随机 attempt ID 绑定回执；旧参数或另一台机器的回执不能覆盖当前结果。若机器断电或安装进程被强制终止，租约到期后会标记“结果未知”，per-boot 会在下次开机复用本机固定安装器和配置。探针对接全程无人值守：取得本机安装锁、主控确认旧尝试失败后，自动归档 `started` 并以新 attempt ID 重试，不再要求输入 `RETRY` 或手工删除标记。已完成的节点跳过重复安装；锁被占用、主控未确认、回执过期或本地标记冲突时，保留状态并报错退出，不强制重装。重试使用原配置和服务名，可能重新执行已完成部分的 Nyanpass 安装，但不会创建另一组实例；Nyanpass 安装继续由机器级任务锁串行保护。每次调用最多开始一次新尝试，不在失败后无限循环。只要配置已成功缓存，即使下载窗口随后过期也能完成旧回执收敛。旧版已下载的启动脚本不会自动变化，需从更新后的面板重新取得命令。
 
 每份启动器只绑定一个 `nodeId + token`，不能在 ASG 或 Launch Template 中作为多台实例共享的 User data。批量部署时必须为每台实例单独创建节点；当前版本没有节点池或 AWS Instance Identity Document 认领接口。
 

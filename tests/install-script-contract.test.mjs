@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -73,16 +73,109 @@ test('fixed installer owns bootstrap lifecycle, durable outcomes, and process-gr
   assert.match(lifecycle, /上次安装在中途停止/);
   assert.match(lifecycle, /不要删除 started 标记/);
   assert.ok(bootstrap.indexOf('flock -n 9') < bootstrap.indexOf('valid_bootstrap_config'));
-  assert.ok(lifecycle.indexOf('confirm_bootstrap_retry') < lifecycle.indexOf('BOOTSTRAP_STATE_DIR/failed.'));
-  assert.match(body('confirm_bootstrap_retry'), /\[\[ -t 0 \]\] \|\| return 1/);
-  assert.match(body('confirm_bootstrap_retry'), /"\$answer" == "RETRY"/);
+  assert.ok(lifecycle.indexOf('if [[ $failed_acknowledged -ne 1 ]]') < lifecycle.indexOf('BOOTSTRAP_STATE_DIR/failed.'));
+  assert.doesNotMatch(lifecycle, /\bread\b|confirm_bootstrap_retry|\[\[ -t/);
+  assert.doesNotMatch(source, /confirm_bootstrap_retry|输入 RETRY/);
+  assert.match(body('provision_node'), /exec 8>"\$TASK_LOCK_FILE"[\s\S]*flock 8[\s\S]*install_nyanpass_batch/);
+  assert.match(body('install_nyanpass_batch'), /"\$\{NYANPASS_BATCH_NAMES\[\$index\]\}"[\s\S]*"1"/);
+  assert.match(body('install_nyanpass_once'), /S="\$service_name" REINSTALL=1/);
 });
 
-test('unattended retries preserve interrupted state without a terminal confirmation', () => {
-  const harness = `confirm_bootstrap_retry() {\n${body('confirm_bootstrap_retry')}\n}\nconfirm_bootstrap_retry`;
-  const result = spawnSync(process.env.BASH_EXE || 'bash', ['-c', harness], { input: 'RETRY\n', encoding: 'utf8', timeout: 5000 });
-  assert.equal(result.status, 1);
-});
+for (const scenario of ['fresh', 'accepted', 'duplicate', 'unacknowledged', 'stale', 'lock-busy', 'conflict', 'complete', 'provision-failure']) {
+  test(`probe with stdin closed: ${scenario}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pulsedns-unattended-'));
+    const nodeId = '11111111-2222-4333-8444-555555555555';
+    const oldAttempt = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const newAttempt = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
+    const stateDir = join(root, 'state');
+    const started = join(stateDir, 'started');
+    const complete = join(stateDir, 'complete');
+    try {
+      await mkdir(stateDir);
+      await writeFile(join(root, 'uuid'), `${newAttempt}\n`);
+      await writeFile(join(root, 'calls'), '');
+      if (scenario !== 'fresh') await writeFile(scenario === 'complete' ? complete : started, `3\n${oldAttempt}\n`);
+      if (scenario === 'conflict') await writeFile(join(stateDir, 'attempt'), `3\n${newAttempt}\n`);
+      const actionOffset = source.indexOf('\nACTION="${1:-menu}"');
+      assert.ok(actionOffset > 0);
+      // Keep the real state machine and receipt persistence; isolate host changes.
+      const definitions = source.slice(0, actionOffset)
+        .replaceAll('/var/lib/pulsedns-bootstrap-${BOOTSTRAP_NODE_ID}', '${FIXTURE_ROOT}/state')
+        .replaceAll('/root/pulsedns_', '${FIXTURE_ROOT}/pulsedns_')
+        .replaceAll('/proc/sys/kernel/random/uuid', `${root}/uuid`);
+      const harness = `${definitions}
+BOOTSTRAP_GENERATION=3
+BOOTSTRAP_LOCK_FILE="$FIXTURE_ROOT/lock"
+BOOTSTRAP_LOG_FILE="$FIXTURE_ROOT/bootstrap.log"
+PROVISION_OUTCOME_DIR="$FIXTURE_ROOT/outcomes"
+need_root() { :; }
+ensure_probe_bootstrap_environment() { :; }
+validate_provision_request() { :; }
+valid_bootstrap_config() { printf 'cache\\n' >> "$FIXTURE_ROOT/calls"; }
+prepare_probe_installer_cache() { :; }
+flock() { [[ "$SCENARIO" != lock-busy ]]; }
+systemctl() { printf 'service %s\\n' "$*" >> "$FIXTURE_ROOT/calls"; }
+bootstrap_heartbeat_loop() { exec 9>&-; }
+write_bootstrap_provision_config() {
+  BOOTSTRAP_RUN_CONFIG="$FIXTURE_ROOT/provision.config"
+  printf 'fixture\\n' > "$BOOTSTRAP_RUN_CONFIG"
+}
+setsid() {
+  printf 'provision\\n' >> "$FIXTURE_ROOT/calls"
+  [[ "$SCENARIO" != provision-failure ]] || return 23
+}
+report_bootstrap_message() {
+  printf '%s %s %s\\n' "$1" "\${2:-}" "$BOOTSTRAP_ATTEMPT_ID" >> "$FIXTURE_ROOT/calls"
+  BOOTSTRAP_DISPOSITION=accepted
+  if [[ "$1" == finish && "\${2:-}" == failed && "$BOOTSTRAP_ATTEMPT_ID" == '${oldAttempt}' ]]; then
+    case "$SCENARIO" in
+      unacknowledged) return 1 ;;
+      duplicate) BOOTSTRAP_DISPOSITION=duplicate ;;
+      stale) BOOTSTRAP_DISPOSITION=stale ;;
+    esac
+  fi
+}
+bootstrap_node 'https://panel.example.test/api/v1/bootstrap/${nodeId}/pbs_${'a'.repeat(64)}'
+`;
+      const result = spawnSync(process.env.BASH_EXE || 'bash', ['-c', harness], {
+        env: { ...process.env, FIXTURE_ROOT: root, SCENARIO: scenario },
+        stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 10000,
+      });
+      const calls = await readFile(join(root, 'calls'), 'utf8');
+      const success = ['fresh', 'accepted', 'duplicate', 'complete'].includes(scenario);
+      assert.equal(result.status, success ? 0 : scenario === 'provision-failure' ? 23 : 1, result.stdout + result.stderr);
+      assert.doesNotMatch(result.stdout + result.stderr, /输入 RETRY|确认继续|交互式终端/);
+      if (scenario === 'complete') {
+        assert.doesNotMatch(calls, /^start |^provision$/m);
+        assert.match(calls, /service enable --now ddns-monitor/);
+        assert.equal(await readFile(complete, 'utf8'), `3\n${oldAttempt}\n`);
+      } else if (success || scenario === 'provision-failure') {
+        assert.equal(calls.split('\n').filter((line) => line === 'provision').length, 1);
+        assert.match(calls, new RegExp(`start  ${newAttempt}`));
+        if (scenario !== 'fresh') {
+          assert.equal(await readFile(join(stateDir, `failed.${oldAttempt}`), 'utf8'), `3\n${oldAttempt}\n`);
+          assert.ok(calls.indexOf(`finish failed ${oldAttempt}`) < calls.indexOf(`start  ${newAttempt}`));
+        }
+        if (success) {
+          assert.equal(await readFile(complete, 'utf8'), `3\n${newAttempt}\n`);
+          await assert.rejects(readFile(started), { code: 'ENOENT' });
+        } else {
+          assert.equal(await readFile(started, 'utf8'), `3\n${newAttempt}\n`);
+          assert.match(calls, new RegExp(`finish failed ${newAttempt}`));
+          await assert.rejects(readFile(complete), { code: 'ENOENT' });
+        }
+      } else {
+        assert.doesNotMatch(calls, /^start |^provision$/m);
+        assert.equal(await readFile(started, 'utf8'), `3\n${oldAttempt}\n`);
+        await assert.rejects(readFile(join(stateDir, `failed.${oldAttempt}`)), { code: 'ENOENT' });
+        if (scenario === 'lock-busy') assert.equal(calls, '');
+        else assert.match(calls, new RegExp(`finish failed ${oldAttempt}`));
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test('Bash 3 parser reads the config protocol exactly and rejects trailing bytes', async (context) => {
   const bash = process.env.BASH_EXE || 'bash';

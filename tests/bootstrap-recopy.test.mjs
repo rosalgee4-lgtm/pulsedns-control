@@ -21,6 +21,7 @@ process.env.PULSEDNS_TASK_ENCRYPTION_KEY = 'a'.repeat(64);
 process.env.PULSEDNS_TEST_ADMIN = '1';
 const { POST } = await import('../app/api/admin/nodes/route.ts');
 const { GET } = await import('../app/api/v1/bootstrap/[nodeId]/[token]/route.ts');
+const { POST: provision } = await import('../app/api/v1/provision/route.ts');
 const { getLocalSqlite } = await import('../db/index.ts');
 const { decryptBootstrapPayload, encryptBootstrapPayload } = await import('../lib/bootstrap-payload.ts');
 after(async () => { (await getLocalSqlite()).close(); await rm(root, { recursive: true, force: true }); });
@@ -134,4 +135,33 @@ test('unreadable credentials do not silently overwrite state and always release 
   assert.equal(after.bootstrap_payload_ciphertext, before.bootstrap_payload_ciphertext);
   assert.equal(after.bootstrap_download_token_hash, before.bootstrap_download_token_hash);
   assert.equal(after.dns_operation_id, null);
+});
+
+test('unattended recovery accepts a new attempt after failure and ignores late old receipts', async () => {
+  const { node, installUrl } = await createNode();
+  const before = await stored(node.id);
+  const payload = await decryptBootstrapPayload(before.bootstrap_payload_ciphertext, { nodeId: node.id, generation: 1 });
+  const oldAttempt = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const newAttempt = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
+  async function send(phase, attemptId, outcome) {
+    const response = await provision(new Request('https://master.example.test/api/v1/provision', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Secret-Token': payload.agentToken, 'X-Agent-Version': '0.8.3' },
+      body: JSON.stringify({ protocol: 1, phase, generation: 1, attemptId, ...(outcome ? { outcome } : {}) }),
+    }));
+    assert.equal(response.status, 200);
+    return (await response.json()).disposition;
+  }
+  assert.equal(await send('start', oldAttempt), 'accepted');
+  assert.equal(await send('finish', oldAttempt, 'failed'), 'accepted');
+  assert.equal(await send('finish', oldAttempt, 'failed'), 'duplicate');
+  assert.equal(await send('start', newAttempt), 'accepted');
+  assert.equal(await send('finish', oldAttempt, 'failed'), 'stale');
+  assert.equal((await stored(node.id)).provision_attempt_id, newAttempt);
+  assert.equal((await stored(node.id)).nyanpass_status, 'provisioning');
+  assert.equal(await send('finish', newAttempt, 'succeeded'), 'accepted');
+  const after = await stored(node.id);
+  assert.equal(after.nyanpass_status, 'ready');
+  assert.equal(after.token_hash, before.token_hash);
+  assert.equal(after.bootstrap_payload_ciphertext, null);
+  assert.equal((await download(installUrl)).status, 404);
 });
