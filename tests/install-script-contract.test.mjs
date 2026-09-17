@@ -324,8 +324,14 @@ test('panel installer uses immutable source and README verifies the downloaded e
   assert.match(panelSource, /public\/install\.sh/);
   assert.match(panelSource, /"\$ACTION" == "probe"/);
   assert.match(panelSource, /next\/font\/google/);
-  assert.match(readme, /panel-install\.sh\?v=0\.8\.3[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" install/);
-  assert.match(readme, /panel-install\.sh\?v=0\.8\.3[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" update/);
+  const panelCommands = readme.split('\n').filter((line) => line.includes('panel-install.sh?v=0.8.3'));
+  assert.equal(panelCommands.length, 2);
+  for (const command of panelCommands) {
+    assert.match(command, /^\( set -eu; tmp="\$\(mktemp\)";/);
+    assert.match(command, /sha256sum -c -; bash "\$tmp" (install|update) \)/);
+    const syntax = spawnSync(process.env.BASH_EXE || 'bash', ['-n'], { input: command, encoding: 'utf8' });
+    assert.equal(syntax.status, 0, syntax.stderr);
+  }
 });
 
 test('Nyanpass installation executes only pinned installer and binary payloads', () => {

@@ -33,8 +33,13 @@ jobs:
       - run: pnpm test
       - run: pnpm lint
       - name: Validate shell syntax
-        run: bash -n public/install.sh public/monitor.sh public/update.sh public/panel-install.sh
+        run: |
+          for script in public/install.sh public/monitor.sh public/update.sh public/panel-install.sh; do
+            bash -n "$script"
+          done
       - name: Build self-hosted panel
         run: pnpm build
         env:
           PULSEDNS_SELF_HOSTED: "1"
+      - name: Check TypeScript
+        run: pnpm exec tsc --noEmit
