@@ -14,6 +14,7 @@ export function nodeResponse(node: typeof nodes.$inferSelect) {
     ipv6: node.ipv6,
     agentVersion: node.agentVersion,
     nyanpassStatus: node.nyanpassStatus,
+    installationAvailable: Boolean(node.bootstrapPayloadCiphertext),
     provisionLastCompletedStep: node.provisionLastCompletedStep,
     lastSeenAt: node.lastSeenAt?.toISOString() ?? null,
     lastTaskPollAt: node.lastTaskPollAt?.toISOString() ?? null,

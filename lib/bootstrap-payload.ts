@@ -7,6 +7,7 @@ export type BootstrapPayload = {
   agentToken: string;
   rootPassword: string;
   instances: ProvisionedNyanpassInstance[];
+  downloadToken?: string;
 };
 
 type BootstrapContext = {
@@ -50,6 +51,9 @@ export async function decryptBootstrapPayload(value: string, context: BootstrapC
 function validatePayload(value: unknown): asserts value is BootstrapPayload {
   if (!value || typeof value !== 'object') throw new Error('开机脚本凭据内容无效');
   const payload = value as Partial<BootstrapPayload>;
+  if (payload.downloadToken !== undefined && !/^pbs_[a-f0-9]{64}$/.test(payload.downloadToken)) {
+    throw new Error('开机脚本下载凭据格式无效');
+  }
   if (payload.protocol !== 1 || typeof payload.agentToken !== 'string' || !/^pd_[a-f0-9]{64}$/.test(payload.agentToken)) {
     throw new Error('开机脚本凭据内容无效');
   }

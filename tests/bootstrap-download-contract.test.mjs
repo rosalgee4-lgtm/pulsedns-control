@@ -18,20 +18,21 @@ const { bootstrapDownloadExpiry, bootstrapDownloadWindow, BOOTSTRAP_DOWNLOAD_RET
 const { DEFAULT_NYANPASS_RELEASE, validateTrustedNyanpassRelease } = await import('../lib/nyanpass-release.ts');
 
 function handler(source, method, nextMethod) {
+  source = source.replace(/\r\n?/g, '\n');
   const start = source.indexOf(`export async function ${method}`);
   const end = nextMethod ? source.indexOf(`export async function ${nextMethod}`, start) : source.length;
   assert.ok(start >= 0 && end > start, `${method} handler missing`);
   return source.slice(start, end);
 }
 
-test('node creation returns a compact connect command and an optional boot-resilient launcher', () => {
+test('node creation returns both a download-run command and a boot-resilient launcher', () => {
   const post = handler(nodeRoute, 'POST', 'PATCH');
-  const successStart = post.lastIndexOf('return Response.json({');
+  const successStart = post.indexOf('return Response.json({\n    node:');
   assert.ok(successStart >= 0, 'successful node response missing');
-  const successResponse = post.slice(successStart);
+  const successResponse = post.slice(successStart, post.indexOf('\nasync function installationCommands'));
 
   assert.match(post, /const downloadToken = newBootstrapDownloadToken\(\)/);
-  assert.match(post, /encryptBootstrapPayload\([\s\S]*agentToken: token[\s\S]*rootPassword[\s\S]*instances/);
+  assert.match(post, /encryptBootstrapPayload\([\s\S]*agentToken: token[\s\S]*downloadToken[\s\S]*rootPassword[\s\S]*instances/);
   assert.match(post, /sha256\(downloadToken\)/);
   assert.match(post, /bootstrapPayloadCiphertext, bootstrapDownloadTokenHash/);
   assert.match(post, /bootstrapDownloadExpiresAt: bootstrapDownloadExpiry\(now\)/);
@@ -158,8 +159,8 @@ test('bootstrap payload encrypts round-trip and binds ciphertext to node plus ge
   }
 });
 
-test('the dashboard presents the compact command first and keeps cloud user-data optional', () => {
-  assert.match(dashboard, /type CreatedNode = \{[^}]*installUrl: string; connectCommand: string; startupScript: string/);
+test('node commands remain accessible and present startup and download-run as equal options', () => {
+  assert.match(dashboard, /type InstallationCommands = \{[^}]*installUrl: string; connectCommand: string; startupScript: string/);
   assert.doesNotMatch(dashboard, /type CreatedNode = \{[^}]*\btoken: string/);
   assert.doesNotMatch(dashboard, /type CreatedNode = \{[^}]*installCommand: string/);
   assert.doesNotMatch(dashboard, /created\.installUrl/);
@@ -167,7 +168,10 @@ test('the dashboard presents the compact command first and keeps cloud user-data
   assert.match(dashboard, /created\.connectCommand/);
   assert.match(dashboard, /created\.startupScript/);
   assert.match(dashboard, /公共安装脚本 \+ 节点专属参数/);
-  assert.match(dashboard, /<details className="advanced-install">/);
+  assert.match(dashboard, /role="tablist" aria-label="安装方式"/);
+  assert.match(dashboard, /action: 'installation', id: node.id/);
+  assert.match(dashboard, /node.installationAvailable \? '安装命令' : '升级命令'/);
+  assert.doesNotMatch(dashboard, /<details className="advanced-install">/);
 });
 
 function restoreEnvironment(name, value) {

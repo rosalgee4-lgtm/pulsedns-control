@@ -57,7 +57,7 @@ test('fixed installer owns bootstrap lifecycle, durable outcomes, and process-gr
   const lifecycle = body('run_probe_bootstrap');
   assert.ok(bootstrap.indexOf('umask 077') < bootstrap.indexOf('valid_bootstrap_config'));
   assert.ok(bootstrap.indexOf('ensure_probe_bootstrap_environment') < bootstrap.indexOf('valid_bootstrap_config'));
-  assert.match(lifecycle, /chmod 0600 "\$BOOTSTRAP_LOG_FILE"[\s\S]*tee -a "\$BOOTSTRAP_LOG_FILE"/);
+  assert.match(lifecycle, /chmod 0600 "\$BOOTSTRAP_LOG_FILE"[\s\S]*exec 9>&-; exec tee -a "\$BOOTSTRAP_LOG_FILE"/);
   assert.match(source, /exec 9>"\$BOOTSTRAP_LOCK_FILE"[\s\S]*flock -n 9/);
   assert.match(lifecycle, /bootstrap_heartbeat_loop "\$\$"/);
   assert.match(lifecycle, /PULSEDNS_PROVISION_STAGE_FILE="\$BOOTSTRAP_STAGE_FILE"[\s\S]*setsid bash "\$BOOTSTRAP_INSTALLER_PATH" provision --provision-config "\$BOOTSTRAP_RUN_CONFIG" --bbr '1'/);
@@ -72,6 +72,16 @@ test('fixed installer owns bootstrap lifecycle, durable outcomes, and process-gr
   assert.match(source, /remove_completed_bootstrap_cache\(\)[\s\S]*BOOTSTRAP_CONFIG_PATH[\s\S]*BOOTSTRAP_INSTALLER_PATH/);
   assert.match(lifecycle, /上次安装在中途停止/);
   assert.match(lifecycle, /不要删除 started 标记/);
+  assert.ok(bootstrap.indexOf('flock -n 9') < bootstrap.indexOf('valid_bootstrap_config'));
+  assert.ok(lifecycle.indexOf('confirm_bootstrap_retry') < lifecycle.indexOf('BOOTSTRAP_STATE_DIR/failed.'));
+  assert.match(body('confirm_bootstrap_retry'), /\[\[ -t 0 \]\] \|\| return 1/);
+  assert.match(body('confirm_bootstrap_retry'), /"\$answer" == "RETRY"/);
+});
+
+test('unattended retries preserve interrupted state without a terminal confirmation', () => {
+  const harness = `confirm_bootstrap_retry() {\n${body('confirm_bootstrap_retry')}\n}\nconfirm_bootstrap_retry`;
+  const result = spawnSync(process.env.BASH_EXE || 'bash', ['-c', harness], { input: 'RETRY\n', encoding: 'utf8', timeout: 5000 });
+  assert.equal(result.status, 1);
 });
 
 test('Bash 3 parser reads the config protocol exactly and rejects trailing bytes', async (context) => {
@@ -314,8 +324,8 @@ test('panel installer uses immutable source and README verifies the downloaded e
   assert.match(panelSource, /public\/install\.sh/);
   assert.match(panelSource, /"\$ACTION" == "probe"/);
   assert.match(panelSource, /next\/font\/google/);
-  assert.match(readme, /panel-install\.sh\?v=0\.8\.2[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" install/);
-  assert.match(readme, /panel-install\.sh\?v=0\.8\.2[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" update/);
+  assert.match(readme, /panel-install\.sh\?v=0\.8\.3[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" install/);
+  assert.match(readme, /panel-install\.sh\?v=0\.8\.3[^\n]+sha256sum[^\n]+grep -Fq[^\n]+bash -n[^\n]+bash "\$tmp" update/);
 });
 
 test('Nyanpass installation executes only pinned installer and binary payloads', () => {

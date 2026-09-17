@@ -6,9 +6,14 @@ import test from 'node:test';
 
 const files = Object.fromEntries(await Promise.all([
   'README.md',
+  'app/api/admin/nodes/route.ts',
   'app/dashboard.tsx',
+  'app/globals.css',
   'app/layout.tsx',
+  'lib/bootstrap-payload.ts',
   'lib/install-command.ts',
+  'lib/node-response.ts',
+  'lib/startup-launcher.ts',
   'package.json',
   'pnpm-lock.yaml',
   'public/install.sh',
@@ -43,7 +48,7 @@ test('release scripts and documentation pin every published SHA-256', () => {
 
 test('release version agrees across runtime entrypoints', () => {
   const version = JSON.parse(text('package.json')).version;
-  assert.equal(version, '0.8.2');
+  assert.equal(version, '0.8.3');
   for (const name of ['public/install.sh', 'public/monitor.sh', 'public/panel-install.sh']) {
     assert.equal(capture(name, /^VERSION="([0-9]+\.[0-9]+\.[0-9]+)"$/m), version);
   }
@@ -75,8 +80,10 @@ test('documented downloads and deployed panel source use matching immutable payl
     assert.equal(createHash('sha256').update(published).digest('hex'), digest(path), `${commit}:${path} differs from documented checksum`);
   }
   const sourceCommit = capture('public/panel-install.sh', /^SOURCE_COMMIT="([a-f0-9]{40})"$/m);
-  const deployed = execFileSync('git', ['show', `${sourceCommit}:lib/install-command.ts`], { cwd: new URL('..', import.meta.url), encoding: 'utf8' });
-  assert.equal(deployed, text('lib/install-command.ts'), 'panel installer would deploy stale probe download URLs');
+  for (const name of ['app/api/admin/nodes/route.ts', 'app/dashboard.tsx', 'app/globals.css', 'lib/bootstrap-payload.ts', 'lib/install-command.ts', 'lib/node-response.ts', 'lib/startup-launcher.ts', 'package.json']) {
+    const deployed = execFileSync('git', ['show', `${sourceCommit}:${name}`], { cwd: new URL('..', import.meta.url), encoding: 'utf8' });
+    assert.equal(deployed, text(name), `panel installer would deploy stale ${name}`);
+  }
 });
 
 test('self-hosted build is independent of Google Fonts and panel source checks the launcher', () => {

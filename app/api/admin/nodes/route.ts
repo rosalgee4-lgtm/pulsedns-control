@@ -5,7 +5,7 @@ import { ensureSchema } from '@/db/init';
 import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { syncAliDnsRecord } from '@/lib/alidns';
 import { buildNodeBootstrapConfig, buildNodeConnectCommand, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES } from '@/lib/install-command';
-import { bootstrapDownloadExpiry } from '@/lib/bootstrap-download';
+import { bootstrapDownloadExpiry, bootstrapDownloadWindow, BOOTSTRAP_DOWNLOAD_RETRY_GRACE_MS } from '@/lib/bootstrap-download';
 import { parseOfficialNyanpassCommand } from '@/lib/nyanpass-command';
 import { publicOrigin } from '@/lib/public-origin';
 import { newAgentToken, newBootstrapDownloadToken, sha256 } from '@/lib/security';
@@ -13,7 +13,7 @@ import { cleanText, normalizeDnsRr, normalizeDomainName, validDnsRr, validDomain
 import { expireProvisionAttempts, isBootstrapLocked } from '@/lib/provision-lifecycle';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
 import { nodeResponse } from '@/lib/node-response';
-import { encryptBootstrapPayload } from '@/lib/bootstrap-payload';
+import { decryptBootstrapPayload, encryptBootstrapPayload } from '@/lib/bootstrap-payload';
 import { buildNodeStartupLauncher } from '@/lib/startup-launcher';
 import { trustedNyanpassRelease } from '@/lib/nyanpass-release';
 import { dnsOwnershipConflictMessage, findDnsOwnershipConflict, isDnsOwnershipConstraintError } from '@/lib/dns-ownership';
@@ -23,6 +23,7 @@ export async function POST(request: Request) {
   if (!user) return Response.json({ error: '需要管理员登录' }, { status: 401 });
 
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+  if (body?.action === 'installation') return installationCommands(request, body);
   const name = cleanText(body?.name, 60);
   const region = cleanText(body?.region, 40) || 'unknown';
   const domainName = normalizeDomainName(body?.domainName) || null;
@@ -81,6 +82,7 @@ export async function POST(request: Request) {
     bootstrapPayloadCiphertext = await encryptBootstrapPayload({
       protocol: 1,
       agentToken: token,
+      downloadToken,
       rootPassword,
       instances: preparedInstances.map(({ name: instanceName, optimize, args }) => ({ name: instanceName, optimize, args })),
     }, { nodeId: id, generation: provisionGeneration });
@@ -116,8 +118,69 @@ export async function POST(request: Request) {
     installUrl,
     connectCommand,
     startupScript,
+    expiresAt: bootstrapDownloadExpiry(now).toISOString(),
     instances: preparedInstances.map((instance) => ({ id: instance.id, nodeId: id, nodeName: name, name: instance.name, role: instance.role, panelUrl: instance.panelUrl, optimize: instance.optimize, status: 'bootstrap', hasCredential: false, lastReportedAt: null, syncError: null, activeTaskId: null, configRevision: 0, taskStatus: null, taskCreatedAt: null, taskClaimedAt: null, taskLeaseExpiresAt: null })),
   }, { status: 201, headers: { 'Cache-Control': 'no-store' } });
+}
+
+async function installationCommands(request: Request, body: Record<string, unknown>) {
+  const id = cleanText(body.id, 64);
+  const headers = { 'Cache-Control': 'no-store, private', 'Referrer-Policy': 'no-referrer' };
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) {
+    return Response.json({ error: '节点 ID 无效' }, { status: 400, headers });
+  }
+  await ensureSchema();
+  const db = await getDb();
+  const operationId = await acquireNodeOperationLock(db, id);
+  if (operationId === undefined) return Response.json({ error: '节点不存在' }, { status: 404, headers });
+  if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试' }, { status: 409, headers });
+  try {
+    const [node] = await db.select().from(nodes).where(eq(nodes.id, id)).limit(1);
+    if (!node) return Response.json({ error: '节点不存在' }, { status: 404, headers });
+    if (!node.bootstrapPayloadCiphertext || !isBootstrapLocked(node.nyanpassStatus)) {
+      return Response.json({ error: '首次安装凭据已清除，不能再次下发完整安装；现有探针可使用升级命令' }, { status: 409, headers });
+    }
+    const payload = await decryptBootstrapPayload(node.bootstrapPayloadCiphertext, { nodeId: id, generation: node.provisionGeneration });
+    const now = new Date();
+    const window = bootstrapDownloadWindow(node.bootstrapDownloadExpiresAt, node.bootstrapDownloadConsumedAt, now);
+    const reusable = payload.downloadToken && window.allowed && await sha256(payload.downloadToken) === node.bootstrapDownloadTokenHash;
+    if (!reusable && node.nyanpassStatus === 'provisioning' && node.provisionLeaseExpiresAt && node.provisionLeaseExpiresAt > now) {
+      return Response.json({ error: '安装正在运行，暂不重新签发下载凭据；请等待安装完成或心跳超时' }, { status: 409, headers });
+    }
+    const downloadToken = reusable ? payload.downloadToken! : newBootstrapDownloadToken();
+    const expiresAt = reusable
+      ? (node.bootstrapDownloadConsumedAt
+        ? new Date(node.bootstrapDownloadConsumedAt.getTime() + BOOTSTRAP_DOWNLOAD_RETRY_GRACE_MS)
+        : node.bootstrapDownloadExpiresAt!)
+      : bootstrapDownloadExpiry(now);
+    const origin = publicOrigin(request);
+    const nyanpassRelease = await trustedNyanpassRelease();
+    const config = buildNodeBootstrapConfig({ ...payload, token: payload.agentToken, nodeId: id, generation: node.provisionGeneration, origin, nyanpassRelease });
+    const installUrl = `${origin}/api/v1/bootstrap/${id}/${downloadToken}`;
+    const startupScript = buildNodeStartupLauncher(id, installUrl, node.provisionGeneration);
+    if (new TextEncoder().encode(config).byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES
+      || new TextEncoder().encode(startupScript).byteLength > MAX_CLOUD_LAUNCHER_BYTES) {
+      return Response.json({ error: '安装配置超过安全大小上限' }, { status: 409, headers });
+    }
+    if (!reusable) {
+      const ciphertext = await encryptBootstrapPayload({ ...payload, downloadToken }, { nodeId: id, generation: node.provisionGeneration });
+      await db.update(nodes).set({
+        bootstrapPayloadCiphertext: ciphertext,
+        bootstrapDownloadTokenHash: await sha256(downloadToken),
+        bootstrapDownloadExpiresAt: expiresAt,
+        bootstrapDownloadConsumedAt: null,
+      }).where(and(eq(nodes.id, id), eq(nodes.dnsOperationId, operationId)));
+    }
+    return Response.json({
+      node: { id, name: node.name, region: node.region },
+      installUrl, connectCommand: buildNodeConnectCommand(installUrl), startupScript,
+      expiresAt: expiresAt.toISOString(),
+    }, { headers });
+  } catch {
+    return Response.json({ error: '无法读取安装凭据，请检查主控加密密钥和 Nyanpass 发布配置；原节点未重置' }, { status: 503, headers });
+  } finally {
+    await releaseNodeOperationLock(db, id, operationId);
+  }
 }
 
 function safeBootstrapEncryptionError(error: unknown) {

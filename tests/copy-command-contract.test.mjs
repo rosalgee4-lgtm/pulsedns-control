@@ -26,17 +26,17 @@ test('HTTP deployments have a synchronous clipboard fallback', () => {
 
 test('copy buttons await the result and expose success or failure', () => {
   assert.match(dashboard, /公共安装脚本 \+ 节点专属参数/);
-  assert.match(dashboard, /复制[^<]{0,20}探针对接命令/);
+  assert.match(dashboard, /复制下载并运行命令/);
   assert.doesNotMatch(dashboard, /created\.installUrl/);
   assert.doesNotMatch(dashboard, /created\.installCommand/);
   assert.match(dashboard, /created\.connectCommand/);
   assert.match(dashboard, /created\.startupScript/);
-  assert.match(dashboard, /复制探针对接命令/);
-  assert.match(dashboard, /复制 AWS User data/);
+  assert.match(dashboard, /复制开机脚本/);
+  assert.match(dashboard, /onInstall=\{openNodeInstallation\}/);
   assert.match(dashboard, /setCopyFeedback\(await copyText\(command\) \? 'success' : 'error'\)/);
   assert.match(dashboard, /setStartupCopyFeedback\(await copyText\(script\) \? 'success' : 'error'\)/);
-  assert.match(dashboard, /已按 LF 换行复制[\s\S]{0,100}User data/);
-  assert.match(dashboard, /AWS User data（可选断网重试）/);
+  assert.match(dashboard, /已复制完整 User data（LF 换行）/);
+  assert.match(dashboard, /role="tablist" aria-label="安装方式"/);
   assert.match(dashboard, /User data 未执行/);
   assert.match(dashboard, /不能作为 ASG 或 Launch Template 的共享 User data/);
   assert.match(dashboard, /剪贴板内容没有更新|手动选中[^。]{0,30}命令/);
@@ -88,7 +88,11 @@ test('completed startup skips download, restores service, and removes sensitive 
     const cachedUserData = join(fixture.cloudInstancesDir, 'runner', 'user-data.txt');
     await mkdir(join(fixture.cloudInstancesDir, 'runner'), { recursive: true });
     await writeFile(cachedUserData, 'host-owned user data');
-    await chmod(cachedUserData, 0o400);
+    const ownUserData = join(fixture.cloudInstancesDir, 'runner', 'user-data.txt.i');
+    await writeFile(ownUserData, `#!/bin/sh\n# ${fixture.nodeParameter}\n`);
+    const protectedUserData = join(fixture.cloudInstancesDir, 'runner', 'vendor-data.txt');
+    await writeFile(protectedUserData, fixture.nodeParameter);
+    await chmod(protectedUserData, 0o400);
     await writeFile(join(fixture.stateDir, 'complete'), '1\nattempt\n');
     await writeFile(fixture.scriptPath, 'sensitive installer cache');
     await writeFile(fixture.configPath, 'sensitive configuration cache');
@@ -104,6 +108,8 @@ exit 99
     assert.equal(result.status, 0, result.stderr);
     assert.equal(await readFile(fixture.callsFile, 'utf8'), 'enable --now ddns-monitor\n');
     assert.equal(await readFile(cachedUserData, 'utf8'), 'host-owned user data');
+    assert.equal(await readFile(ownUserData, 'utf8'), '');
+    assert.equal(await readFile(protectedUserData, 'utf8'), fixture.nodeParameter);
     await assert.rejects(readFile(fixture.scriptPath), { code: 'ENOENT' });
     await assert.rejects(readFile(fixture.configPath), { code: 'ENOENT' });
     await assert.rejects(readFile(fixture.perBootPath), { code: 'ENOENT' });
@@ -201,7 +207,7 @@ async function createLauncherFixture({ requireSuccessFile = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'pulsedns-launcher-'));
   const mockBin = join(root, 'bin');
   const stateDir = join(root, `pulsedns-bootstrap-${nodeId}`);
-  const scriptPath = join(root, `pulsedns_${nodeId}_installer.sh`);
+  const scriptPath = join(root, `pulsedns_${nodeId}_entrypoint.sh`);
   const configPath = join(root, `pulsedns_${nodeId}_bootstrap.config`);
   const logFile = join(root, 'launcher.log');
   const callsFile = join(root, 'calls.log');
@@ -232,7 +238,7 @@ exit 0
     )
     .replace(`installer_sha256='${PROBE_INSTALLER_SHA256}'`, `installer_sha256='${installerHash}'`)
     .replaceAll('/var/log/pulsedns-bootstrap-launcher.log', logFile)
-    .replaceAll(`/root/pulsedns_${nodeId}_installer.sh`, scriptPath)
+    .replaceAll(`/root/pulsedns_${nodeId}_entrypoint.sh`, scriptPath)
     .replaceAll(`/root/pulsedns_${nodeId}_bootstrap.config`, configPath)
     .replaceAll(`/var/lib/pulsedns-bootstrap-${nodeId}`, stateDir)
     .replaceAll('/var/lib/cloud/scripts/per-boot', perBootDir)

@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import {
   buildNodeBootstrapConfig,
   buildNodeConnectCommand,
+  buildAgentUpgradeCommand,
   PROBE_INSTALLER_SHA256,
   PROBE_INSTALLER_URL,
   shellArg,
@@ -41,14 +44,61 @@ function buildConfig(overrides = {}) {
   });
 }
 
-test('node connection command is one fixed public script plus one opaque node parameter', () => {
+test('one-click command downloads a pinned script, checks it, then executes with the node parameter', () => {
   const installUrl = `${origin}/api/v1/bootstrap/${nodeId}/pbs_${'a'.repeat(64)}`;
   const connectCommand = buildNodeConnectCommand(installUrl);
-  assert.equal(connectCommand, `bash <(curl --proto '=https' --proto-redir '=https' -fLSs '${PROBE_INSTALLER_URL}') probe '${installUrl}'`);
+  assert.ok(connectCommand.includes(PROBE_INSTALLER_URL));
+  assert.ok(connectCommand.includes(PROBE_INSTALLER_SHA256));
+  assert.match(connectCommand, /set -eu; tmp="\$\(mktemp\)"/);
+  assert.match(connectCommand, /curl[^;]+-o "\$tmp";[\s\S]*sha256sum -c -; bash "\$tmp" probe/);
+  assert.ok(connectCommand.includes(`probe '${installUrl}'`));
+  assert.doesNotMatch(connectCommand, /bash <\(/);
   assert.equal(connectCommand.includes('\n'), false);
   assert.doesNotMatch(connectCommand, /rootPassword|nyanpass|--server|--token/);
   const result = spawnSync(process.env.BASH_EXE || 'bash', ['-n'], { input: connectCommand, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
+});
+
+test('download-and-run commands fail visibly and never execute an unverified download', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulsedns-command-'));
+  const downloadPath = join(root, 'download.sh');
+  const calls = join(root, 'calls');
+  const nodeParameter = "https://panel.example.test/node/a'b";
+  try {
+    writeFileSync(join(root, 'mktemp'), '#!/bin/sh\nprintf "%s\\n" "$MOCK_DOWNLOAD"\n', { mode: 0o700 });
+    writeFileSync(join(root, 'curl'), `#!/bin/sh
+if [ "$SCENARIO" = curl-failure ]; then echo download-failed >&2; exit 22; fi
+printf 'downloaded script\\n' > "$MOCK_DOWNLOAD"
+`, { mode: 0o700 });
+    writeFileSync(join(root, 'sha256sum'), `#!/bin/sh
+cat >/dev/null
+if [ "$SCENARIO" = checksum-failure ]; then echo checksum-FAILED >&2; exit 1; fi
+`, { mode: 0o700 });
+    writeFileSync(join(root, 'bash'), '#!/bin/sh\nprintf "%s\\n" "$@" > "$MOCK_CALLS"\n', { mode: 0o700 });
+    for (const [command, args] of [
+      [buildNodeConnectCommand(nodeParameter), ['probe', nodeParameter]],
+      [buildAgentUpgradeCommand(), ['agent-upgrade']],
+    ]) {
+      for (const scenario of ['curl-failure', 'checksum-failure', 'success']) {
+        rmSync(calls, { force: true });
+        const result = spawnSync(process.env.BASH_EXE || '/bin/bash', ['-c', command], {
+          encoding: 'utf8',
+          env: { ...process.env, PATH: `${root}:${process.env.PATH}`, MOCK_DOWNLOAD: downloadPath, MOCK_CALLS: calls, SCENARIO: scenario },
+        });
+        assert.equal(existsSync(downloadPath), false, 'temporary download must be removed');
+        if (scenario === 'success') {
+          assert.equal(result.status, 0, result.stderr);
+          assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'), [downloadPath, ...args]);
+        } else {
+          assert.notEqual(result.status, 0);
+          assert.match(result.stderr, /download-failed|checksum-FAILED/);
+          assert.equal(existsSync(calls), false, 'unverified script must never execute');
+        }
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('bootstrap endpoint payload is bounded configuration data rather than generated shell', () => {

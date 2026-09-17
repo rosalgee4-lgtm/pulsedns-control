@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { copyText } from '@/lib/copy-text';
 import { filterEvents } from '@/lib/event-filter';
-import { PROBE_INSTALLER_SHA256, PROBE_INSTALLER_URL } from '@/lib/install-command';
+import { buildAgentUpgradeCommand } from '@/lib/install-command';
 
 type ViewId = 'overview' | 'nodes' | 'records' | 'nyanpass' | 'activity';
 
@@ -34,6 +34,7 @@ type NodeRow = {
   provider: string; domainName: string | null; syncEnabled: boolean;
   agentVersion: string | null; lastTaskPollAt: string | null; nyanpassStatus: string;
   provisionLastCompletedStep: string | null;
+  installationAvailable: boolean;
 };
 type EventRow = { id: number; nodeId: string; nodeName: string; level: string; kind: string; message: string; createdAt: string };
 type NyanpassStatusValue = 'ready' | 'pending' | 'running' | 'success' | 'failed' | 'uncertain' | 'bootstrap' | 'legacy' | '等待安装';
@@ -45,7 +46,8 @@ type NyanpassRow = {
   taskStatus: string | null; taskCreatedAt: string | null; taskClaimedAt: string | null; taskLeaseExpiresAt: string | null;
 };
 type NyanpassDraft = { name: string; command: string; optimize: boolean };
-type CreatedNode = { installUrl: string; connectCommand: string; startupScript: string; node: { id: string; name: string; region: string }; instances: NyanpassRow[] };
+type InstallationCommands = { installUrl: string; connectCommand: string; startupScript: string; expiresAt: string; node: { id: string; name: string; region: string } };
+type CreatedNode = InstallationCommands & { instances: NyanpassRow[] };
 type CreatedNyanpass = { instance: NyanpassRow };
 type UpdatedNode = { node: NodeRow; events: EventRow[]; warnings: string[] };
 type UpdatedNyanpass = { instance: NyanpassRow; event: EventRow };
@@ -64,7 +66,10 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
   const [showNyanpass, setShowNyanpass] = useState(false);
   const [editingNode, setEditingNode] = useState<NodeRow | null>(null);
   const [editingNyanpass, setEditingNyanpass] = useState<NyanpassRow | null>(null);
-  const [created, setCreated] = useState<CreatedNode | null>(null);
+  const [created, setCreated] = useState<InstallationCommands | null>(null);
+  const [installationTab, setInstallationTab] = useState<'startup' | 'download'>('startup');
+  const [loadingInstallationId, setLoadingInstallationId] = useState<string | null>(null);
+  const installationRequest = useRef(0);
   const [createdNyanpass, setCreatedNyanpass] = useState<CreatedNyanpass | null>(null);
   const [nodeNyanpass, setNodeNyanpass] = useState<NyanpassDraft[]>([emptyNyanpassDraft()]);
   const [error, setError] = useState('');
@@ -189,6 +194,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
       if (!response.ok) { setError(result.error ?? '创建失败'); return; }
       refreshSequence.current += 1;
       setCreated(result);
+      setInstallationTab('startup');
       setCopyFeedback('idle');
       setStartupCopyFeedback('idle');
       setNyanpass((current) => [...result.instances, ...current]);
@@ -197,7 +203,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
         recordV4: String(form.get('recordV4') || '') || null, recordV6: String(form.get('recordV6') || '') || null,
         lastSeenAt: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         provider: 'alidns', domainName: String(form.get('domainName') || '') || null,
-        syncEnabled: true, agentVersion: null, lastTaskPollAt: null, nyanpassStatus: 'awaiting', provisionLastCompletedStep: null,
+        syncEnabled: true, agentVersion: null, lastTaskPollAt: null, nyanpassStatus: 'awaiting', provisionLastCompletedStep: null, installationAvailable: true,
       }, ...current]);
     } catch {
       setError('无法确认节点是否创建成功，请刷新页面核对后再操作。');
@@ -300,12 +306,14 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
 
   function showAgentUpgrade(node: NodeRow) {
     if (saving) return;
+    installationRequest.current += 1;
+    setLoadingInstallationId(null);
     const resumeCreatedInstance = Boolean(showNyanpass && createdNyanpass?.instance.nodeId === node.id);
     setShowCreate(false); setShowNyanpass(false); setEditingNode(null); setEditingNyanpass(null);
     setCreated(null); setNodeNyanpass([emptyNyanpassDraft()]);
     if (!resumeCreatedInstance) setCreatedNyanpass(null);
     setError(''); setEditError('');
-    setAgentUpgrade({ nodeId: node.id, nodeName: node.name, command: `( tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl --proto '=https' --proto-redir '=https' -fsSL '${PROBE_INSTALLER_URL}' -o "$tmp" && test "$(sha256sum "$tmp" | awk '{print $1}')" = '${PROBE_INSTALLER_SHA256}' && grep -Fq '# PulseDNS / 原 DDNS 脚本兼容安装器' "$tmp" && bash -n "$tmp" && bash "$tmp" agent-upgrade )` });
+    setAgentUpgrade({ nodeId: node.id, nodeName: node.name, command: buildAgentUpgradeCommand() });
     setCopyFeedback('idle');
   }
 
@@ -405,6 +413,31 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
     setNodeNyanpass((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, [field]: value } : item));
   }
 
+  async function openNodeInstallation(node: NodeRow) {
+    if (!node.installationAvailable) { showAgentUpgrade(node); return; }
+    const requestId = ++installationRequest.current;
+    setLoadingInstallationId(node.id);
+    setNodeDeleteError('');
+    try {
+      const response = await fetchWithTimeout(apiPath('/api/admin/nodes'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'installation', id: node.id }),
+      });
+      const result = await response.json() as InstallationCommands & { error?: string };
+      if (requestId !== installationRequest.current) return;
+      if (!response.ok) { setNodeDeleteError(result.error ?? '无法取得安装命令'); return; }
+      setCreated(result);
+      setInstallationTab('startup');
+      setCopyFeedback('idle');
+      setStartupCopyFeedback('idle');
+      setShowCreate(true);
+    } catch {
+      if (requestId === installationRequest.current) setNodeDeleteError('安装命令读取失败，请重试');
+    } finally {
+      if (requestId === installationRequest.current) setLoadingInstallationId(null);
+    }
+  }
+
   async function copyInstallCommand(command: string) {
     setCopyFeedback('copying');
     setCopyFeedback(await copyText(command) ? 'success' : 'error');
@@ -416,6 +449,8 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
   }
 
   function closeModal() {
+    installationRequest.current += 1;
+    setLoadingInstallationId(null);
     if (saving) return;
     setShowCreate(false); setCreated(null); setNodeNyanpass([emptyNyanpassDraft()]); setError(''); setCopyFeedback('idle'); setStartupCopyFeedback('idle');
   }
@@ -432,6 +467,8 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
     setEditingNyanpass(null); setEditError('');
   }
   function openCreateModal() {
+    installationRequest.current += 1;
+    setLoadingInstallationId(null);
     if (saving) return;
     setShowNyanpass(false); setEditingNode(null); setEditingNyanpass(null); setAgentUpgrade(null);
     setCreated(null); setCreatedNyanpass(null); setNodeNyanpass([emptyNyanpassDraft()]);
@@ -439,12 +476,16 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
   }
   function openNyanpassModal() {
     if (saving) return;
+    installationRequest.current += 1;
+    setLoadingInstallationId(null);
     setShowCreate(false); setEditingNode(null); setEditingNyanpass(null); setAgentUpgrade(null);
     setCreated(null); setCreatedNyanpass(null); setNodeNyanpass([emptyNyanpassDraft()]);
     setError(''); setEditError(''); setCopyFeedback('idle'); setShowNyanpass(true);
   }
   function beginNodeEdit(node: NodeRow) {
     if (saving) return;
+    installationRequest.current += 1;
+    setLoadingInstallationId(null);
     setShowCreate(false); setShowNyanpass(false); setEditingNyanpass(null); setAgentUpgrade(null);
     setCreated(null); setCreatedNyanpass(null); setNodeNyanpass([emptyNyanpassDraft()]);
     setError(''); setCopyFeedback('idle'); setEditingNode(node); setEditError('');
@@ -452,6 +493,8 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
   function beginNyanpassEdit(instance: NyanpassRow) {
     if (saving) return;
     if (instance.status === 'uncertain' && !window.confirm('请先到 VPS 确认旧任务已停止。结果未知时重新同步可能重复安装；确认已经检查并继续修改吗？')) return;
+    installationRequest.current += 1;
+    setLoadingInstallationId(null);
     setShowCreate(false); setShowNyanpass(false); setEditingNode(null); setAgentUpgrade(null);
     setCreated(null); setCreatedNyanpass(null); setNodeNyanpass([emptyNyanpassDraft()]);
     setError(''); setCopyFeedback('idle'); setEditingNyanpass(instance); setEditError('');
@@ -476,7 +519,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
             onClick={() => setActiveView(item.id)}
           ><span aria-hidden="true">{item.icon}</span>{item.label}</a>)}
         </nav>
-        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.8.2 · {nodes.length} 个探针</small></div>
+        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.8.3 · {nodes.length} 个探针</small></div>
       </aside>
 
       <section className="workspace" inert={hasModal}>
@@ -496,14 +539,14 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
               <article><span className="metric-icon amber">!</span><div><small>已有地址上报</small><strong>{reported} <em>/ {nodes.length}</em></strong></div><mark className={nodes.length - reported ? 'warning' : ''}>{!nodes.length ? '暂无节点' : nodes.length - reported ? '等待首次上报' : '均已上报'}</mark></article>
             </section>
             <section className="grid-layout">
-              <NodesPanel nodes={nodes} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
+              <NodesPanel nodes={nodes} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
               <ActivityPanel events={events} now={now} limit={5} />
             </section>
           </>}
 
           {activeView === 'nodes' && <section className="view-page" aria-labelledby="nodes-view-title">
             <ViewIntro eyebrow="探针管理" title="所有探针节点" id="nodes-view-title" description="查看公网地址、阿里云 DNS 映射和最近一次地址上报。原脚本只在地址首次出现或变化时上报。" />
-            <NodesPanel nodes={nodes} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
+            <NodesPanel nodes={nodes} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
           </section>}
 
           {activeView === 'records' && <section className="view-page" aria-labelledby="records-view-title">
@@ -544,25 +587,35 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
                 <label className="nyanpass-check"><input type="checkbox" checked={instance.optimize} onChange={(event) => updateNodeNyanpass(index, 'optimize', event.target.checked)} />启用原脚本 OPTIMIZE=1</label>
               </div>)}<button type="button" className="ghost-button" disabled={nodeNyanpass.length >= 16} onClick={() => setNodeNyanpass((current) => [...current, emptyNyanpassDraft()])}>＋ 添加另一个实例</button></fieldset>
               <p className="form-hint">只用独立 <code>-o</code> 识别出口，没有 <code>-o</code> 就是入口；命令中的其他官方安全参数会原样带入。原始凭据仅以密文暂存，对接命令中的节点参数属于一次性 Bearer 凭据，请勿公开或转发。</p>
-              <p className="form-hint">可选的 AWS User data 启动器只绑定一台实例，不能作为 ASG 或 Launch Template 的共享 User data；批量部署时请为每台实例分别创建节点。</p>
+              <p className="form-hint">开机脚本只绑定一台实例，不能作为 ASG 或 Launch Template 的共享 User data；批量部署时请为每台实例分别创建节点。</p>
               {error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '创建中…' : '创建节点并生成对接命令'}</button>
             </form></>
           : <>
-            <p className="eyebrow cyan">节点已创建</p>
-            <h2 id="create-title">复制探针对接命令</h2>
-            <p className="modal-intro">在目标 VPS 的 root Bash 中执行下面这一行。公共脚本只接收该节点的专属参数，配置下载和安装进度会直接显示在终端；失败后原样重跑即可继续。</p>
-            <pre className="install-command">{created.connectCommand}</pre>
-            <button type="button" className="primary-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(created.connectCommand)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制对接命令' : '复制探针对接命令'}</button>
-            {copyFeedback === 'success' && <p className="form-success" role="status">对接命令已复制，请直接粘贴到目标 VPS 的 root Bash 执行。</p>}
-            {copyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整对接命令；剪贴板内容没有更新。</p>}
-            <details className="advanced-install">
-              <summary>AWS User data（可选断网重试）</summary>
-              <p className="form-hint">需要在首次开机自动执行时使用。它会注册 cloud-init per-boot 重试并复用 <code>/root</code> 下的缓存；普通 VPS 手动对接不需要复制这一段。</p>
-              <pre className="install-command">{created.startupScript}</pre>
-              <button type="button" className="ghost-button wide" disabled={startupCopyFeedback === 'copying'} onClick={() => copyStartupScript(created.startupScript)}>{startupCopyFeedback === 'copying' ? '正在复制…' : startupCopyFeedback === 'success' ? '已复制 User data' : '复制 AWS User data'}</button>
-              {startupCopyFeedback === 'success' && <p className="form-success" role="status">已按 LF 换行复制，可以直接粘贴到云厂商 User data。</p>}
-              {startupCopyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整 User data；剪贴板内容没有更新。</p>}
-            </details>
+            <p className="eyebrow cyan">{created.node.name}</p>
+            <h2 id="create-title">安装命令</h2>
+            <p className="installation-expiry" role="status">{now >= Date.parse(created.expiresAt) ? '下载凭据已过期，请关闭后重新打开安装命令' : `下载凭据有效至 ${new Date(created.expiresAt).toLocaleString()}`}</p>
+            <div className="installation-tabs" role="tablist" aria-label="安装方式" onKeyDown={(event) => {
+              if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+              event.preventDefault();
+              const next = event.key === 'Home' ? 'startup' : event.key === 'End' ? 'download' : installationTab === 'startup' ? 'download' : 'startup';
+              setInstallationTab(next);
+              event.currentTarget.querySelector<HTMLButtonElement>(`#${next}-tab`)?.focus();
+            }}>
+              <button type="button" role="tab" id="startup-tab" tabIndex={installationTab === 'startup' ? 0 : -1} aria-selected={installationTab === 'startup'} aria-controls="installation-content" onClick={() => setInstallationTab('startup')}>开机脚本 · User data</button>
+              <button type="button" role="tab" id="download-tab" tabIndex={installationTab === 'download' ? 0 : -1} aria-selected={installationTab === 'download'} aria-controls="installation-content" onClick={() => setInstallationTab('download')}>下载并运行 · 一键命令</button>
+            </div>
+            <div id="installation-content" role="tabpanel" aria-labelledby={installationTab === 'startup' ? 'startup-tab' : 'download-tab'}>
+              <pre className="install-command installation-preview" tabIndex={0}>{installationTab === 'startup' ? created.startupScript : created.connectCommand}</pre>
+              {installationTab === 'startup' ? <>
+                <button type="button" className="primary-button wide" disabled={startupCopyFeedback === 'copying' || now >= Date.parse(created.expiresAt)} onClick={() => copyStartupScript(created.startupScript)}>{startupCopyFeedback === 'copying' ? '正在复制…' : startupCopyFeedback === 'success' ? '已复制开机脚本' : '复制开机脚本'}</button>
+                {startupCopyFeedback === 'success' && <p className="form-success" role="status">已复制完整 User data（LF 换行）</p>}
+                {startupCopyFeedback === 'error' && <p className="form-error" role="alert">复制失败，剪贴板内容没有更新</p>}
+              </> : <>
+                <button type="button" className="primary-button wide" disabled={copyFeedback === 'copying' || now >= Date.parse(created.expiresAt)} onClick={() => copyInstallCommand(created.connectCommand)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制一键命令' : '复制下载并运行命令'}</button>
+                {copyFeedback === 'success' && <p className="form-success" role="status">已复制完整下载、校验和执行命令</p>}
+                {copyFeedback === 'error' && <p className="form-error" role="alert">复制失败，剪贴板内容没有更新</p>}
+              </>}
+            </div>
             <button type="button" className="ghost-button wide" onClick={closeModal} disabled={saving}>完成</button>
           </>}
         </section>
@@ -612,7 +665,20 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
         </section>
       </div>}
 
-      {agentUpgrade && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setAgentUpgrade(null); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="agent-upgrade-title"><button className="modal-close" onClick={() => setAgentUpgrade(null)} aria-label="关闭" disabled={saving}>×</button><p className="eyebrow cyan">一次性兼容升级</p><h2 id="agent-upgrade-title">升级 {agentUpgrade.nodeName} 的探针</h2>{agentUpgradeReady ? <><p className="form-success" role="status">已检测到 v{upgradedAgentNode?.agentVersion} 探针正在领取任务，可以返回同步。</p><button type="button" className="primary-button wide" onClick={() => { setAgentUpgrade(null); if (createdNyanpass) setShowNyanpass(true); }}>返回同步</button></> : <><p className="modal-intro">旧探针没有任务领取功能。只需在该 VPS 执行一次下面的命令，原节点令牌和 DDNS 配置会保留；窗口会自动检测升级结果。</p><pre className="install-command">{agentUpgrade.command}</pre><button type="button" className="primary-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(agentUpgrade.command)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制升级命令' : '复制探针升级命令'}</button>{copyFeedback === 'success' && <p className="form-success" role="status">复制成功，请在目标 VPS 执行；检测到任务心跳后会自动提示。</p>}{copyFeedback === 'error' && <p className="form-error" role="alert">浏览器拒绝自动复制，请手动选中上方完整命令复制。</p>}</>}<button type="button" className="ghost-button wide" onClick={() => { if (!agentUpgradeReady) setCreatedNyanpass(null); setAgentUpgrade(null); }} disabled={saving}>{agentUpgradeReady ? '关闭' : '稍后完成'}</button></section></div>}
+      {agentUpgrade && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setAgentUpgrade(null); }}>
+        <section className="modal" role="dialog" aria-modal="true" aria-labelledby="agent-upgrade-title">
+          <button className="modal-close" onClick={() => setAgentUpgrade(null)} aria-label="关闭" disabled={saving}>×</button>
+          <p className="eyebrow cyan">探针升级</p><h2 id="agent-upgrade-title">升级 {agentUpgrade.nodeName} 的探针</h2>
+          {agentUpgradeReady && <p className="form-success" role="status">当前 v{upgradedAgentNode?.agentVersion} 探针正在领取任务。</p>}
+          <p className="modal-intro">原节点令牌和 DDNS 配置会保留，不会重新安装 Nyanpass。</p>
+          <pre className="install-command">{agentUpgrade.command}</pre>
+          <button type="button" className="primary-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(agentUpgrade.command)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制升级命令' : '复制探针升级命令'}</button>
+          {copyFeedback === 'success' && <p className="form-success" role="status">复制成功</p>}
+          {copyFeedback === 'error' && <p className="form-error" role="alert">复制失败，剪贴板内容没有更新</p>}
+          {agentUpgradeReady && createdNyanpass && <button type="button" className="primary-button wide" onClick={() => { setAgentUpgrade(null); setShowNyanpass(true); }}>返回同步</button>}
+          <button type="button" className="ghost-button wide" onClick={() => { if (!agentUpgradeReady) setCreatedNyanpass(null); setAgentUpgrade(null); }} disabled={saving}>关闭</button>
+        </section>
+      </div>}
     </main>
   );
 }
@@ -625,7 +691,7 @@ function ViewIntro({ eyebrow, title, id, description }: { eyebrow: string; title
   </header>;
 }
 
-function NodesPanel({ nodes, now, onCreate, onEdit, onRemove, removingNodeId, deleteError, notice }: { nodes: NodeRow[]; now: number; onCreate: () => void; onEdit: (node: NodeRow) => void; onRemove: (node: NodeRow) => void; removingNodeId: string | null; deleteError: string; notice: string }) {
+function NodesPanel({ nodes, now, onCreate, onEdit, onRemove, onInstall, loadingInstallationId, removingNodeId, deleteError, notice }: { nodes: NodeRow[]; now: number; onCreate: () => void; onEdit: (node: NodeRow) => void; onRemove: (node: NodeRow) => void; onInstall: (node: NodeRow) => void; loadingInstallationId: string | null; removingNodeId: string | null; deleteError: string; notice: string }) {
   return <article className="panel nodes-panel">
     <div className="panel-heading"><div><h3>地址上报</h3><p>原探针仅在公网地址首次出现或变化时发送</p></div><button type="button" className="text-button" onClick={onCreate}>添加探针 →</button></div>
     {deleteError && <p className="panel-error" role="alert">{deleteError}</p>}
@@ -638,7 +704,9 @@ function NodesPanel({ nodes, now, onCreate, onEdit, onRemove, removingNodeId, de
         const sshChanged = ['failed', 'uncertain'].includes(node.nyanpassStatus) && node.provisionLastCompletedStep === 'ssh';
         const removing = removingNodeId === node.id;
         const statusLabel = bootstrapStalled ? 'User data 未执行' : bootstrapLocked ? bootstrapStatusLabel(node.nyanpassStatus) : hasReported ? '已上报' : '等待首次上报';
-        return <tr key={node.id}><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}</span><small>{node.region}</small></td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported && !bootstrapLocked ? 'badge online' : 'badge warning'}>{statusLabel}</span>{bootstrapStalled && <small className="sync-error" role="alert">检查 User data、CRLF 和出站网络</small>}{node.provisionLastCompletedStep && bootstrapLocked && <small>最后完成：{provisionStepLabel(node.provisionLastCompletedStep)}</small>}{sshChanged && <small className="sync-error" role="alert">SSH 凭据已变更，请使用新密码核查</small>}</td><td><div className="row-actions"><button type="button" className="edit-link" disabled={removing} onClick={() => onEdit(node)}>修改</button><button type="button" className="danger-link" disabled={removing} onClick={() => onRemove(node)}>{removing ? '删除中…' : '删除节点'}</button></div></td></tr>;
+        return <tr key={node.id}><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}</span><small>{node.region}</small></td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported && !bootstrapLocked ? 'badge online' : 'badge warning'}>{statusLabel}</span>{bootstrapStalled && <small className="sync-error" role="alert">检查 User data、CRLF 和出站网络</small>}{node.provisionLastCompletedStep && bootstrapLocked && <small>最后完成：{provisionStepLabel(node.provisionLastCompletedStep)}</small>}{sshChanged && <small className="sync-error" role="alert">SSH 凭据已变更，请使用新密码核查</small>}</td><td><div className="row-actions">
+          <button type="button" className="edit-link" disabled={removing || loadingInstallationId !== null} onClick={() => onInstall(node)}>{loadingInstallationId === node.id ? '读取中…' : node.installationAvailable ? '安装命令' : '升级命令'}</button>
+          <button type="button" className="edit-link" disabled={removing} onClick={() => onEdit(node)}>修改</button><button type="button" className="danger-link" disabled={removing || loadingInstallationId === node.id} onClick={() => onRemove(node)}>{removing ? '删除中…' : '删除节点'}</button></div></td></tr>;
       })}</tbody></table> : <EmptyState onCreate={onCreate} />}
     </div>
   </article>;
@@ -686,7 +754,7 @@ function ActivityPanel({ events, now, limit, expanded = false }: { events: Event
         <div className="filter-summary" aria-live="polite"><span>{matchingEvents.length} 条匹配</span>{hasFilters && <button type="button" onClick={clearFilters}>清除筛选</button>}</div>
       </div>
       <div className="activity-list">{visibleEvents.length ? visibleEvents.map((item) => <div className="activity-row" key={item.id}><span className={item.level === 'error' ? 'activity-check error' : 'activity-check'}>{item.level === 'error' ? '!' : '✓'}</span><div><strong>{item.message}</strong><p>{item.nodeName} · {eventKindLabel(item.kind)}</p></div><time title={new Date(item.createdAt).toLocaleString()}>{relativeTime(item.createdAt, now)}</time></div>) : <p className="empty-activity">{events.length && hasFilters ? '没有符合当前筛选条件的事件。' : '创建第一个节点后，DNS 同步与探针事件会出现在这里。'}</p>}</div>
-      <div className="security-note"><span>◇</span><div><strong>独立探针凭据</strong><p>节点下载直链只显示一次；数据库仅保存下载 Token 的 SHA-256 摘要，开机凭据加密暂存并在成功后擦除。</p></div></div>
+      <div className="security-note"><span>◇</span><div><strong>独立探针凭据</strong><p>未完成安装的节点可重新取得安装命令。下载凭据和开机凭据加密暂存，安装成功后擦除；已安装节点保留升级命令。</p></div></div>
     </div>
   </article>;
 }

@@ -1,7 +1,7 @@
 import { PROBE_INSTALLER_SHA256, PROBE_INSTALLER_URL } from '@/lib/install-command';
 
 export function buildNodeStartupLauncher(nodeId: string, installUrl: string, generation: number) {
-  const scriptPath = `/root/pulsedns_${nodeId}_installer.sh`;
+  const scriptPath = `/root/pulsedns_${nodeId}_entrypoint.sh`;
   const configPath = `/root/pulsedns_${nodeId}_bootstrap.config`;
   const stateDir = `/var/lib/pulsedns-bootstrap-${nodeId}`;
   const perBootPath = `/var/lib/cloud/scripts/per-boot/pulsedns-bootstrap-${nodeId}.sh`;
@@ -101,6 +101,7 @@ scrub_completed_bootstrap() {
   rm -f "$per_boot_path"
   for cached_userdata in /var/lib/cloud/instances/*/user-data.txt*; do
     [ -f "$cached_userdata" ] && [ ! -L "$cached_userdata" ] || continue
+    grep -Fq "$node_parameter" "$cached_userdata" || continue
     if ! printf '' 2>/dev/null > "$cached_userdata"; then
       echo "[PulseDNS] 无法清空 cloud-init 本地缓存：$cached_userdata"
       continue
