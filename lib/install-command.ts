@@ -25,8 +25,8 @@ export function isBbrProfile(value: unknown): value is BbrProfile {
   return typeof value === 'string' && (BBR_PROFILES as readonly string[]).includes(value);
 }
 
-export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/a22513d836cd8c69213825bf191bfe26527e143f/public/install.sh';
-export const PROBE_INSTALLER_SHA256 = 'f353a03d2dc672f18455c65860b39bb0071bbc01fe7975395bb713ce88923179';
+export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/661ef2da011e57ccf6d91518738a7fb07cfd8853/public/install.sh';
+export const PROBE_INSTALLER_SHA256 = 'c39616fbeec961dfa259bfc5503faa3f4b8025a0d94d0d3d0127ec2c0d63a87d';
 export const MAX_CLOUD_LAUNCHER_BYTES = 15 * 1024;
 export const MAX_BOOTSTRAP_RESPONSE_BYTES = 64 * 1024;
 
