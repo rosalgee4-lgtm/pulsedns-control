@@ -14,6 +14,8 @@ SERVER_URL="${SERVER_URL:-}"
 TOKEN="${TOKEN:-}"
 ROOT_PASSWORD="${ROOT_PASSWORD:-}"
 APPLY_BBR=""
+# 整机 BBR/sysctl 配置：c6in = 10MB 缓冲（默认），c5in = 50MB 缓冲。由面板生成的命令指定。
+BBR_PROFILE="c6in"
 CHECK_INTERVAL=10
 LOG_FILE="/var/log/ddns-monitor.log"
 CACHE_V4="/tmp/.ddns_last_ipv4"
@@ -687,7 +689,7 @@ run_probe_bootstrap() {
     set +e
     set +m
     PULSEDNS_PROVISION_STAGE_FILE="$BOOTSTRAP_STAGE_FILE" \
-        setsid bash "$BOOTSTRAP_INSTALLER_PATH" provision --provision-config "$BOOTSTRAP_RUN_CONFIG" --bbr '1' &
+        setsid bash "$BOOTSTRAP_INSTALLER_PATH" provision --provision-config "$BOOTSTRAP_RUN_CONFIG" --bbr '1' --bbr-profile "$BBR_PROFILE" &
     BOOTSTRAP_PROVISION_PID=$!
     wait "$BOOTSTRAP_PROVISION_PID"
     provision_status=$?
@@ -861,9 +863,23 @@ write_nyanpass_start_script() {
     fi
 }
 
+valid_bbr_profile() {
+    [[ "$1" == "c5in" || "$1" == "c6in" ]]
+}
+
 configure_bbr() {
+    local net_buffer_max="" tcp_buffer=""
     need_root
-    log INFO "配置 BBR + fq..."
+    valid_bbr_profile "$BBR_PROFILE" || fail "BBR 优化只能为 c5in 或 c6in"
+    if [[ "$BBR_PROFILE" == "c5in" ]]; then
+        log INFO "配置 BBR + fq（AWS c5in）..."
+        net_buffer_max="50000000"
+        tcp_buffer="4096 190054 50000000"
+    else
+        log INFO "配置 BBR + fq（AWS SG c6in.large）..."
+        net_buffer_max="10000000"
+        tcp_buffer="4096 131072 10000000"
+    fi
 
     if [[ -f /etc/sysctl.conf ]]; then
         cp /etc/sysctl.conf "/etc/sysctl.conf.bak.$(date +%s)" 2>/dev/null || true
@@ -871,7 +887,7 @@ configure_bbr() {
 
     modprobe tcp_bbr 2>/dev/null || true
 
-    cat > /etc/sysctl.conf <<'SYSCTL_EOF'
+    cat > /etc/sysctl.conf <<SYSCTL_EOF
 fs.file-max = 6815744
 net.ipv4.tcp_no_metrics_save=1
 net.ipv4.tcp_ecn=0
@@ -883,10 +899,10 @@ net.ipv4.tcp_fack=1
 net.ipv4.tcp_window_scaling=1
 net.ipv4.tcp_adv_win_scale=1
 net.ipv4.tcp_moderate_rcvbuf=1
-net.core.rmem_max=10000000
-net.core.wmem_max=10000000
-net.ipv4.tcp_rmem=4096 131072 10000000
-net.ipv4.tcp_wmem=4096 131072 10000000
+net.core.rmem_max=${net_buffer_max}
+net.core.wmem_max=${net_buffer_max}
+net.ipv4.tcp_rmem=${tcp_buffer}
+net.ipv4.tcp_wmem=${tcp_buffer}
 net.ipv4.udp_rmem_min=8192
 net.ipv4.udp_wmem_min=8192
 net.ipv4.ip_forward=1
@@ -1756,7 +1772,11 @@ if [[ $# -gt 0 ]]; then
 fi
 
 if [[ "$ACTION" == "probe" || "$ACTION" == "bootstrap" ]]; then
-    [[ $# -eq 1 ]] || fail "用法：bash install.sh probe '<节点专属参数>'"
+    [[ $# -eq 1 || $# -eq 2 ]] || fail "用法：bash install.sh probe '<节点专属参数>' [c5in|c6in]"
+    if [[ $# -eq 2 ]]; then
+        valid_bbr_profile "$2" || fail "BBR 优化只能为 c5in 或 c6in"
+        BBR_PROFILE="$2"
+    fi
     bootstrap_node "$1"
     exit 0
 fi
@@ -1782,6 +1802,12 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || fail "--bbr 缺少参数"
             [[ "$2" == "1" ]] || fail "原脚本 Web 一键安装的 --bbr 只能为 1"
             APPLY_BBR="$2"
+            shift 2
+            ;;
+        --bbr-profile)
+            [[ $# -ge 2 ]] || fail "--bbr-profile 缺少参数"
+            valid_bbr_profile "$2" || fail "BBR 优化只能为 c5in 或 c6in"
+            BBR_PROFILE="$2"
             shift 2
             ;;
         --provision-config)

@@ -68,7 +68,8 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   const nodeId = cleanText(body?.nodeId, 64);
   const name = cleanText(body?.name, 48);
-  const optimize = body?.optimize === true || body?.optimize === 'on';
+  // OPTIMIZE 已移除：一律传 0，系统参数只由节点的 c5in / c6in BBR 选项控制。
+  const optimize = false;
   const parsedCommand = parseOfficialNyanpassCommand(body?.command);
   if (!nodeId) return Response.json({ error: '请选择所属探针节点' }, { status: 400 });
   if (!validNyanpassServiceName(name)) return Response.json({ error: '实例名须为 1-48 位字母、数字、点、下划线或短横线，不能使用系统保留名称或单元后缀' }, { status: 400 });
@@ -132,7 +133,7 @@ export async function PATCH(request: Request) {
   const id = cleanText(body?.id, 64);
   const name = cleanText(body?.name, 48);
   const hasCommand = typeof body?.command === 'string' && body.command.trim().length > 0;
-  const optimize = body?.optimize === true || body?.optimize === 'on';
+  const optimize = false;
   const confirmUncertain = body?.confirmUncertain === 'checked';
   if (!id) return Response.json({ error: '缺少实例 ID' }, { status: 400 });
   if (!validNyanpassServiceName(name)) return Response.json({ error: '实例名须为 1-48 位字母、数字、点、下划线或短横线，不能使用系统保留名称或单元后缀' }, { status: 400 });
@@ -156,7 +157,6 @@ export async function PATCH(request: Request) {
     return Response.json({ error: '该实例没有可再次下发的凭据，请重新粘贴官方命令' }, { status: 400 });
   }
   if (name !== current.name) return Response.json({ error: '机器服务名创建后不可修改；如需换名，请新增实例，确认新服务正常后再移除旧登记' }, { status: 409 });
-  if (optimize !== current.optimize && !hasCommand) return Response.json({ error: '修改 OPTIMIZE 时请同时重新粘贴官方命令' }, { status: 400 });
   const [node] = await db.select({ id: nodes.id, name: nodes.name, nyanpassStatus: nodes.nyanpassStatus }).from(nodes).where(eq(nodes.id, current.nodeId)).limit(1);
   if (!node) return Response.json({ error: '所属节点不存在' }, { status: 404 });
   if (isBootstrapLocked(node.nyanpassStatus)) return Response.json({ error: '节点的开机预配尚未安全完成，不能修改实例配置' }, { status: 409 });

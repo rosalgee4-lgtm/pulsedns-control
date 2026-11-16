@@ -38,14 +38,17 @@ test('copy buttons await the result and expose success or failure', () => {
   assert.match(dashboard, /已复制完整 User data（LF 换行）/);
   assert.match(dashboard, /role="tablist" aria-label="安装方式"/);
   assert.match(dashboard, /User data 未执行/);
-  assert.match(dashboard, /不能作为 ASG 或 Launch Template 的共享 User data/);
+  assert.match(dashboard, /开机脚本可以写入 AWS 启动模板/);
+  assert.match(dashboard, /不要在 ASG 中同时运行多台/);
   assert.match(dashboard, /剪贴板内容没有更新|手动选中[^。]{0,30}命令/);
   assert.doesNotMatch(dashboard, /onClick=\{\(\) => navigator\.clipboard\.writeText/);
 });
 
 test('generated cloud launcher verifies the fixed installer and passes one node parameter', () => {
   const nodeParameter = 'http://203.0.113.9:39900/0123456789abcdef0123456789abcdef/api/v1/bootstrap/11111111-2222-4333-8444-555555555555/pbs_abc123';
-  const launcher = buildNodeStartupLauncher('11111111-2222-4333-8444-555555555555', nodeParameter, 1);
+  const launcher = buildNodeStartupLauncher('11111111-2222-4333-8444-555555555555', nodeParameter, 1, 'c5in');
+  assert.match(launcher, /^bbr_profile='c5in'$/m);
+  assert.match(launcher, /probe "\$node_parameter" "\$bbr_profile"/);
   assert.match(launcher, /^#!\/bin\/sh\nset -u\n/);
   assert.match(launcher, /PATH=\/usr\/local\/sbin:\/usr\/local\/bin:\/usr\/sbin:\/usr\/bin:\/sbin:\/bin/);
   assert.match(launcher, /pulsedns-bootstrap-launcher\.log/);
@@ -230,7 +233,7 @@ exit 0
   await writeExecutable(join(mockBin, 'id'), '#!/bin/sh\nprintf "0\\n"\n');
   await writeExecutable(join(mockBin, 'sha256sum'), '#!/bin/sh\nprintf "%s  %s\\n" "$MOCK_INSTALLER_SHA256" "$1"\n');
 
-  const generated = buildNodeStartupLauncher(nodeId, nodeParameter, 1);
+  const generated = buildNodeStartupLauncher(nodeId, nodeParameter, 1, 'c6in');
   const launcher = generated
     .replace(
       'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',

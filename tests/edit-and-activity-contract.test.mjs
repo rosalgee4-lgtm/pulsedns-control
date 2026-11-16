@@ -31,7 +31,8 @@ test('node editing is authenticated, constrained, audited, and refreshes current
   assert.match(patch, /if \(!user\).*status: 401/);
   assert.match(patch, /if \(!id\).*status: 400/);
   assert.match(patch, /if \(!current\).*status: 404/);
-  assert.match(patch, /db\.update\(nodes\)\.set\(\{ name, region, domainName, recordV4, recordV6, syncEnabled, updatedAt: now \}\)/);
+  assert.match(patch, /db\.update\(nodes\)\.set\(\{ name, domainName, recordV4, recordV6, syncEnabled, updatedAt: now \}\)/);
+  assert.match(patch, /domainRegistered\(db, domainName\)/);
   assert.doesNotMatch(patch, /\.set\(\{[^}]*tokenHash/);
   assert.doesNotMatch(patch, /\.set\(\{[^}]*(?:ipv4|ipv6|lastSeenAt|createdAt)/);
   assert.match(patch, /syncAliDnsRecord\(domainName, target\.record, target\.type, target\.ip\)/);
@@ -132,13 +133,13 @@ test('browser node DTO excludes credential hashes and internal operation identit
   assert.doesNotMatch(dashboard, /tokenHash/);
 });
 
-test('live refresh updates full node report state and edit does not silently ignore OPTIMIZE', () => {
+test('live refresh updates full node report state and OPTIMIZE is always off', () => {
   assert.match(nyanpassRoute, /const nodeRows = await db\.select\(\)\.from\(nodes\)/);
   assert.match(nodeResponse, /lastSeenAt: node\.lastSeenAt\?\.toISOString\(\) \?\? null/);
   assert.match(nodeResponse, /provisionLastCompletedStep: node\.provisionLastCompletedStep/);
   assert.match(dashboard, /setNodes\(refreshedNodes\)/);
-  assert.match(nyanpassRoute, /optimize !== current\.optimize && !hasCommand/);
-  assert.match(dashboard, /只修改 OPTIMIZE 开关时也必须重新粘贴官方命令/);
+  assert.match(nyanpassRoute, /const optimize = false;/);
+  assert.doesNotMatch(dashboard, /name="optimize"|OPTIMIZE=1/);
   assert.match(dashboard, /states\[instance\.status\] \?\? \{ label: '未知状态'/);
   assert.match(dashboard, /provisioning \? \(node \? bootstrapStatusLabel\(node\.nyanpassStatus\)/);
   assert.match(dashboard, /fetchWithTimeout/);

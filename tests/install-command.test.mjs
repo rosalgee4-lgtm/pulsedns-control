@@ -46,7 +46,8 @@ function buildConfig(overrides = {}) {
 
 test('one-click command downloads a pinned script, checks it, then executes with the node parameter', () => {
   const installUrl = `${origin}/api/v1/bootstrap/${nodeId}/pbs_${'a'.repeat(64)}`;
-  const connectCommand = buildNodeConnectCommand(installUrl);
+  const connectCommand = buildNodeConnectCommand(installUrl, 'c5in');
+  assert.ok(connectCommand.includes(`probe '${installUrl}' 'c5in'`));
   assert.ok(connectCommand.includes(PROBE_INSTALLER_URL));
   assert.ok(connectCommand.includes(PROBE_INSTALLER_SHA256));
   assert.match(connectCommand, /set -eu; tmp="\$\(mktemp\)"/);
@@ -76,7 +77,7 @@ if [ "$SCENARIO" = checksum-failure ]; then echo checksum-FAILED >&2; exit 1; fi
 `, { mode: 0o700 });
     writeFileSync(join(root, 'bash'), '#!/bin/sh\nprintf "%s\\n" "$@" > "$MOCK_CALLS"\n', { mode: 0o700 });
     for (const [command, args] of [
-      [buildNodeConnectCommand(nodeParameter), ['probe', nodeParameter]],
+      [buildNodeConnectCommand(nodeParameter, 'c6in'), ['probe', nodeParameter, 'c6in']],
       [buildAgentUpgradeCommand(), ['agent-upgrade']],
     ]) {
       for (const scenario of ['curl-failure', 'checksum-failure', 'success']) {
@@ -129,8 +130,9 @@ test('bootstrap endpoint payload is bounded configuration data rather than gener
     '2',
   ]);
   assert.deepEqual(fields.slice(16), [
+    // OPTIMIZE 已移除：即使旧配置里保存过 optimize=true，也一律传 0。
     'tenant-in', '0', '-t inbound-token -u https://ny.example.test',
-    'tenant-out', '1', '-o -t outbound-token -u https://ny.example.test --ws-port 1145',
+    'tenant-out', '0', '-o -t outbound-token -u https://ny.example.test --ws-port 1145',
   ]);
 });
 

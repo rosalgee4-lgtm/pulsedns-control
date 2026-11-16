@@ -1,9 +1,9 @@
-import { desc, eq } from 'drizzle-orm';
+import { asc, desc, eq } from 'drizzle-orm';
 import { requireChatGPTUser } from '@/app/chatgpt-auth';
 import Dashboard from './dashboard';
 import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
-import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
+import { agentTasks, domains, events, nodes, nyanpassInstances } from '@/db/schema';
 import { nodeResponse } from '@/lib/node-response';
 import { expireProvisionAttempts } from '@/lib/provision-lifecycle';
 import { pruneEvents } from '@/lib/event-retention';
@@ -23,6 +23,7 @@ async function AuthenticatedDashboard() {
   await expireProvisionAttempts(db, new Date());
   await pruneEvents(db).catch(() => undefined);
   const nodeRows = await db.select().from(nodes).orderBy(desc(nodes.createdAt));
+  const domainRows = await db.select().from(domains).orderBy(asc(domains.name));
   const eventRows = await db.select({
     id: events.id,
     nodeId: events.nodeId,
@@ -59,6 +60,7 @@ async function AuthenticatedDashboard() {
     basePath={basePath}
     user={{ name: user.displayName, email: user.email }}
     initialNodes={nodeRows.map(nodeResponse)}
+    initialDomains={domainRows.map((domain) => ({ name: domain.name, createdAt: domain.createdAt.toISOString() }))}
     initialEvents={eventRows.map((event) => ({ ...event, createdAt: event.createdAt.toISOString(), nodeName: event.nodeName ?? '已删除节点' }))}
     initialNyanpass={nyanpassRows.map((instance) => ({
       id: instance.id,

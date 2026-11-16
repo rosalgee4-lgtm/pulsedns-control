@@ -82,6 +82,10 @@ const schemaStatements = [
     FOREIGN KEY (node_id) REFERENCES nodes(id) ON UPDATE no action ON DELETE cascade,
     FOREIGN KEY (instance_id) REFERENCES nyanpass_instances(id) ON UPDATE no action ON DELETE cascade
   )`,
+  `CREATE TABLE IF NOT EXISTS domains (
+    name TEXT PRIMARY KEY NOT NULL,
+    created_at INTEGER NOT NULL
+  )`,
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_token_hash ON nodes(token_hash)',
   'CREATE INDEX IF NOT EXISTS idx_nodes_last_seen_at ON nodes(last_seen_at)',
   'CREATE INDEX IF NOT EXISTS idx_events_node_created ON events(node_id, created_at)',
@@ -115,6 +119,10 @@ const conflictedDnsOwners = `WITH ranked_v4 AS (
 SELECT id FROM ranked_v4 WHERE owner_rank > 1
 UNION
 SELECT id FROM ranked_v6 WHERE owner_rank > 1`;
+
+// 升级时把现有节点已经填写的主域名导入「域名」列表。
+const importNodeDomains = `INSERT OR IGNORE INTO domains (name, created_at)
+  SELECT DISTINCT domain_name, CAST(strftime('%s', 'now') AS INTEGER) * 1000 FROM nodes WHERE domain_name IS NOT NULL AND domain_name <> ''`;
 
 const dnsOwnershipCleanupStatements = [
   `INSERT INTO events (node_id, level, kind, message, created_at)
@@ -168,6 +176,7 @@ async function initializeSchema() {
     if (!nyanpassColumns.some((column) => column.name === 'sync_error')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN sync_error TEXT');
     if (!nyanpassColumns.some((column) => column.name === 'bootstrap_generation')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN bootstrap_generation INTEGER');
     db.exec(`UPDATE nodes SET provider = 'alidns' WHERE provider = 'cloudflare'; UPDATE nodes SET nyanpass_status = 'uncertain', provision_generation = CASE WHEN provision_generation < 1 THEN 1 ELSE provision_generation END WHERE nyanpass_status = 'provisioning' AND provision_attempt_id IS NULL; UPDATE nodes SET bootstrap_download_expires_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 1800000 WHERE bootstrap_download_token_hash IS NOT NULL AND bootstrap_download_expires_at IS NULL; UPDATE nyanpass_instances SET bootstrap_generation = 1 WHERE config_revision = 0 AND status IN ('bootstrap', 'uncertain') AND bootstrap_generation IS NULL; UPDATE nyanpass_instances SET status = 'legacy' WHERE status = '等待安装';`);
+    db.exec(importNodeDomains);
     db.exec(`${dnsOwnershipCleanupStatements.join(';\n')};`);
     db.exec(`${taskIndexStatements.join(';\n')}; PRAGMA optimize;`);
     return;
@@ -213,6 +222,7 @@ async function initializeSchema() {
   await db.prepare("UPDATE nodes SET bootstrap_download_expires_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 1800000 WHERE bootstrap_download_token_hash IS NOT NULL AND bootstrap_download_expires_at IS NULL").run();
   await db.prepare("UPDATE nyanpass_instances SET bootstrap_generation = 1 WHERE config_revision = 0 AND status IN ('bootstrap', 'uncertain') AND bootstrap_generation IS NULL").run();
   await db.prepare("UPDATE nyanpass_instances SET status = 'legacy' WHERE status = '等待安装'").run();
+  await db.prepare(importNodeDomains).run();
   await db.batch(dnsOwnershipCleanupStatements.map((statement) => db.prepare(statement)));
   await db.batch(taskIndexStatements.map((statement) => db.prepare(statement)));
   await db.prepare('PRAGMA optimize').run();

@@ -138,7 +138,8 @@ export async function GET(request: Request) {
         role: task.role,
         panelUrl: task.panelUrl,
         clientToken,
-        optimize: task.optimize,
+        // OPTIMIZE 已移除：一律传 0，系统参数只由节点的 c5in / c6in BBR 选项控制。
+        optimize: false,
         release: nyanpassRelease,
       },
     },

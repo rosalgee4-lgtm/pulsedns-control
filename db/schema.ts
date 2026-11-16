@@ -38,6 +38,12 @@ export const nodes = sqliteTable('nodes', {
   uniqueIndex('idx_nodes_bootstrap_download_token_hash').on(table.bootstrapDownloadTokenHash),
 ]);
 
+// 阿里云主域名：在「域名」页面手动添加，添加节点时从中选择。
+export const domains = sqliteTable('domains', {
+  name: text('name').primaryKey(),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+});
+
 export const events = sqliteTable('events', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   nodeId: text('node_id').notNull().references(() => nodes.id, { onDelete: 'cascade' }),

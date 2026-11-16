@@ -30,7 +30,8 @@ test('probe action downloads bounded configuration and runs the fixed installer 
   const bootstrap = body('bootstrap_node');
   const config = body('load_bootstrap_config');
   const installer = body('valid_probe_installer');
-  assert.match(source, /if \[\[ "\$ACTION" == "probe" \|\| "\$ACTION" == "bootstrap" \]\]; then[\s\S]*\[\[ \$# -eq 1 \]\][\s\S]*bootstrap_node "\$1"/);
+  assert.match(source, /if \[\[ "\$ACTION" == "probe" \|\| "\$ACTION" == "bootstrap" \]\]; then[\s\S]*\[\[ \$# -eq 1 \|\| \$# -eq 2 \]\][\s\S]*valid_bbr_profile "\$2"[\s\S]*bootstrap_node "\$1"/);
+  assert.match(source, /provision --provision-config "\$BOOTSTRAP_RUN_CONFIG" --bbr '1' --bbr-profile "\$BBR_PROFILE"/);
   assert.match(bootstrap, /\/api\/v1\/bootstrap\/[\s\S]*pbs_\[a-f0-9\]/);
   assert.match(bootstrap, /\/root\/pulsedns_\$\{BOOTSTRAP_NODE_ID\}_bootstrap\.config/);
   assert.match(bootstrap, /\/root\/pulsedns_\$\{BOOTSTRAP_NODE_ID\}_installer\.sh/);
@@ -373,8 +374,11 @@ test('Web provision validates first and changes SSH only after external installa
   assert.match(source, /^    provision\) provision_node ;;/m);
 });
 
-test('all 23 original BBR and fq sysctl parameters are preserved', () => {
-  const bbr = body('configure_bbr');
+test('all 23 BBR and fq sysctl parameters are written for the c5in and c6in profiles', () => {
+  const bbr = body('configure_bbr')
+    .replaceAll('${net_buffer_max}', '10000000')
+    .replaceAll('${tcp_buffer}', '4096 131072 10000000');
+  assert.match(body('configure_bbr'), /BBR_PROFILE" == "c5in"[\s\S]*net_buffer_max="50000000"[\s\S]*tcp_buffer="4096 190054 50000000"[\s\S]*net_buffer_max="10000000"[\s\S]*tcp_buffer="4096 131072 10000000"/);
   const parameters = [
     'fs.file-max = 6815744',
     'net.ipv4.tcp_no_metrics_save=1',

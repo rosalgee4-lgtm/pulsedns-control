@@ -1,6 +1,6 @@
 import { controlPlaneEncryptionSecret } from '@/lib/control-plane-secret';
 import { parseNyanpassArgs, validNyanpassServiceName } from '@/lib/nyanpass-command';
-import type { ProvisionedNyanpassInstance } from '@/lib/install-command';
+import { isBbrProfile, type BbrProfile, type ProvisionedNyanpassInstance } from '@/lib/install-command';
 
 export type BootstrapPayload = {
   protocol: 1;
@@ -8,6 +8,7 @@ export type BootstrapPayload = {
   rootPassword: string;
   instances: ProvisionedNyanpassInstance[];
   downloadToken?: string;
+  bbrProfile?: BbrProfile;
 };
 
 type BootstrapContext = {
@@ -54,6 +55,7 @@ function validatePayload(value: unknown): asserts value is BootstrapPayload {
   if (payload.downloadToken !== undefined && !/^pbs_[a-f0-9]{64}$/.test(payload.downloadToken)) {
     throw new Error('开机脚本下载凭据格式无效');
   }
+  if (payload.bbrProfile !== undefined && !isBbrProfile(payload.bbrProfile)) throw new Error('开机脚本 BBR 配置无效');
   if (payload.protocol !== 1 || typeof payload.agentToken !== 'string' || !/^pd_[a-f0-9]{64}$/.test(payload.agentToken)) {
     throw new Error('开机脚本凭据内容无效');
   }

@@ -16,13 +16,22 @@ type NodeBootstrapConfigInput = {
   nyanpassRelease: TrustedNyanpassRelease;
 };
 
+// 整机 BBR/sysctl 配置：c6in = 10MB 缓冲（原默认），c5in = 50MB 缓冲。
+export const BBR_PROFILES = ['c6in', 'c5in'] as const;
+export type BbrProfile = (typeof BBR_PROFILES)[number];
+export const DEFAULT_BBR_PROFILE: BbrProfile = 'c6in';
+
+export function isBbrProfile(value: unknown): value is BbrProfile {
+  return typeof value === 'string' && (BBR_PROFILES as readonly string[]).includes(value);
+}
+
 export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/a22513d836cd8c69213825bf191bfe26527e143f/public/install.sh';
 export const PROBE_INSTALLER_SHA256 = 'f353a03d2dc672f18455c65860b39bb0071bbc01fe7975395bb713ce88923179';
 export const MAX_CLOUD_LAUNCHER_BYTES = 15 * 1024;
 export const MAX_BOOTSTRAP_RESPONSE_BYTES = 64 * 1024;
 
-export function buildNodeConnectCommand(installUrl: string) {
-  return buildVerifiedInstallerCommand(`probe ${shellArg(installUrl)}`);
+export function buildNodeConnectCommand(installUrl: string, bbrProfile: BbrProfile) {
+  return buildVerifiedInstallerCommand(`probe ${shellArg(installUrl)} ${shellArg(bbrProfile)}`);
 }
 
 export function buildAgentUpgradeCommand() {
@@ -51,7 +60,8 @@ export function buildNodeBootstrapConfig({ nodeId, generation, origin, token, ro
     nyanpassRelease.binaryAmd64v3Sha256,
     nyanpassRelease.binaryArm64Sha256,
     String(instances.length),
-    ...instances.flatMap((instance) => [instance.name, instance.optimize ? '1' : '0', instance.args]),
+    // OPTIMIZE 已移除：一律传 0（包括旧节点里保存过 OPTIMIZE=1 的实例）。
+    ...instances.flatMap((instance) => [instance.name, '0', instance.args]),
   ];
   if (fields.some((value) => value.includes('\0'))) throw new Error('Bootstrap configuration contains a NUL byte');
   return `${fields.join('\0')}\0`;

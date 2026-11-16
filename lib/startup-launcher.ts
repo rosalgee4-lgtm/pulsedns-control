@@ -1,6 +1,6 @@
-import { PROBE_INSTALLER_SHA256, PROBE_INSTALLER_URL } from '@/lib/install-command';
+import { PROBE_INSTALLER_SHA256, PROBE_INSTALLER_URL, type BbrProfile } from '@/lib/install-command';
 
-export function buildNodeStartupLauncher(nodeId: string, installUrl: string, generation: number) {
+export function buildNodeStartupLauncher(nodeId: string, installUrl: string, generation: number, bbrProfile: BbrProfile) {
   const scriptPath = `/root/pulsedns_${nodeId}_entrypoint.sh`;
   const configPath = `/root/pulsedns_${nodeId}_bootstrap.config`;
   const stateDir = `/var/lib/pulsedns-bootstrap-${nodeId}`;
@@ -21,6 +21,7 @@ complete_file="$state_dir/complete"
 installer_url=${quoteShellArg(PROBE_INSTALLER_URL)}
 installer_sha256=${quoteShellArg(PROBE_INSTALLER_SHA256)}
 node_parameter=${quoteShellArg(installUrl)}
+bbr_profile=${quoteShellArg(bbrProfile)}
 expected_generation=${generation}
 per_boot_dir=/var/lib/cloud/scripts/per-boot
 per_boot_path=${quoteShellArg(perBootPath)}
@@ -163,7 +164,7 @@ run_cached_installer() {
   fi
   chmod 0700 "$script_path"
   echo '[PulseDNS] 使用本机已校验的固定探针安装器'
-  /bin/bash "$script_path" probe "$node_parameter"
+  /bin/bash "$script_path" probe "$node_parameter" "$bbr_profile"
   status=$?
   if [ "$status" -eq 0 ]; then
     rm -f "$script_path" "$config_path"

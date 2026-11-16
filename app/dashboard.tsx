@@ -5,13 +5,14 @@ import { copyText } from '@/lib/copy-text';
 import { filterEvents } from '@/lib/event-filter';
 import { buildAgentUpgradeCommand } from '@/lib/install-command';
 
-type ViewId = 'overview' | 'nodes' | 'records' | 'nyanpass' | 'activity';
+type ViewId = 'overview' | 'nodes' | 'records' | 'domains' | 'nyanpass' | 'activity';
 
 const navigation: Array<{ id: ViewId; icon: string; label: string }> = [
   { id: 'overview', icon: '◫', label: '总览' },
   { id: 'nodes', icon: '⌁', label: '节点' },
   { id: 'records', icon: '◎', label: 'DNS 记录' },
-  { id: 'nyanpass', icon: '⇄', label: '合租实例' },
+  { id: 'domains', icon: '◇', label: '域名' },
+  { id: 'nyanpass', icon: '⇄', label: '添加Nyanpass实例' },
   { id: 'activity', icon: '↻', label: '事件日志' },
 ];
 
@@ -19,7 +20,8 @@ const viewTitles: Record<ViewId, string> = {
   overview: '网络控制台',
   nodes: '探针节点',
   records: 'DNS 记录',
-  nyanpass: 'Nyanpass 合租实例',
+  domains: '主域名',
+  nyanpass: '添加Nyanpass实例',
   activity: '事件日志',
 };
 
@@ -45,7 +47,8 @@ type NyanpassRow = {
   hasCredential: boolean;
   taskStatus: string | null; taskCreatedAt: string | null; taskClaimedAt: string | null; taskLeaseExpiresAt: string | null;
 };
-type NyanpassDraft = { name: string; command: string; optimize: boolean };
+type NyanpassDraft = { name: string; command: string };
+type DomainRow = { name: string; createdAt: string };
 type InstallationCommands = { installUrl: string; connectCommand: string; startupScript: string; expiresAt: string | null; node: { id: string; name: string; region: string } };
 type CreatedNode = InstallationCommands & { instances: NyanpassRow[] };
 type CreatedNyanpass = { instance: NyanpassRow };
@@ -53,13 +56,16 @@ type UpdatedNode = { node: NodeRow; events: EventRow[]; warnings: string[] };
 type UpdatedNyanpass = { instance: NyanpassRow; event: EventRow };
 
 function emptyNyanpassDraft(): NyanpassDraft {
-  return { name: '', command: '', optimize: false };
+  return { name: '', command: '' };
 }
 
-export default function Dashboard({ basePath, user, initialNodes, initialEvents, initialNyanpass }: { basePath: string; user: { name: string; email: string }; initialNodes: NodeRow[]; initialEvents: EventRow[]; initialNyanpass: NyanpassRow[] }) {
+export default function Dashboard({ basePath, user, initialNodes, initialDomains, initialEvents, initialNyanpass }: { basePath: string; user: { name: string; email: string }; initialNodes: NodeRow[]; initialDomains: DomainRow[]; initialEvents: EventRow[]; initialNyanpass: NyanpassRow[] }) {
   const apiPath = (path: string) => `${basePath}${path}`;
   const [activeView, setActiveView] = useState<ViewId>('overview');
   const [nodes, setNodes] = useState(initialNodes);
+  const [domainList, setDomainList] = useState(initialDomains);
+  const [domainSaving, setDomainSaving] = useState(false);
+  const [domainError, setDomainError] = useState('');
   const [events, setEvents] = useState(initialEvents);
   const [nyanpass, setNyanpass] = useState(initialNyanpass);
   const [showCreate, setShowCreate] = useState(false);
@@ -212,6 +218,40 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
     }
   }
 
+  async function addDomain(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const name = String(new FormData(formElement).get('domain') ?? '').trim();
+    setDomainSaving(true); setDomainError('');
+    try {
+      const response = await fetchWithTimeout(apiPath('/api/admin/domains'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+      const result = await response.json().catch(() => ({ error: '主控返回了无效响应' })) as { domain?: DomainRow; error?: string };
+      if (!response.ok || !result.domain) { setDomainError(result.error ?? '添加失败'); return; }
+      const added = result.domain;
+      setDomainList((current) => [...current, added].sort((a, b) => a.name.localeCompare(b.name)));
+      formElement.reset();
+    } catch {
+      setDomainError('无法确认主域名是否添加成功，请刷新页面核对。');
+    } finally {
+      setDomainSaving(false);
+    }
+  }
+
+  async function removeDomain(name: string) {
+    if (!window.confirm(`确定删除主域名 ${name} 吗？这只会从列表中移除，不会改动阿里云上的任何记录。`)) return;
+    setDomainSaving(true); setDomainError('');
+    try {
+      const response = await fetchWithTimeout(apiPath(`/api/admin/domains?name=${encodeURIComponent(name)}`), { method: 'DELETE' });
+      const result = await response.json().catch(() => ({ error: '主控返回了无效响应' })) as { error?: string };
+      if (!response.ok) { setDomainError(result.error ?? '删除失败'); return; }
+      setDomainList((current) => current.filter((domain) => domain.name !== name));
+    } catch {
+      setDomainError('无法确认主域名是否已经删除，请刷新页面核对。');
+    } finally {
+      setDomainSaving(false);
+    }
+  }
+
   async function createNyanpassInstance(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSaving(true); setError('');
@@ -361,7 +401,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
       const response = await fetchWithTimeout(apiPath('/api/admin/nodes'), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: editingNode.id, name: form.get('name'), region: form.get('region'), domainName: form.get('domainName'), recordV4: form.get('recordV4'), recordV6: form.get('recordV6'), syncEnabled: form.get('syncEnabled') === 'on' }),
+        body: JSON.stringify({ id: editingNode.id, name: form.get('name'), domainName: form.get('domainName'), recordV4: form.get('recordV4'), recordV6: form.get('recordV6'), syncEnabled: form.get('syncEnabled') === 'on' }),
       });
       const result = await response.json().catch(() => ({ error: '主控返回了无效响应' })) as UpdatedNode & { error?: string };
       if (!response.ok) { setEditError(result.error ?? '修改失败'); return; }
@@ -391,7 +431,6 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
           id: editingNyanpass.id,
           name: editingNyanpass.name,
           command: form.get('command'),
-          optimize: form.get('optimize') === 'on',
           confirmUncertain: editingNyanpass.status === 'uncertain' ? 'checked' : undefined,
         }),
       });
@@ -554,8 +593,13 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
             <DnsPanel nodes={nodes} onCreate={openCreateModal} onEdit={beginNodeEdit} notice={nodeEditNotice} />
           </section>}
 
+          {activeView === 'domains' && <section className="view-page" aria-labelledby="domains-view-title">
+            <ViewIntro eyebrow="阿里云 DNS" title="主域名" id="domains-view-title" description="先在这里添加阿里云账号里的主域名（例如 example.com），添加或修改节点时从下拉框中选择。" />
+            <DomainsPanel domains={domainList} nodes={nodes} saving={domainSaving} error={domainError} onAdd={addDomain} onRemove={removeDomain} />
+          </section>}
+
           {activeView === 'nyanpass' && <section className="view-page" aria-labelledby="nyanpass-view-title">
-            <ViewIntro eyebrow="多人合租 · 受限远程同步" title="Nyanpass 合租实例" id="nyanpass-view-title" description="保存新的官方命令后，点击同步到机器；探针只会领取固定类型的 Nyanpass 安装任务，不接受任意 Shell。" />
+            <ViewIntro eyebrow="Nyanpass · 受限远程同步" title="添加Nyanpass实例" id="nyanpass-view-title" description="保存新的官方命令后，点击同步到机器；探针只会领取固定类型的 Nyanpass 安装任务，不接受任意 Shell。" />
             {insecureTransport && <p className="transport-warning" role="alert"><strong>当前是 HTTP：</strong>随机路径只能降低误访问，不能加密节点令牌或 Nyanpass Token。仅在可信网络并把面板端口限制到自己的来源 IP；需要链路保密时请改用 HTTPS。</p>}
             <NyanpassPanel instances={nyanpass} nodes={nodes} hasNodes={Boolean(nodes.length)} syncingIds={syncingNyanpassIds} errors={nyanpassErrors} now={now} onCreate={openNyanpassModal} onEdit={beginNyanpassEdit} onRemove={removeNyanpassInstance} onSync={syncNyanpassInstance} onCancel={cancelNyanpassSync} onUpgrade={showAgentUpgrade} />
           </section>}
@@ -573,21 +617,21 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
           {!created ? <><p className="eyebrow cyan">探针对接</p><h2 id="create-title">添加一个探针节点</h2><p className="modal-intro">先填好 SSH 密码和全部 Nyanpass 实例。创建后会生成一条“公共安装脚本 + 节点专属参数”的对接命令，执行后按 DDNS 验收 → 全部 Nyanpass → BBR → SSH 自动完成安装。</p>
             <form onSubmit={createNode} className="node-form">
               <label>节点名称<input name="name" required placeholder="例如：东京 · jp-01" /></label>
-              <label>区域<input name="region" placeholder="ap-northeast" /></label>
-              <label>一次性 root 密码<input name="rootPassword" type="password" required minLength={8} maxLength={128} autoComplete="new-password" placeholder="8-128 个字符" /></label>
-              <p className="form-hint">root 密码只会随开机安装凭据加密暂存，不会进入节点列表、事件或日志；安装成功后主控会立即擦除。</p>
-              <p className="form-hint">原脚本的 23 项 BBR + fq/sysctl 参数固定启用，公共安装器会在内部显式调用 <code>--bbr 1</code>；覆盖前仍会备份 `/etc/sysctl.conf`。</p>
-              <label>阿里云主域名<input name="domainName" placeholder="example.com" /></label>
+              <label>root 密码<input name="rootPassword" type="password" required minLength={8} maxLength={128} autoComplete="new-password" placeholder="8-128 个字符" /></label>
+              <p className="form-hint">root 密码只会随开机安装凭据加密保存，不会进入节点列表、事件或日志；Spot 换机重装时沿用同一密码。</p>
+              <label>BBR 优化<select name="bbrProfile" defaultValue="c6in"><option value="c6in">使用 c6in BBR 优化（10MB 缓冲）</option><option value="c5in">使用 c5in BBR 优化（50MB 缓冲）</option></select></label>
+              <p className="form-hint">BBR + fq 和 sysctl 参数作用于整台机器，覆盖 <code>/etc/sysctl.conf</code> 前会先备份。</p>
+              <label>阿里云主域名<select name="domainName" defaultValue=""><option value="">不配置 DNS</option>{domainList.map((domain) => <option key={domain.name} value={domain.name}>{domain.name}</option>)}</select></label>
+              {!domainList.length && <p className="form-hint">还没有主域名，请先到「域名」页面添加。</p>}
               <div className="form-grid"><label>IPv4 主机记录<input name="recordV4" placeholder="home 或 @" /></label><label>IPv6 主机记录<input name="recordV6" placeholder="home 或 @" /></label></div>
               <p className="form-hint">例如 home.example.com：主域名填 example.com，主机记录填 home；根域名填 @。</p>
               <fieldset className="nyanpass-batch"><legend>Nyanpass 实例（可添加多个）</legend>{nodeNyanpass.map((instance, index) => <div className="nyanpass-draft" key={index}>
                 <div className="nyanpass-draft-head"><strong>实例 {index + 1}</strong>{nodeNyanpass.length > 1 && <button type="button" className="inline-remove" onClick={() => setNodeNyanpass((current) => current.filter((_, itemIndex) => itemIndex !== index))}>移除</button>}</div>
                 <label>服务名称<input required value={instance.name} onChange={(event) => updateNodeNyanpass(index, 'name', event.target.value)} placeholder="例如：tenant-a-out" /></label>
                 <label>官方安装命令<textarea required rows={3} autoComplete="off" spellCheck={false} value={instance.command} onChange={(event) => updateNodeNyanpass(index, 'command', event.target.value)} placeholder={'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t … -u https://…"'} /></label>
-                <label className="nyanpass-check"><input type="checkbox" checked={instance.optimize} onChange={(event) => updateNodeNyanpass(index, 'optimize', event.target.checked)} />启用原脚本 OPTIMIZE=1</label>
               </div>)}<button type="button" className="ghost-button" disabled={nodeNyanpass.length >= 16} onClick={() => setNodeNyanpass((current) => [...current, emptyNyanpassDraft()])}>＋ 添加另一个实例</button></fieldset>
-              <p className="form-hint">只用独立 <code>-o</code> 识别出口，没有 <code>-o</code> 就是入口；命令中的其他官方安全参数会原样带入。原始凭据仅以密文暂存，对接命令中的节点参数属于一次性 Bearer 凭据，请勿公开或转发。</p>
-              <p className="form-hint">开机脚本只绑定一台实例，不能作为 ASG 或 Launch Template 的共享 User data；批量部署时请为每台实例分别创建节点。</p>
+              <p className="form-hint">只用独立 <code>-o</code> 识别出口，没有 <code>-o</code> 就是入口；命令中的其他官方安全参数会原样带入。原始凭据仅以密文暂存，对接命令中的节点参数是长期有效的 Bearer 凭据，请勿公开或转发。</p>
+              <p className="form-hint">开机脚本可以写入 AWS 启动模板：Spot 实例被替换后，新机器会自动重装并更新解析。同一时间只能有一台机器使用这个节点，不要在 ASG 中同时运行多台。</p>
               {error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '创建中…' : '创建节点并生成对接命令'}</button>
             </form></>
           : <>
@@ -624,8 +668,8 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
       {showNyanpass && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeNyanpassModal()}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="nyanpass-title">
           <button className="modal-close" onClick={closeNyanpassModal} aria-label="关闭" disabled={saving}>×</button>
-          {!createdNyanpass ? <><p className="eyebrow cyan">多实例远程同步</p><h2 id="nyanpass-title">添加 Nyanpass 合租实例</h2><p className="modal-intro">直接粘贴官方完整命令。主控只加密保存其中的 Nyanpass Token，安装成功后立即清除；命令不会作为 Shell 下发。</p>
-            <form onSubmit={createNyanpassInstance} className="node-form"><label>所属探针节点<select name="nodeId" required defaultValue=""><option value="" disabled>选择节点</option>{nodes.map((node) => <option key={node.id} value={node.id} disabled={isBootstrapLockedStatus(node.nyanpassStatus)}>{node.name} · {node.region} · {node.id.slice(0, 6)}{isBootstrapLockedStatus(node.nyanpassStatus) ? ` · ${bootstrapStatusLabel(node.nyanpassStatus)}` : ''}</option>)}</select></label><label>实例 / 服务名称<input name="name" required placeholder="例如：tenant-a-out" /></label><label>Nyanpass 官方安装命令<textarea name="command" required rows={4} autoComplete="off" spellCheck={false} placeholder={'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t … -u https://…"'} /></label><label className="nyanpass-check"><input name="optimize" type="checkbox" />启用原脚本 OPTIMIZE=1</label><p className="form-hint">独立 -o 表示出口，无 -o 表示入口。开机脚本完成预配安装前不能追加远程实例。HTTP 主控链路本身没有 TLS，请只向自己的来源 IP 放行面板端口。</p>{error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '加密保存中…' : '保存实例'}</button></form></>
+          {!createdNyanpass ? <><p className="eyebrow cyan">多实例远程同步</p><h2 id="nyanpass-title">添加 Nyanpass 实例</h2><p className="modal-intro">直接粘贴官方完整命令。主控只加密保存其中的 Nyanpass Token，安装成功后立即清除；命令不会作为 Shell 下发。</p>
+            <form onSubmit={createNyanpassInstance} className="node-form"><label>所属探针节点<select name="nodeId" required defaultValue=""><option value="" disabled>选择节点</option>{nodes.map((node) => <option key={node.id} value={node.id} disabled={isBootstrapLockedStatus(node.nyanpassStatus)}>{node.name} · {node.id.slice(0, 6)}{isBootstrapLockedStatus(node.nyanpassStatus) ? ` · ${bootstrapStatusLabel(node.nyanpassStatus)}` : ''}</option>)}</select></label><label>实例 / 服务名称<input name="name" required placeholder="例如：tenant-a-out" /></label><label>Nyanpass 官方安装命令<textarea name="command" required rows={4} autoComplete="off" spellCheck={false} placeholder={'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t … -u https://…"'} /></label><p className="form-hint">独立 -o 表示出口，无 -o 表示入口。开机脚本完成预配安装前不能追加远程实例。HTTP 主控链路本身没有 TLS，请只向自己的来源 IP 放行面板端口。</p>{error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '加密保存中…' : '保存实例'}</button></form></>
           : <><p className="eyebrow cyan">实例已保存</p><h2 id="nyanpass-title">同步到 {createdNyanpass.instance.nodeName}</h2><p className="modal-intro">已识别为{nyanpassRoleLabel(createdNyanpass.instance.role)}。点击后任务进入队列，探针会自行领取、安装并回传结果。面板中的“成功”表示官方安装器执行成功。</p>{nyanpassErrors[createdNyanpass.instance.id] && <p className="form-error" role="alert">{nyanpassErrors[createdNyanpass.instance.id]}</p>}{createdNyanpass.instance.syncError && <p className="form-hint" role="status">{createdNyanpass.instance.syncError}</p>}<button type="button" className="primary-button wide" disabled={createdNyanpass.instance.status === 'running' || createdNyanpass.instance.status === 'success' || syncingNyanpassIds.has(createdNyanpass.instance.id)} onClick={() => createdNyanpass.instance.status === 'pending' ? cancelNyanpassSync(createdNyanpass.instance) : requiresFreshNyanpassCommand(createdNyanpass.instance) ? beginNyanpassEdit(createdNyanpass.instance) : syncNyanpassInstance(createdNyanpass.instance)}>{createdNyanpass.instance.status === 'pending' ? '取消尚未领取的排队' : createdNyanpass.instance.status === 'running' ? '机器正在安装，不能取消' : createdNyanpass.instance.status === 'success' ? '安装器执行成功' : requiresFreshNyanpassCommand(createdNyanpass.instance) ? '检查 VPS 后重新配置' : syncingNyanpassIds.has(createdNyanpass.instance.id) ? '正在处理…' : !supportsRemoteSync(createdNyanpassNode?.agentVersion) ? '先升级探针' : !createdNyanpassNodeReady ? '探针未在线' : createdNyanpass.instance.status === 'failed' ? '重试同步' : '同步到机器'}</button><button type="button" className="ghost-button wide" onClick={() => { setCreatedNyanpass(null); setError(''); setCopyFeedback('idle'); }} disabled={saving}>继续添加一个</button><button type="button" className="ghost-button wide" onClick={closeNyanpassModal} disabled={saving}>完成</button></>}
         </section>
       </div>}
@@ -633,11 +677,10 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
       {editingNode && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeNodeEditModal()}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="edit-node-title">
           <button className="modal-close" onClick={closeNodeEditModal} aria-label="关闭" disabled={saving}>×</button>
-          <p className="eyebrow cyan">修改节点</p><h2 id="edit-node-title">编辑 {editingNode.name}</h2><p className="modal-intro">修改名称、区域和阿里云 DNS 映射。探针令牌、公网地址及安装状态不会改变，也不需要重新安装探针。</p>
+          <p className="eyebrow cyan">修改节点</p><h2 id="edit-node-title">编辑 {editingNode.name}</h2><p className="modal-intro">修改名称和阿里云 DNS 映射。探针令牌、公网地址及安装状态不会改变，也不需要重新安装探针。</p>
           <form key={editingNode.id} onSubmit={updateNode} className="node-form">
             <label>节点名称<input name="name" required defaultValue={editingNode.name} /></label>
-            <label>区域<input name="region" defaultValue={editingNode.region === 'unknown' ? '' : editingNode.region} placeholder="ap-northeast" /></label>
-            <label>阿里云主域名<input name="domainName" defaultValue={editingNode.domainName ?? ''} placeholder="example.com" /></label>
+            <label>阿里云主域名<select name="domainName" defaultValue={editingNode.domainName ?? ''}><option value="">不配置 DNS</option>{editingNode.domainName && !domainList.some((domain) => domain.name === editingNode.domainName) && <option value={editingNode.domainName}>{editingNode.domainName}</option>}{domainList.map((domain) => <option key={domain.name} value={domain.name}>{domain.name}</option>)}</select></label>
             <div className="form-grid"><label>IPv4 主机记录<input name="recordV4" defaultValue={editingNode.recordV4 ?? ''} placeholder="home 或 @" /></label><label>IPv6 主机记录<input name="recordV6" defaultValue={editingNode.recordV6 ?? ''} placeholder="home 或 @" /></label></div>
             <label className="nyanpass-check"><input name="syncEnabled" type="checkbox" defaultChecked={editingNode.syncEnabled} />启用阿里云 DNS 自动同步</label>
             <p className="form-hint">保存后会用当前已上报的 IP 立即刷新新记录。修改或清空映射不会自动删除旧的阿里云记录。</p>
@@ -650,14 +693,12 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
       {editingNyanpass && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeNyanpassEditModal()}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="edit-nyanpass-title">
           <button className="modal-close" onClick={closeNyanpassEditModal} aria-label="关闭" disabled={saving}>×</button>
-          <><p className="eyebrow cyan">修改与重新同步</p><h2 id="edit-nyanpass-title">编辑 {editingNyanpass.name}</h2><p className="modal-intro">实例名同时作为机器上的 Nyanpass 服务名，创建后不可修改，避免旧服务残留。可重新粘贴官方命令修改入口/出口、面板、Token 或 OPTIMIZE；保存后仍需点击“同步到机器”。</p>
+          <><p className="eyebrow cyan">修改与重新同步</p><h2 id="edit-nyanpass-title">编辑 {editingNyanpass.name}</h2><p className="modal-intro">实例名同时作为机器上的 Nyanpass 服务名，创建后不可修改，避免旧服务残留。可重新粘贴官方命令修改入口/出口、面板或 Token；保存后仍需点击“同步到机器”。</p>
             <form key={editingNyanpass.id} onSubmit={updateNyanpassInstance} className="node-form">
               <label>所属探针节点<input value={editingNyanpass.nodeName} disabled /></label>
               <label>实例 / 机器服务名<input name="name" value={editingNyanpass.name} disabled /></label>
               <p className="form-hint">服务名不能直接改名；如需换名，请新增实例，确认新服务正常后再移除旧登记。</p>
-              <label>新的官方安装命令（{editingNyanpassRequiresCommand ? '本次必填' : '不修改时可留空'}）<textarea name="command" required={editingNyanpassRequiresCommand} rows={4} autoComplete="off" spellCheck={false} placeholder={editingNyanpassRequiresCommand ? '请重新粘贴官方完整命令，保存后再点击同步到机器' : '要修改入口/出口、面板、Token 或 OPTIMIZE 时粘贴新命令'} /></label>
-              <label className="nyanpass-check"><input name="optimize" type="checkbox" defaultChecked={editingNyanpass.optimize} />新命令沿用此 OPTIMIZE 设置</label>
-              <p className="form-hint">只修改 OPTIMIZE 开关时也必须重新粘贴官方命令，避免把旧凭据误用于新配置。</p>
+              <label>新的官方安装命令（{editingNyanpassRequiresCommand ? '本次必填' : '不修改时可留空'}）<textarea name="command" required={editingNyanpassRequiresCommand} rows={4} autoComplete="off" spellCheck={false} placeholder={editingNyanpassRequiresCommand ? '请重新粘贴官方完整命令，保存后再点击同步到机器' : '要修改入口/出口、面板或 Token 时粘贴新命令'} /></label>
               <p className="form-hint">所属节点不能迁移。控制台不会远程停止、卸载或执行任意命令；正在同步时禁止修改。</p>
               {editError && <p className="form-error" role="alert">{editError}</p>}
               <button className="primary-button wide" disabled={saving}>{saving ? '保存中…' : '保存修改'}</button>
@@ -704,11 +745,29 @@ function NodesPanel({ nodes, now, onCreate, onEdit, onRemove, onInstall, onUpgra
         const sshChanged = ['failed', 'uncertain'].includes(node.nyanpassStatus) && node.provisionLastCompletedStep === 'ssh';
         const removing = removingNodeId === node.id;
         const statusLabel = bootstrapStalled ? 'User data 未执行' : bootstrapLocked ? bootstrapStatusLabel(node.nyanpassStatus) : hasReported ? '已上报' : '等待首次上报';
-        return <tr key={node.id}><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}</span><small>{node.region}</small></td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported && !bootstrapLocked ? 'badge online' : 'badge warning'}>{statusLabel}</span>{bootstrapStalled && <small className="sync-error" role="alert">检查 User data、CRLF 和出站网络</small>}{node.provisionLastCompletedStep && bootstrapLocked && <small>最后完成：{provisionStepLabel(node.provisionLastCompletedStep)}</small>}{sshChanged && <small className="sync-error" role="alert">SSH 凭据已变更，请使用新密码核查</small>}</td><td><div className="row-actions">
+        return <tr key={node.id}><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}</span></td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported && !bootstrapLocked ? 'badge online' : 'badge warning'}>{statusLabel}</span>{bootstrapStalled && <small className="sync-error" role="alert">检查 User data、CRLF 和出站网络</small>}{node.provisionLastCompletedStep && bootstrapLocked && <small>最后完成：{provisionStepLabel(node.provisionLastCompletedStep)}</small>}{sshChanged && <small className="sync-error" role="alert">SSH 凭据已变更，请使用新密码核查</small>}</td><td><div className="row-actions">
           <button type="button" className="edit-link" disabled={removing || loadingInstallationId !== null} onClick={() => onInstall(node)}>{loadingInstallationId === node.id ? '读取中…' : node.installationAvailable ? '安装命令' : '升级命令'}</button>
           {node.installationAvailable && node.nyanpassStatus === 'ready' && <button type="button" className="edit-link" disabled={removing} onClick={() => onUpgrade(node)}>升级命令</button>}
           <button type="button" className="edit-link" disabled={removing} onClick={() => onEdit(node)}>修改</button><button type="button" className="danger-link" disabled={removing || loadingInstallationId === node.id} onClick={() => onRemove(node)}>{removing ? '删除中…' : '删除节点'}</button></div></td></tr>;
       })}</tbody></table> : <EmptyState onCreate={onCreate} />}
+    </div>
+  </article>;
+}
+
+function DomainsPanel({ domains, nodes, saving, error, onAdd, onRemove }: { domains: DomainRow[]; nodes: NodeRow[]; saving: boolean; error: string; onAdd: (event: FormEvent<HTMLFormElement>) => void; onRemove: (name: string) => void }) {
+  return <article className="panel dns-panel">
+    <div className="panel-heading"><div><h3>主域名列表</h3><p>只保存在主控里，不会改动阿里云上的记录</p></div></div>
+    <form className="node-form domain-form" onSubmit={onAdd}><label>添加主域名<input name="domain" required placeholder="example.com" autoComplete="off" spellCheck={false} /></label><button className="primary-button" disabled={saving}>{saving ? '保存中…' : '添加'}</button></form>
+    {error && <p className="panel-error" role="alert">{error}</p>}
+    <div className="table-wrap">
+      {domains.length ? <table><thead><tr><th>主域名</th><th>使用中的节点</th><th>操作</th></tr></thead><tbody>{domains.map((domain) => {
+        const users = nodes.filter((node) => node.domainName === domain.name);
+        return <tr key={domain.name}>
+          <td><code>{domain.name}</code></td>
+          <td>{users.length ? users.map((node) => node.name).join('、') : <span className="muted-value">未使用</span>}</td>
+          <td><button type="button" className="danger-link" disabled={saving || users.length > 0} title={users.length ? '有节点正在使用，不能删除' : undefined} onClick={() => onRemove(domain.name)}>删除</button></td>
+        </tr>;
+      })}</tbody></table> : <div className="empty-state compact-empty"><span>◇</span><h4>还没有主域名</h4><p>添加阿里云账号里的主域名后，就能在添加节点时选择。</p></div>}
     </div>
   </article>;
 }
@@ -776,7 +835,7 @@ function NyanpassPanel({ instances, nodes, hasNodes, syncingIds, errors, now, on
         const syncLabel = syncing ? '正在处理…' : provisioning ? (node ? bootstrapStatusLabel(node.nyanpassStatus) : '开机状态异常') : instance.status === 'pending' ? '取消排队' : instance.status === 'running' ? '机器正在安装…' : !capable ? '先升级探针' : requiresCommand ? '配置后同步' : !polling ? '探针未在线' : instance.status === 'failed' ? '重试同步' : '同步到机器';
         const syncAction = instance.status === 'pending' ? () => onCancel(instance) : !capable && node ? () => onUpgrade(node) : requiresCommand ? () => onEdit(instance) : () => onSync(instance);
         return <tr key={instance.id}><td><span className="node-name">{instance.name}</span><small>{instance.nodeName}{node?.agentVersion ? ` · 探针 ${node.agentVersion}${node.lastTaskPollAt ? ` · ${relativeTime(node.lastTaskPollAt, now)}轮询` : ' · 未见任务心跳'}` : ' · 旧探针'}</small></td><td><code>{displayHost(instance.panelUrl)}</code></td><td><b className={`role-badge ${instance.role}`}>{nyanpassRoleLabel(instance.role)}</b><small>{instance.role === 'outbound' ? '含独立 -o' : '不含 -o'}</small></td><td><NyanpassStatus instance={instance} now={now} />{(errors[instance.id] || instance.syncError) && <small className="sync-error" role="alert">{errors[instance.id] || instance.syncError}</small>}</td><td><div className="row-actions nyanpass-actions"><button type="button" className="sync-link" disabled={provisioning || busy || syncing} aria-busy={busy || syncing} onClick={syncAction}>{syncLabel}</button><button type="button" className="edit-link" disabled={provisioning || instance.status === 'pending' || busy || syncing} onClick={() => onEdit(instance)}>修改</button><button type="button" className="danger-link" disabled={provisioning || instance.status === 'pending' || busy || syncing} onClick={() => onRemove(instance)}>移除登记</button></div></td></tr>;
-      })}</tbody></table> : <div className="empty-state compact-empty"><span>⇄</span><h4>还没有合租实例</h4><p>{hasNodes ? canCreate ? '添加第一个 Nyanpass 实例；同一节点可以继续添加多个。' : '请等待节点开机安装完成后再追加实例。' : '请先创建探针节点，再添加 Nyanpass 合租实例。'}</p><button type="button" className="ghost-button" disabled={!canCreate} onClick={onCreate}>添加实例</button></div>}
+      })}</tbody></table> : <div className="empty-state compact-empty"><span>⇄</span><h4>还没有 Nyanpass 实例</h4><p>{hasNodes ? canCreate ? '添加第一个 Nyanpass 实例；同一节点可以继续添加多个。' : '请等待节点开机安装完成后再追加实例。' : '请先创建探针节点，再添加 Nyanpass 合租实例。'}</p><button type="button" className="ghost-button" disabled={!canCreate} onClick={onCreate}>添加实例</button></div>}
     </div>
   </article>;
 }

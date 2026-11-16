@@ -2,9 +2,9 @@ import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
-import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
+import { agentTasks, domains, events, nodes, nyanpassInstances } from '@/db/schema';
 import { syncAliDnsRecord } from '@/lib/alidns';
-import { buildNodeBootstrapConfig, buildNodeConnectCommand, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES } from '@/lib/install-command';
+import { buildNodeBootstrapConfig, buildNodeConnectCommand, DEFAULT_BBR_PROFILE, isBbrProfile, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES } from '@/lib/install-command';
 import { parseOfficialNyanpassCommand, validNyanpassServiceName } from '@/lib/nyanpass-command';
 import { publicOrigin } from '@/lib/public-origin';
 import { newAgentToken, newBootstrapDownloadToken, sha256 } from '@/lib/security';
@@ -24,7 +24,9 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   if (body?.action === 'installation') return installationCommands(request, body);
   const name = cleanText(body?.name, 60);
-  const region = cleanText(body?.region, 40) || 'unknown';
+  const region = 'unknown';
+  const bbrProfile = body?.bbrProfile === undefined || body?.bbrProfile === '' ? DEFAULT_BBR_PROFILE : body.bbrProfile;
+  if (!isBbrProfile(bbrProfile)) return Response.json({ error: 'BBR 优化只能选择 c5in 或 c6in' }, { status: 400 });
   const domainName = normalizeDomainName(body?.domainName) || null;
   const recordV4 = normalizeDnsRr(body?.recordV4) || null;
   const recordV6 = normalizeDnsRr(body?.recordV6) || null;
@@ -57,7 +59,8 @@ export async function POST(request: Request) {
     const parsed = parseOfficialNyanpassCommand(entry.command);
     if (!parsed.ok) return Response.json({ error: `${instanceName}：${parsed.error}` }, { status: 400 });
     instanceNames.add(instanceName);
-    preparedInstances.push({ id: crypto.randomUUID(), name: instanceName, args: parsed.args, panelUrl: parsed.panelUrl, role: parsed.role, optimize: entry.optimize === true });
+    // OPTIMIZE 已移除：系统参数只由节点的 c5in / c6in BBR 选项控制。
+    preparedInstances.push({ id: crypto.randomUUID(), name: instanceName, args: parsed.args, panelUrl: parsed.panelUrl, role: parsed.role, optimize: false });
   }
 
   const token = newAgentToken();
@@ -83,6 +86,7 @@ export async function POST(request: Request) {
       agentToken: token,
       downloadToken,
       rootPassword,
+      bbrProfile,
       instances: preparedInstances.map(({ name: instanceName, optimize, args }) => ({ name: instanceName, optimize, args })),
     }, { nodeId: id, generation: provisionGeneration });
   } catch (error) {
@@ -90,14 +94,15 @@ export async function POST(request: Request) {
   }
   const [tokenHash, bootstrapDownloadTokenHash] = await Promise.all([sha256(token), sha256(downloadToken)]);
   const installUrl = `${origin}/api/v1/bootstrap/${id}/${downloadToken}`;
-  const connectCommand = buildNodeConnectCommand(installUrl);
-  const startupScript = buildNodeStartupLauncher(id, installUrl, provisionGeneration);
+  const connectCommand = buildNodeConnectCommand(installUrl, bbrProfile);
+  const startupScript = buildNodeStartupLauncher(id, installUrl, provisionGeneration, bbrProfile);
   if (new TextEncoder().encode(startupScript).byteLength > MAX_CLOUD_LAUNCHER_BYTES) {
     return Response.json({ error: '开机启动器超过 AWS user-data 的 15 KiB 安全上限' }, { status: 500 });
   }
 
   await ensureSchema();
   const db = await getDb();
+  if (domainName && !await domainRegistered(db, domainName)) return Response.json({ error: `主域名 ${domainName} 不在域名列表中，请先在「域名」页面添加` }, { status: 400 });
   const ownershipConflict = await findDnsOwnershipConflict(db, { domainName, recordV4, recordV6 });
   if (ownershipConflict) return Response.json({ error: dnsOwnershipConflictMessage(ownershipConflict) }, { status: 409 });
   try {
@@ -148,7 +153,8 @@ async function installationCommands(request: Request, body: Record<string, unkno
     const nyanpassRelease = await trustedNyanpassRelease();
     const config = buildNodeBootstrapConfig({ ...payload, token: payload.agentToken, nodeId: id, generation: node.provisionGeneration, origin, nyanpassRelease });
     const installUrl = `${origin}/api/v1/bootstrap/${id}/${downloadToken}`;
-    const startupScript = buildNodeStartupLauncher(id, installUrl, node.provisionGeneration);
+    const bbrProfile = payload.bbrProfile ?? DEFAULT_BBR_PROFILE;
+    const startupScript = buildNodeStartupLauncher(id, installUrl, node.provisionGeneration, bbrProfile);
     if (new TextEncoder().encode(config).byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES
       || new TextEncoder().encode(startupScript).byteLength > MAX_CLOUD_LAUNCHER_BYTES) {
       return Response.json({ error: '安装配置超过安全大小上限' }, { status: 409, headers });
@@ -164,7 +170,7 @@ async function installationCommands(request: Request, body: Record<string, unkno
     }
     return Response.json({
       node: { id, name: node.name, region: node.region },
-      installUrl, connectCommand: buildNodeConnectCommand(installUrl), startupScript,
+      installUrl, connectCommand: buildNodeConnectCommand(installUrl, bbrProfile), startupScript,
       expiresAt: null,
     }, { headers });
   } catch {
@@ -172,6 +178,11 @@ async function installationCommands(request: Request, body: Record<string, unkno
   } finally {
     await releaseNodeOperationLock(db, id, operationId);
   }
+}
+
+async function domainRegistered(db: Awaited<ReturnType<typeof getDb>>, name: string) {
+  const [domain] = await db.select({ name: domains.name }).from(domains).where(eq(domains.name, name)).limit(1);
+  return Boolean(domain);
 }
 
 function safeBootstrapEncryptionError(error: unknown) {
@@ -187,7 +198,6 @@ export async function PATCH(request: Request) {
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   const id = cleanText(body?.id, 64);
   const name = cleanText(body?.name, 60);
-  const region = cleanText(body?.region, 40) || 'unknown';
   const domainName = normalizeDomainName(body?.domainName) || null;
   const recordV4 = normalizeDnsRr(body?.recordV4) || null;
   const recordV6 = normalizeDnsRr(body?.recordV6) || null;
@@ -208,6 +218,9 @@ export async function PATCH(request: Request) {
   try {
     const [current] = await db.select().from(nodes).where(eq(nodes.id, id)).limit(1);
     if (!current) return Response.json({ error: '节点不存在' }, { status: 404 });
+    if (domainName && domainName !== current.domainName && !await domainRegistered(db, domainName)) {
+      return Response.json({ error: `主域名 ${domainName} 不在域名列表中，请先在「域名」页面添加` }, { status: 400 });
+    }
 
     if (syncEnabled) {
       const ownershipConflict = await findDnsOwnershipConflict(db, { domainName, recordV4, recordV6, excludeNodeId: id });
@@ -216,7 +229,7 @@ export async function PATCH(request: Request) {
 
   const now = new Date();
   try {
-    await db.update(nodes).set({ name, region, domainName, recordV4, recordV6, syncEnabled, updatedAt: now }).where(eq(nodes.id, id));
+    await db.update(nodes).set({ name, domainName, recordV4, recordV6, syncEnabled, updatedAt: now }).where(eq(nodes.id, id));
   } catch (error) {
     if (!isDnsOwnershipConstraintError(error)) throw error;
     const concurrentOwner = await findDnsOwnershipConflict(db, { domainName, recordV4, recordV6, excludeNodeId: id });
@@ -265,7 +278,7 @@ export async function PATCH(request: Request) {
 
   const [latestNode] = await db.select().from(nodes).where(eq(nodes.id, id)).limit(1);
     return Response.json({
-      node: nodeResponse(latestNode ?? { ...current, name, region, domainName, recordV4, recordV6, syncEnabled, updatedAt: now }),
+      node: nodeResponse(latestNode ?? { ...current, name, domainName, recordV4, recordV6, syncEnabled, updatedAt: now }),
       events: returnedEvents,
       warnings,
     });
