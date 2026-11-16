@@ -620,7 +620,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
               <label>root 密码<input name="rootPassword" type="password" required minLength={8} maxLength={128} autoComplete="new-password" placeholder="8-128 个字符" /></label>
               <p className="form-hint">root 密码只会随开机安装凭据加密保存，不会进入节点列表、事件或日志；Spot 换机重装时沿用同一密码。</p>
               <label>BBR 优化<select name="bbrProfile" defaultValue="c6in"><option value="c6in">使用 c6in BBR 优化（10MB 缓冲）</option><option value="c5in">使用 c5in BBR 优化（50MB 缓冲）</option></select></label>
-              <p className="form-hint">BBR + fq 和 sysctl 参数作用于整台机器，覆盖 <code>/etc/sysctl.conf</code> 前会先备份。</p>
+              <p className="form-hint">BBR + fq 和 sysctl 参数作用于整台机器，覆盖 /etc/sysctl.conf 前会先备份。</p>
               <label>阿里云主域名<select name="domainName" defaultValue=""><option value="">不配置 DNS</option>{domainList.map((domain) => <option key={domain.name} value={domain.name}>{domain.name}</option>)}</select></label>
               {!domainList.length && <p className="form-hint">还没有主域名，请先到「域名」页面添加。</p>}
               <div className="form-grid"><label>IPv4 主机记录<input name="recordV4" placeholder="home 或 @" /></label><label>IPv6 主机记录<input name="recordV6" placeholder="home 或 @" /></label></div>
