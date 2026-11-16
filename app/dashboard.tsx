@@ -46,7 +46,7 @@ type NyanpassRow = {
   taskStatus: string | null; taskCreatedAt: string | null; taskClaimedAt: string | null; taskLeaseExpiresAt: string | null;
 };
 type NyanpassDraft = { name: string; command: string; optimize: boolean };
-type InstallationCommands = { installUrl: string; connectCommand: string; startupScript: string; expiresAt: string; node: { id: string; name: string; region: string } };
+type InstallationCommands = { installUrl: string; connectCommand: string; startupScript: string; expiresAt: string | null; node: { id: string; name: string; region: string } };
 type CreatedNode = InstallationCommands & { instances: NyanpassRow[] };
 type CreatedNyanpass = { instance: NyanpassRow };
 type UpdatedNode = { node: NodeRow; events: EventRow[]; warnings: string[] };
@@ -539,14 +539,14 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
               <article><span className="metric-icon amber">!</span><div><small>已有地址上报</small><strong>{reported} <em>/ {nodes.length}</em></strong></div><mark className={nodes.length - reported ? 'warning' : ''}>{!nodes.length ? '暂无节点' : nodes.length - reported ? '等待首次上报' : '均已上报'}</mark></article>
             </section>
             <section className="grid-layout">
-              <NodesPanel nodes={nodes} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
+              <NodesPanel nodes={nodes} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} onUpgrade={showAgentUpgrade} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
               <ActivityPanel events={events} now={now} limit={5} />
             </section>
           </>}
 
           {activeView === 'nodes' && <section className="view-page" aria-labelledby="nodes-view-title">
             <ViewIntro eyebrow="探针管理" title="所有探针节点" id="nodes-view-title" description="查看公网地址、阿里云 DNS 映射和最近一次地址上报。原脚本只在地址首次出现或变化时上报。" />
-            <NodesPanel nodes={nodes} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
+            <NodesPanel nodes={nodes} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} onUpgrade={showAgentUpgrade} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
           </section>}
 
           {activeView === 'records' && <section className="view-page" aria-labelledby="records-view-title">
@@ -593,7 +593,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
           : <>
             <p className="eyebrow cyan">{created.node.name}</p>
             <h2 id="create-title">安装命令</h2>
-            <p className="installation-expiry" role="status">{now >= Date.parse(created.expiresAt) ? '下载凭据已过期，请关闭后重新打开安装命令' : `下载凭据有效至 ${new Date(created.expiresAt).toLocaleString()}`}</p>
+            <p className="installation-expiry" role="status">安装链接长期有效：同一份开机脚本可写入 AWS 启动模板，Spot 实例被替换后新机器会自动无人值守重装并更新解析。删除节点即撤销。</p>
             <div className="installation-tabs" role="tablist" aria-label="安装方式" onKeyDown={(event) => {
               if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
               event.preventDefault();
@@ -607,11 +607,11 @@ export default function Dashboard({ basePath, user, initialNodes, initialEvents,
             <div id="installation-content" role="tabpanel" aria-labelledby={installationTab === 'startup' ? 'startup-tab' : 'download-tab'}>
               <pre className="install-command installation-preview" tabIndex={0}>{installationTab === 'startup' ? created.startupScript : created.connectCommand}</pre>
               {installationTab === 'startup' ? <>
-                <button type="button" className="primary-button wide" disabled={startupCopyFeedback === 'copying' || now >= Date.parse(created.expiresAt)} onClick={() => copyStartupScript(created.startupScript)}>{startupCopyFeedback === 'copying' ? '正在复制…' : startupCopyFeedback === 'success' ? '已复制开机脚本' : '复制开机脚本'}</button>
+                <button type="button" className="primary-button wide" disabled={startupCopyFeedback === 'copying'} onClick={() => copyStartupScript(created.startupScript)}>{startupCopyFeedback === 'copying' ? '正在复制…' : startupCopyFeedback === 'success' ? '已复制开机脚本' : '复制开机脚本'}</button>
                 {startupCopyFeedback === 'success' && <p className="form-success" role="status">已复制完整 User data（LF 换行）</p>}
                 {startupCopyFeedback === 'error' && <p className="form-error" role="alert">复制失败，剪贴板内容没有更新</p>}
               </> : <>
-                <button type="button" className="primary-button wide" disabled={copyFeedback === 'copying' || now >= Date.parse(created.expiresAt)} onClick={() => copyInstallCommand(created.connectCommand)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制一键命令' : '复制下载并运行命令'}</button>
+                <button type="button" className="primary-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(created.connectCommand)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制一键命令' : '复制下载并运行命令'}</button>
                 {copyFeedback === 'success' && <p className="form-success" role="status">已复制完整下载、校验和执行命令</p>}
                 {copyFeedback === 'error' && <p className="form-error" role="alert">复制失败，剪贴板内容没有更新</p>}
               </>}
@@ -691,7 +691,7 @@ function ViewIntro({ eyebrow, title, id, description }: { eyebrow: string; title
   </header>;
 }
 
-function NodesPanel({ nodes, now, onCreate, onEdit, onRemove, onInstall, loadingInstallationId, removingNodeId, deleteError, notice }: { nodes: NodeRow[]; now: number; onCreate: () => void; onEdit: (node: NodeRow) => void; onRemove: (node: NodeRow) => void; onInstall: (node: NodeRow) => void; loadingInstallationId: string | null; removingNodeId: string | null; deleteError: string; notice: string }) {
+function NodesPanel({ nodes, now, onCreate, onEdit, onRemove, onInstall, onUpgrade, loadingInstallationId, removingNodeId, deleteError, notice }: { nodes: NodeRow[]; now: number; onCreate: () => void; onEdit: (node: NodeRow) => void; onRemove: (node: NodeRow) => void; onInstall: (node: NodeRow) => void; onUpgrade: (node: NodeRow) => void; loadingInstallationId: string | null; removingNodeId: string | null; deleteError: string; notice: string }) {
   return <article className="panel nodes-panel">
     <div className="panel-heading"><div><h3>地址上报</h3><p>原探针仅在公网地址首次出现或变化时发送</p></div><button type="button" className="text-button" onClick={onCreate}>添加探针 →</button></div>
     {deleteError && <p className="panel-error" role="alert">{deleteError}</p>}
@@ -706,6 +706,7 @@ function NodesPanel({ nodes, now, onCreate, onEdit, onRemove, onInstall, loading
         const statusLabel = bootstrapStalled ? 'User data 未执行' : bootstrapLocked ? bootstrapStatusLabel(node.nyanpassStatus) : hasReported ? '已上报' : '等待首次上报';
         return <tr key={node.id}><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}</span><small>{node.region}</small></td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported && !bootstrapLocked ? 'badge online' : 'badge warning'}>{statusLabel}</span>{bootstrapStalled && <small className="sync-error" role="alert">检查 User data、CRLF 和出站网络</small>}{node.provisionLastCompletedStep && bootstrapLocked && <small>最后完成：{provisionStepLabel(node.provisionLastCompletedStep)}</small>}{sshChanged && <small className="sync-error" role="alert">SSH 凭据已变更，请使用新密码核查</small>}</td><td><div className="row-actions">
           <button type="button" className="edit-link" disabled={removing || loadingInstallationId !== null} onClick={() => onInstall(node)}>{loadingInstallationId === node.id ? '读取中…' : node.installationAvailable ? '安装命令' : '升级命令'}</button>
+          {node.installationAvailable && node.nyanpassStatus === 'ready' && <button type="button" className="edit-link" disabled={removing} onClick={() => onUpgrade(node)}>升级命令</button>}
           <button type="button" className="edit-link" disabled={removing} onClick={() => onEdit(node)}>修改</button><button type="button" className="danger-link" disabled={removing || loadingInstallationId === node.id} onClick={() => onRemove(node)}>{removing ? '删除中…' : '删除节点'}</button></div></td></tr>;
       })}</tbody></table> : <EmptyState onCreate={onCreate} />}
     </div>
@@ -754,7 +755,7 @@ function ActivityPanel({ events, now, limit, expanded = false }: { events: Event
         <div className="filter-summary" aria-live="polite"><span>{matchingEvents.length} 条匹配</span>{hasFilters && <button type="button" onClick={clearFilters}>清除筛选</button>}</div>
       </div>
       <div className="activity-list">{visibleEvents.length ? visibleEvents.map((item) => <div className="activity-row" key={item.id}><span className={item.level === 'error' ? 'activity-check error' : 'activity-check'}>{item.level === 'error' ? '!' : '✓'}</span><div><strong>{item.message}</strong><p>{item.nodeName} · {eventKindLabel(item.kind)}</p></div><time title={new Date(item.createdAt).toLocaleString()}>{relativeTime(item.createdAt, now)}</time></div>) : <p className="empty-activity">{events.length && hasFilters ? '没有符合当前筛选条件的事件。' : '创建第一个节点后，DNS 同步与探针事件会出现在这里。'}</p>}</div>
-      <div className="security-note"><span>◇</span><div><strong>独立探针凭据</strong><p>未完成安装的节点可重新取得安装命令。下载凭据和开机凭据加密暂存，安装成功后擦除；已安装节点保留升级命令。</p></div></div>
+      <div className="security-note"><span>◇</span><div><strong>独立探针凭据</strong><p>安装命令长期有效，可随时重新复制；开机凭据以 AES-GCM 密文保存，Spot 换机后新机器用同一份 User data 重新安装。删除节点即撤销链接。</p></div></div>
     </div>
   </article>;
 }

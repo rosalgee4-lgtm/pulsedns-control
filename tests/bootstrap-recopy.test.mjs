@@ -78,24 +78,26 @@ test('refresh and concurrent recopy preserve the unexpired command and node iden
   assert.equal((await commands(created.node.id)).status, 200);
 });
 
-test('expired links are renewed without resetting a failed attempt or leaking credentials', async () => {
+test('permanent links are reused for failed nodes without resetting the attempt or leaking credentials', async () => {
   const created = await createNode();
   const id = created.node.id;
+  assert.equal(created.expiresAt, null);
   const sqlite = await getLocalSqlite();
-  sqlite.prepare("UPDATE nodes SET bootstrap_download_expires_at = 1, nyanpass_status = 'failed', provision_attempt_id = 'old-attempt', provision_last_completed_step = 'ddns' WHERE id = ?").run(id);
+  sqlite.prepare("UPDATE nodes SET nyanpass_status = 'failed', provision_attempt_id = 'old-attempt', provision_last_completed_step = 'ddns' WHERE id = ?").run(id);
   const before = await stored(id);
   const response = await commands(id);
   assert.equal(response.status, 200);
   const result = await response.json();
-  assert.notEqual(result.installUrl, created.installUrl);
+  assert.equal(result.installUrl, created.installUrl);
+  assert.equal(result.startupScript, created.startupScript);
+  assert.equal(result.expiresAt, null);
   assert.equal(result.node.id, id);
   assert.doesNotMatch(JSON.stringify(result), /test-password-123|pd_[a-f0-9]{64}|abcdefg/);
   const after = await stored(id);
-  for (const column of ['token_hash', 'provision_generation', 'provision_attempt_id', 'provision_last_completed_step', 'nyanpass_status']) {
+  for (const column of ['token_hash', 'bootstrap_download_token_hash', 'provision_generation', 'provision_attempt_id', 'provision_last_completed_step', 'nyanpass_status']) {
     assert.equal(after[column], before[column], column);
   }
-  assert.equal((await download(created.installUrl)).status, 404);
-  assert.equal((await download(result.installUrl)).status, 200);
+  for (let index = 0; index < 3; index += 1) assert.equal((await download(created.installUrl)).status, 200);
 });
 
 test('legacy encrypted payloads can issue new commands without deleting the node', async () => {
@@ -114,15 +116,22 @@ test('legacy encrypted payloads can issue new commands without deleting the node
   assert.equal((await download(result.installUrl)).status, 200);
 });
 
-test('active installs cannot have expired credentials rotated, completed secrets stay revoked', async () => {
+test('install commands stay identical while provisioning and after completion; erased legacy nodes stay revoked', async () => {
   const created = await createNode();
   const id = created.node.id;
   const sqlite = await getLocalSqlite();
-  sqlite.prepare("UPDATE nodes SET bootstrap_download_expires_at = 1, nyanpass_status = 'provisioning', provision_lease_expires_at = ? WHERE id = ?").run(Date.now() + 60000, id);
+  sqlite.prepare("UPDATE nodes SET nyanpass_status = 'provisioning', provision_lease_expires_at = ? WHERE id = ?").run(Date.now() + 60000, id);
   const before = await stored(id);
-  assert.equal((await commands(id)).status, 409);
+  const during = await commands(id);
+  assert.equal(during.status, 200);
+  assert.equal((await during.json()).installUrl, created.installUrl);
+  sqlite.prepare("UPDATE nodes SET nyanpass_status = 'ready', provision_lease_expires_at = NULL WHERE id = ?").run(id);
+  const ready = await commands(id);
+  assert.equal(ready.status, 200);
+  assert.equal((await ready.json()).startupScript, created.startupScript);
+  assert.equal((await download(created.installUrl)).status, 200);
   assert.equal((await stored(id)).bootstrap_download_token_hash, before.bootstrap_download_token_hash);
-  sqlite.prepare("UPDATE nodes SET nyanpass_status = 'ready', bootstrap_payload_ciphertext = NULL, bootstrap_download_token_hash = NULL WHERE id = ?").run(id);
+  sqlite.prepare("UPDATE nodes SET bootstrap_payload_ciphertext = NULL, bootstrap_download_token_hash = NULL WHERE id = ?").run(id);
   assert.equal((await commands(id)).status, 409);
   assert.equal((await download(created.installUrl)).status, 404);
 });
@@ -165,8 +174,57 @@ test('unattended recovery accepts a new attempt after failure and ignores late o
   const after = await stored(node.id);
   assert.equal(after.nyanpass_status, 'ready');
   assert.equal(after.token_hash, before.token_hash);
-  assert.equal(after.bootstrap_payload_ciphertext, null);
-  assert.equal((await download(installUrl)).status, 404);
+  assert.equal(after.bootstrap_payload_ciphertext, before.bootstrap_payload_ciphertext);
+  assert.equal((await download(installUrl)).status, 200);
+});
+
+test('spot replacement: a new machine reinstalls a ready node with the same user data', async () => {
+  const { node, installUrl } = await createNode();
+  const sqlite = await getLocalSqlite();
+  const before = await stored(node.id);
+  const payload = await decryptBootstrapPayload(before.bootstrap_payload_ciphertext, { nodeId: node.id, generation: 1 });
+  const machineA = 'aaaaaaaa-1111-4ccc-8ddd-eeeeeeeeeeee';
+  const machineB = 'bbbbbbbb-2222-4ddd-8eee-ffffffffffff';
+  const machineC = 'cccccccc-3333-4eee-8fff-000000000000';
+  async function send(phase, attemptId, outcome) {
+    const response = await provision(new Request('https://master.example.test/api/v1/provision', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Secret-Token': payload.agentToken, 'X-Agent-Version': '0.8.3' },
+      body: JSON.stringify({ protocol: 1, phase, generation: 1, attemptId, ...(outcome ? { outcome } : {}) }),
+    }));
+    assert.equal(response.status, 200);
+    return (await response.json()).disposition;
+  }
+  const instanceStatus = () => sqlite.prepare('SELECT status FROM nyanpass_instances WHERE node_id = ?').get(node.id).status;
+
+  assert.equal(await send('start', machineA), 'accepted');
+  assert.equal(await send('finish', machineA, 'succeeded'), 'accepted');
+  assert.equal((await stored(node.id)).nyanpass_status, 'ready');
+  assert.equal(instanceStatus(), 'success');
+
+  // 实例 A 被回收，新实例 B 用同一份 User data 下载配置并重新安装。
+  assert.equal((await download(installUrl)).status, 200);
+  assert.equal(await send('start', machineB), 'accepted');
+  assert.equal((await stored(node.id)).nyanpass_status, 'provisioning');
+  assert.equal(instanceStatus(), 'bootstrap');
+  // B 安装期间，另一台机器 C 不能并发接管。
+  assert.equal(await send('start', machineC), 'conflict');
+  assert.equal(await send('finish', machineA, 'succeeded'), 'stale');
+  assert.equal(await send('finish', machineB, 'succeeded'), 'accepted');
+  assert.equal((await stored(node.id)).nyanpass_status, 'ready');
+  assert.equal((await stored(node.id)).provision_attempt_id, machineB);
+  assert.equal(instanceStatus(), 'success');
+
+  // B 在安装中途被回收：租约超时后，新实例 C 可以接管。
+  assert.equal(await send('start', machineC), 'accepted');
+  assert.equal(await send('start', machineA), 'conflict');
+  sqlite.prepare('UPDATE nodes SET provision_lease_expires_at = 1 WHERE id = ?').run(node.id);
+  assert.equal(await send('start', machineA), 'accepted');
+  assert.equal(await send('heartbeat', machineC), 'stale');
+  assert.equal(await send('finish', machineA, 'succeeded'), 'accepted');
+  const after = await stored(node.id);
+  assert.equal(after.nyanpass_status, 'ready');
+  assert.equal(after.token_hash, before.token_hash);
+  assert.equal(after.bootstrap_download_token_hash, before.bootstrap_download_token_hash);
 });
 
 test('node and instance creation reject service names that could replace managed or system units', async () => {

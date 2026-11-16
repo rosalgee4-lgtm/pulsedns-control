@@ -5,7 +5,6 @@ import { ensureSchema } from '@/db/init';
 import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { syncAliDnsRecord } from '@/lib/alidns';
 import { buildNodeBootstrapConfig, buildNodeConnectCommand, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES } from '@/lib/install-command';
-import { bootstrapDownloadExpiry, bootstrapDownloadWindow, BOOTSTRAP_DOWNLOAD_RETRY_GRACE_MS } from '@/lib/bootstrap-download';
 import { parseOfficialNyanpassCommand, validNyanpassServiceName } from '@/lib/nyanpass-command';
 import { publicOrigin } from '@/lib/public-origin';
 import { newAgentToken, newBootstrapDownloadToken, sha256 } from '@/lib/security';
@@ -103,7 +102,7 @@ export async function POST(request: Request) {
   if (ownershipConflict) return Response.json({ error: dnsOwnershipConflictMessage(ownershipConflict) }, { status: 409 });
   try {
     await db.batch([
-      db.insert(nodes).values({ id, name, region, tokenHash, provider: 'alidns', domainName, recordV4, recordV6, nyanpassStatus: 'awaiting', provisionGeneration, bootstrapPayloadCiphertext, bootstrapDownloadTokenHash, bootstrapDownloadExpiresAt: bootstrapDownloadExpiry(now), createdAt: now, updatedAt: now }),
+      db.insert(nodes).values({ id, name, region, tokenHash, provider: 'alidns', domainName, recordV4, recordV6, nyanpassStatus: 'awaiting', provisionGeneration, bootstrapPayloadCiphertext, bootstrapDownloadTokenHash, createdAt: now, updatedAt: now }),
       ...preparedInstances.map((instance) => db.insert(nyanpassInstances).values({ id: instance.id, nodeId: id, name: instance.name, role: instance.role, panelUrl: instance.panelUrl, status: 'bootstrap', bootstrapGeneration: provisionGeneration, optimize: instance.optimize, createdAt: now, updatedAt: now })),
       db.insert(events).values({ nodeId: id, kind: 'node_created', message: `${user.email} 创建了节点并预配 ${preparedInstances.length} 个 Nyanpass 实例`, createdAt: now }),
     ]);
@@ -118,7 +117,7 @@ export async function POST(request: Request) {
     installUrl,
     connectCommand,
     startupScript,
-    expiresAt: bootstrapDownloadExpiry(now).toISOString(),
+    expiresAt: null,
     instances: preparedInstances.map((instance) => ({ id: instance.id, nodeId: id, nodeName: name, name: instance.name, role: instance.role, panelUrl: instance.panelUrl, optimize: instance.optimize, status: 'bootstrap', hasCredential: false, lastReportedAt: null, syncError: null, activeTaskId: null, configRevision: 0, taskStatus: null, taskCreatedAt: null, taskClaimedAt: null, taskLeaseExpiresAt: null })),
   }, { status: 201, headers: { 'Cache-Control': 'no-store' } });
 }
@@ -137,22 +136,14 @@ async function installationCommands(request: Request, body: Record<string, unkno
   try {
     const [node] = await db.select().from(nodes).where(eq(nodes.id, id)).limit(1);
     if (!node) return Response.json({ error: '节点不存在' }, { status: 404, headers });
-    if (!node.bootstrapPayloadCiphertext || !isBootstrapLocked(node.nyanpassStatus)) {
-      return Response.json({ error: '首次安装凭据已清除，不能再次下发完整安装；现有探针可使用升级命令' }, { status: 409, headers });
+    if (!node.bootstrapPayloadCiphertext) {
+      return Response.json({ error: '该节点由旧版本安装，首次安装凭据已清除，不能再次下发完整安装；现有探针可使用升级命令' }, { status: 409, headers });
     }
     const payload = await decryptBootstrapPayload(node.bootstrapPayloadCiphertext, { nodeId: id, generation: node.provisionGeneration });
-    const now = new Date();
-    const window = bootstrapDownloadWindow(node.bootstrapDownloadExpiresAt, node.bootstrapDownloadConsumedAt, now);
-    const reusable = payload.downloadToken && window.allowed && await sha256(payload.downloadToken) === node.bootstrapDownloadTokenHash;
-    if (!reusable && node.nyanpassStatus === 'provisioning' && node.provisionLeaseExpiresAt && node.provisionLeaseExpiresAt > now) {
-      return Response.json({ error: '安装正在运行，暂不重新签发下载凭据；请等待安装完成或心跳超时' }, { status: 409, headers });
-    }
+    // 链接长期有效，始终复用同一个下载凭据：已写入 AWS 启动模板的 User data 不会因为
+    // 再次打开安装命令而失效。旧版本节点没有保存原始凭据时才签发一次新的。
+    const reusable = Boolean(payload.downloadToken && await sha256(payload.downloadToken) === node.bootstrapDownloadTokenHash);
     const downloadToken = reusable ? payload.downloadToken! : newBootstrapDownloadToken();
-    const expiresAt = reusable
-      ? (node.bootstrapDownloadConsumedAt
-        ? new Date(node.bootstrapDownloadConsumedAt.getTime() + BOOTSTRAP_DOWNLOAD_RETRY_GRACE_MS)
-        : node.bootstrapDownloadExpiresAt!)
-      : bootstrapDownloadExpiry(now);
     const origin = publicOrigin(request);
     const nyanpassRelease = await trustedNyanpassRelease();
     const config = buildNodeBootstrapConfig({ ...payload, token: payload.agentToken, nodeId: id, generation: node.provisionGeneration, origin, nyanpassRelease });
@@ -167,14 +158,14 @@ async function installationCommands(request: Request, body: Record<string, unkno
       await db.update(nodes).set({
         bootstrapPayloadCiphertext: ciphertext,
         bootstrapDownloadTokenHash: await sha256(downloadToken),
-        bootstrapDownloadExpiresAt: expiresAt,
+        bootstrapDownloadExpiresAt: null,
         bootstrapDownloadConsumedAt: null,
       }).where(and(eq(nodes.id, id), eq(nodes.dnsOperationId, operationId)));
     }
     return Response.json({
       node: { id, name: node.name, region: node.region },
       installUrl, connectCommand: buildNodeConnectCommand(installUrl), startupScript,
-      expiresAt: expiresAt.toISOString(),
+      expiresAt: null,
     }, { headers });
   } catch {
     return Response.json({ error: '无法读取安装凭据，请检查主控加密密钥和 Nyanpass 发布配置；原节点未重置' }, { status: 503, headers });

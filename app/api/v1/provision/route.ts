@@ -58,9 +58,12 @@ export async function POST(request: Request) {
   const agentVersion = cleanText(request.headers.get('x-agent-version'), 30) || node.agentVersion;
 
   if (phase === 'start') {
-    if (node.nyanpassStatus === 'ready') return okResponse('stale');
     const leaseExpiresAt = new Date(now.getTime() + provisionLeaseMs);
-    if (node.nyanpassStatus === 'awaiting' || node.nyanpassStatus === 'failed') {
+    // 'ready' / 'uncertain' + 新 attempt ID：Spot 实例被替换后，新机器用同一份
+    // User data 重新安装。旧机器的租约必须先超时（变为 uncertain），避免两台机器并发安装。
+    const replacement = node.nyanpassStatus === 'ready'
+      || (node.nyanpassStatus === 'uncertain' && node.provisionAttemptId !== attemptId);
+    if (node.nyanpassStatus === 'awaiting' || node.nyanpassStatus === 'failed' || replacement) {
       const [transitioned] = await db.batch([
         db.update(nodes).set({
           nyanpassStatus: 'provisioning',
@@ -73,10 +76,26 @@ export async function POST(request: Request) {
           eq(nodes.id, node.id),
           eq(nodes.provisionGeneration, numericGeneration),
           eq(nodes.nyanpassStatus, node.nyanpassStatus),
+          node.provisionAttemptId === null ? isNull(nodes.provisionAttemptId) : eq(nodes.provisionAttemptId, node.provisionAttemptId),
         )).returning({ id: nodes.id }),
-        db.insert(events).values({ nodeId: node.id, kind: 'nyanpass_bootstrap_started', message: `节点 ${node.name} 开始执行开机安装`, createdAt: now }),
+        db.insert(events).values({
+          nodeId: node.id,
+          kind: 'nyanpass_bootstrap_started',
+          message: replacement
+            ? `节点 ${node.name} 检测到新机器（实例替换），开始用原配置无人值守重新安装`
+            : `节点 ${node.name} 开始执行开机安装`,
+          createdAt: now,
+        }),
       ]);
       if (transitioned.length) {
+        // 重新安装首次预配的实例：恢复为 bootstrap，由本次最终回执决定结果。
+        await db.update(nyanpassInstances).set({ status: 'bootstrap', syncError: null, updatedAt: now }).where(and(
+          eq(nyanpassInstances.nodeId, node.id),
+          eq(nyanpassInstances.bootstrapGeneration, numericGeneration),
+          eq(nyanpassInstances.configRevision, 0),
+          isNull(nyanpassInstances.activeTaskId),
+          inArray(nyanpassInstances.status, ['success', 'uncertain']),
+        ));
         return okResponse('accepted');
       }
     }
@@ -150,10 +169,6 @@ async function finishProvision(
     if (outcome === 'succeeded') {
       await db.batch([
         db.update(nodes).set({
-          bootstrapPayloadCiphertext: null,
-          bootstrapDownloadTokenHash: null,
-          bootstrapDownloadExpiresAt: null,
-          bootstrapDownloadConsumedAt: null,
           ...(lastCompletedStep ? { provisionLastCompletedStep: lastCompletedStep } : {}),
           updatedAt: now,
         }).where(and(
@@ -181,12 +196,7 @@ async function finishProvision(
     db.update(nodes).set({
       nyanpassStatus: targetStatus,
       provisionLeaseExpiresAt: null,
-      ...(outcome === 'succeeded' ? {
-        bootstrapPayloadCiphertext: null,
-        bootstrapDownloadTokenHash: null,
-        bootstrapDownloadExpiresAt: null,
-        bootstrapDownloadConsumedAt: null,
-      } : {}),
+      // 安装成功后保留加密配置和下载凭据，供 Spot 替换后的新机器重复使用。
       ...(lastCompletedStep ? { provisionLastCompletedStep: lastCompletedStep } : {}),
       agentVersion,
       updatedAt: now,
