@@ -13,8 +13,29 @@ concurrency:
 
 jobs:
   verify:
+    name: verify (${{ matrix.database }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 面板支持外置 MySQL 8 与 MariaDB 10.6+：两种数据库都完整跑一遍测试。
+        database: ['mysql:8.4', 'mariadb:11.4']
+    services:
+      database:
+        image: ${{ matrix.database }}
+        env:
+          MYSQL_ROOT_PASSWORD: testroot
+          MARIADB_ROOT_PASSWORD: testroot
+        ports:
+          - 13306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -ptestroot || mariadb-admin ping -h 127.0.0.1 -uroot -ptestroot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      PULSEDNS_TEST_MYSQL_URL: mysql://root:testroot@127.0.0.1:13306
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,12 +55,48 @@ jobs:
       - run: pnpm lint
       - name: Validate shell syntax
         run: |
-          for script in public/install.sh public/monitor.sh public/update.sh public/panel-install.sh; do
+          for script in public/install.sh public/monitor.sh public/update.sh; do
             bash -n "$script"
           done
-      - name: Build self-hosted panel
+      - name: Build panel
         run: pnpm build
-        env:
-          PULSEDNS_SELF_HOSTED: "1"
       - name: Check TypeScript
         run: pnpm exec tsc --noEmit
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # 与 README 部署步骤相同：按当前源码构建镜像，并确认容器能启动、只读运行。
+      - name: Build image
+        run: docker build --build-arg PULSEDNS_BASE_PATH=/0123456789abcdef0123456789abcdef -t pulsedns-control:ci .
+      - name: Start container against MySQL
+        run: |
+          docker network create pulsedns-ci
+          docker run -d --name db --network pulsedns-ci -e MYSQL_ROOT_PASSWORD=testroot -e MYSQL_DATABASE=pulsedns mysql:8.4
+          # 走 TCP 检查：MySQL 镜像初始化时会先起一个不监听网络的临时实例。
+          for i in $(seq 1 90); do docker exec db mysqladmin ping -h 127.0.0.1 --protocol=tcp -uroot -ptestroot --silent && break; sleep 2; done
+          docker run -d --name panel --network pulsedns-ci -p 127.0.0.1:3100:3100 \
+            -e PULSEDNS_DATABASE_URL=mysql://root:testroot@db:3306/pulsedns \
+            -e PULSEDNS_PUBLIC_URL=https://panel.example.com \
+            -e PULSEDNS_BASE_PATH=/0123456789abcdef0123456789abcdef \
+            -e PULSEDNS_TASK_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+            -e PULSEDNS_INITIAL_ADMIN_USER=admin -e PULSEDNS_INITIAL_ADMIN_PASSWORD=ci-admin-password-1 \
+            -e PULSEDNS_TRUST_PROXY=1 \
+            --read-only --tmpfs /tmp --security-opt no-new-privileges:true --cap-drop ALL pulsedns-control:ci
+          for i in $(seq 1 60); do curl -fs -o /dev/null http://127.0.0.1:3100/0123456789abcdef0123456789abcdef/login && break; sleep 2; done
+          curl -fs -o /dev/null http://127.0.0.1:3100/0123456789abcdef0123456789abcdef/login
+          # 通过 HTTPS 代理头登录一次，确认数据库迁移与管理员创建成功。
+          for i in $(seq 1 10); do
+            status=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:3100/0123456789abcdef0123456789abcdef/api/auth/login \
+              -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: same-origin' -H 'X-Forwarded-Proto: https' -H 'X-Forwarded-For: 203.0.113.10' \
+              -d '{"username":"admin","password":"ci-admin-password-1"}')
+            [ "$status" = 200 ] && break; sleep 3
+          done
+          test "$status" = 200 || { docker logs panel; exit 1; }
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3100/)" = 404
+      - name: Container logs
+        if: always()
+        run: docker logs panel 2>&1 | tail -50 || true
