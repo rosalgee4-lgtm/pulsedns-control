@@ -257,3 +257,5 @@ td code + code { color:#14594b; background:#eaf8f5; }
 .switch input:focus-visible + span { box-shadow:0 0 0 2px #fff, 0 0 0 4px var(--link); }
 .switch input:disabled + span { opacity:.5; }
 @media (max-width: 640px) { .setting-row { flex-direction:column; align-items:flex-start; } }
+.load-more { display:flex; flex-direction:column; align-items:center; gap:6px; padding:12px 0 4px; }
+.load-more p { margin:0; color:var(--muted); font-size:12px; }

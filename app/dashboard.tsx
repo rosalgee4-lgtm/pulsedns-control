@@ -88,6 +88,29 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
   // 节点只能使用其所属用户自己的主域名。
   const domainsOwnedBy = (ownerId: string) => domainList.filter((domain) => domain.ownerId === ownerId);
   const [events, setEvents] = useState(initialEvents);
+  // 事件记录页「加载更多」取回的更早事件；自动刷新只替换最新一页，不影响这里。
+  const [olderEvents, setOlderEvents] = useState<{ events: EventRow[]; hasMore: boolean } | null>(null);
+  const [loadingOlderEvents, setLoadingOlderEvents] = useState(false);
+  const [olderEventsError, setOlderEventsError] = useState('');
+  const allEvents = olderEvents ? [...events, ...olderEvents.events.filter((older) => !events.some((event) => event.id === older.id))].sort((a, b) => b.id - a.id) : events;
+  const canLoadOlderEvents = olderEvents ? olderEvents.hasMore : events.length >= 100;
+  const loadOlderEvents = async () => {
+    if (loadingOlderEvents || !allEvents.length) return;
+    setLoadingOlderEvents(true);
+    setOlderEventsError('');
+    try {
+      const before = Math.min(...allEvents.map((event) => event.id));
+      const response = await fetch(`${basePath}/api/admin/events?before=${before}`, { cache: 'no-store' });
+      const result = await response.json().catch(() => ({})) as { events?: EventRow[]; hasMore?: boolean; error?: string };
+      if (!response.ok || !Array.isArray(result.events)) throw new Error(result.error ?? `管理接口返回 HTTP ${response.status}`);
+      const loaded = result.events;
+      setOlderEvents((current) => ({ events: [...(current?.events ?? []), ...loaded], hasMore: Boolean(result.hasMore) }));
+    } catch (cause) {
+      setOlderEventsError(cause instanceof Error ? cause.message : '无法加载更早的事件');
+    } finally {
+      setLoadingOlderEvents(false);
+    }
+  };
   const [nyanpass, setNyanpass] = useState(initialNyanpass);
   const [showCreate, setShowCreate] = useState(false);
   const [showNyanpass, setShowNyanpass] = useState(false);
@@ -378,6 +401,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
       setNodes((current) => current.filter((item) => item.id !== node.id));
       setNyanpass((current) => current.filter((instance) => instance.nodeId !== node.id));
       setEvents((current) => current.filter((event) => event.nodeId !== node.id));
+      setOlderEvents((current) => current && { ...current, events: current.events.filter((event) => event.nodeId !== node.id) });
     } catch {
       setNodeDeleteError('无法确认节点是否已经删除，请刷新页面核对。');
     } finally {
@@ -402,6 +426,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
       setNodes((current) => current.map((node) => node.id === result.node.id ? result.node : node));
       setNyanpass((current) => current.map((instance) => instance.nodeId === result.node.id ? { ...instance, nodeName: result.node.name } : instance));
       setEvents((current) => [...result.events, ...current.map((item) => item.nodeId === result.node.id ? { ...item, nodeName: result.node.name } : item)].slice(0, 100));
+      setOlderEvents((current) => current && { ...current, events: current.events.map((item) => item.nodeId === result.node.id ? { ...item, nodeName: result.node.name } : item) });
       setNodeEditNotice(result.warnings.length ? `配置已保存；${result.warnings.join('；')}` : '节点配置已保存；已有地址且启用同步时，DNS 已立即刷新。');
       setEditingNode(null);
     } catch {
@@ -606,7 +631,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
             </section>}
 
             {activeView === 'activity' && <section className="view-page" aria-label={viewTitles.activity}>
-              <ActivityPanel events={events} now={now} expanded />
+              <ActivityPanel events={allEvents} now={now} expanded loadMore={{ canLoad: canLoadOlderEvents, loading: loadingOlderEvents, error: olderEventsError, onLoad: loadOlderEvents }} />
             </section>}
           </div>
         </section>
@@ -1044,7 +1069,9 @@ function DnsPanel({ nodes, onCreate, onEdit, notice }: { nodes: NodeRow[]; onCre
   </article>;
 }
 
-function ActivityPanel({ events, now, limit, expanded = false }: { events: EventRow[]; now: number; limit?: number; expanded?: boolean }) {
+type EventLoadMore = { canLoad: boolean; loading: boolean; error: string; onLoad: () => void };
+
+function ActivityPanel({ events, now, limit, expanded = false, loadMore }: { events: EventRow[]; now: number; limit?: number; expanded?: boolean; loadMore?: EventLoadMore }) {
   const [nodeFilter, setNodeFilter] = useState('all');
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [levelFilter, setLevelFilter] = useState('all');
@@ -1060,16 +1087,17 @@ function ActivityPanel({ events, now, limit, expanded = false }: { events: Event
   const contentId = expanded ? 'activity-log-content' : 'recent-changes-content';
   const clearFilters = () => { setNodeFilter('all'); setCategoryFilter('all'); setLevelFilter('all'); setQuery(''); };
   return <article className={`panel activity-panel${expanded ? ' activity-page' : ''}`}>
-    <div className="panel-heading"><div><h3>{expanded ? '事件记录' : '最近变更'}</h3><p>{expanded ? '筛选当前加载的最近 100 条事件' : '筛选主控最近处理的事件'}</p></div><div className="activity-heading-actions"><span className="live">LOG</span>{expanded && <button type="button" className="collapse-button" aria-expanded={!collapsed} aria-controls={contentId} onClick={() => setCollapsed((value) => !value)}>{collapsed ? '展开' : '折叠'}</button>}</div></div>
+    <div className="panel-heading"><div><h3>{expanded ? '事件记录' : '最近变更'}</h3><p>{expanded ? '筛选已加载的事件，列表底部可继续加载更早的记录' : '筛选主控最近处理的事件'}</p></div><div className="activity-heading-actions"><span className="live">LOG</span>{expanded && <button type="button" className="collapse-button" aria-expanded={!collapsed} aria-controls={contentId} onClick={() => setCollapsed((value) => !value)}>{collapsed ? '展开' : '折叠'}</button>}</div></div>
     <div id={contentId} hidden={collapsed}>
       <div className="activity-toolbar" aria-label={`${expanded ? '事件日志' : '最近变更'}筛选`}>
         <label><span>节点</span><select value={nodeFilter} onChange={(event) => setNodeFilter(event.target.value)}><option value="all">全部节点</option>{nodeOptions.map(([id, name]) => <option value={id} key={id}>{name}{(nodeNameCounts.get(name) ?? 0) > 1 ? ` · ${id.slice(0, 6)}` : ''}</option>)}</select></label>
         <label><span>类型</span><select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="all">全部类型</option><option value="node">节点</option><option value="ip">IP 变化</option><option value="dns">DNS</option><option value="nyanpass">Nyanpass</option><option value="other">其他</option></select></label>
         <label><span>级别</span><select value={levelFilter} onChange={(event) => setLevelFilter(event.target.value)}><option value="all">全部级别</option><option value="info">正常</option><option value="error">错误</option></select></label>
         <label className="activity-search"><span>关键词</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="消息、节点或事件类型" /></label>
-        <div className="filter-summary" aria-live="polite"><span>{matchingEvents.length} 条匹配</span>{hasFilters && <button type="button" onClick={clearFilters}>清除筛选</button>}</div>
+        <div className="filter-summary" aria-live="polite"><span>{matchingEvents.length} 条匹配{loadMore ? ` · 已加载 ${events.length} 条` : ''}</span>{hasFilters && <button type="button" onClick={clearFilters}>清除筛选</button>}</div>
       </div>
       <div className="activity-list">{visibleEvents.length ? visibleEvents.map((item) => <div className="activity-row" key={item.id}><span className={item.level === 'error' ? 'activity-check error' : 'activity-check'}>{item.level === 'error' ? '!' : '✓'}</span><div><strong>{item.message}</strong><p>{item.nodeName} · {eventKindLabel(item.kind)}</p></div><time title={new Date(item.createdAt).toLocaleString()}>{relativeTime(item.createdAt, now)}</time></div>) : <p className="empty-activity">{events.length && hasFilters ? '没有符合当前筛选条件的事件。' : '创建第一个节点后，DNS 同步与探针事件会出现在这里。'}</p>}</div>
+      {loadMore && events.length > 0 && <div className="load-more">{loadMore.canLoad ? <button type="button" className="ghost-button" disabled={loadMore.loading} onClick={loadMore.onLoad}>{loadMore.loading ? '正在加载…' : '加载更早的 100 条'}</button> : <p>已显示全部保留的事件（主控最多保留最近约 10,000 条）</p>}{loadMore.error && <p className="form-error" role="alert">{loadMore.error}</p>}</div>}
       <div className="security-note"><span>◇</span><div><strong>独立探针凭据</strong><p>安装命令长期有效，可随时重新复制；开机凭据以 AES-GCM 密文保存，Spot 换机后新机器用同一份 User data 重新安装。删除节点即撤销链接。</p></div></div>
     </div>
   </article>;

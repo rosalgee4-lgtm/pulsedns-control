@@ -1,4 +1,4 @@
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq, lt } from 'drizzle-orm';
 import type { AppDb } from '@/db';
 import { agentTasks, events, nodes, nyanpassInstances, users } from '@/db/schema';
 import type { CurrentUser } from '@/lib/auth';
@@ -43,7 +43,10 @@ export async function listInstances(db: AppDb, user: CurrentUser) {
   return rows.map(instanceResponse);
 }
 
-export async function listEvents(db: AppDb, user: CurrentUser, limit = 100) {
+export const EVENT_PAGE_SIZE = 100;
+
+// 事件按 id 倒序（即写入顺序）分页：beforeId 为空时取最新一页，否则取比它更早的一页。
+export async function listEvents(db: AppDb, user: CurrentUser, limit = EVENT_PAGE_SIZE, beforeId?: number) {
   const rows = await db.select({
     id: events.id,
     nodeId: events.nodeId,
@@ -52,7 +55,9 @@ export async function listEvents(db: AppDb, user: CurrentUser, limit = 100) {
     kind: events.kind,
     message: events.message,
     createdAt: events.createdAt,
-  }).from(events).innerJoin(nodes, eq(events.nodeId, nodes.id)).where(ownedBy(user)).orderBy(desc(events.createdAt)).limit(limit);
+  }).from(events).innerJoin(nodes, eq(events.nodeId, nodes.id))
+    .where(and(ownedBy(user), beforeId === undefined ? undefined : lt(events.id, beforeId)))
+    .orderBy(desc(events.id)).limit(limit);
   return rows.map((event) => ({ ...event, createdAt: event.createdAt.toISOString() }));
 }
 
