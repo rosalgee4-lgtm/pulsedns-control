@@ -77,6 +77,9 @@ button { cursor:pointer; }
 .ghost-button { color:var(--link); background:#fff; border:2px solid var(--link); }
 .ghost-button:hover:not(:disabled) { color:var(--link-hover); background:#f2f8fd; border-color:var(--link-hover); }
 .primary-button:disabled,.ghost-button:disabled { color:#8c8c94; background:#fff; border-color:#e9ebed; cursor:not-allowed; }
+.button-reason { display:inline-flex; }
+.button-reason[title] { cursor:not-allowed; }
+.button-reason > button:disabled { pointer-events:none; }
 .primary-button.compact { min-height:24px; padding:1px 10px; font-size:12px; }
 .primary-button:focus-visible,.ghost-button:focus-visible { outline:2px solid var(--link); outline-offset:2px; }
 .text-button,.edit-link,.sync-link,.danger-link,.inline-remove,.filter-summary button { padding:0; background:none; border:0; font-size:13px; white-space:nowrap; }
