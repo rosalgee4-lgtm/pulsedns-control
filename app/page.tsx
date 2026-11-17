@@ -8,6 +8,7 @@ import { basePath, requirePageUser } from '@/lib/auth';
 import { listDnsRecords, listEvents, listInstances, listNodes } from '@/lib/dashboard-data';
 import { listDomains } from '@/lib/domains';
 import { pruneEvents } from '@/lib/event-retention';
+import { settleAgentUpgrades } from '@/lib/agent-upgrade';
 import { expireProvisionAttempts } from '@/lib/provision-lifecycle';
 import { multiUserEnabled } from '@/lib/settings';
 
@@ -19,6 +20,7 @@ export default async function Home() {
   const db = await getDb();
   await expireProvisionAttempts(db, new Date());
   await pruneEvents(db).catch(() => undefined);
+  await settleAgentUpgrades(db, new Date()).catch(() => undefined);
 
   let admin: { multiUserEnabled: boolean; users: Array<{ id: string; username: string; role: string; nodeCount: number; createdAt: string }> } | null = null;
   if (user.role === 'admin') {

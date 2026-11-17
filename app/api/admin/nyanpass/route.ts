@@ -6,6 +6,7 @@ import { requireApiUser } from '@/lib/auth';
 import { instanceResponse, listDnsRecords, listEvents, listInstances, listNodes } from '@/lib/dashboard-data';
 import { canUseNode, modifiableInstanceNode } from '@/lib/ownership';
 import { expireAgentTasks } from '@/lib/agent-task-lifecycle';
+import { settleAgentUpgrades } from '@/lib/agent-upgrade';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
 import { parseOfficialNyanpassCommand, validNyanpassServiceName } from '@/lib/nyanpass-command';
 import { encryptNyanpassCredential } from '@/lib/nyanpass-credential';
@@ -23,6 +24,7 @@ export async function GET(request: Request) {
   const { db, user } = auth;
   await expireProvisionAttempts(db, new Date());
   await expireAgentTasks(db, new Date());
+  await settleAgentUpgrades(db, new Date()).catch(() => undefined);
   await pruneEvents(db).catch(() => undefined);
   return Response.json({
     instances: await listInstances(db, user),

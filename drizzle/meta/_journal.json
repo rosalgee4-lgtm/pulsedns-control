@@ -15,6 +15,13 @@
       "when": 1794934628997,
       "tag": "0001_machine_sharing",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1794938215058,
+      "tag": "0002_agent_remote_upgrade",
+      "breakpoints": true
     }
   ]
 }

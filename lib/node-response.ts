@@ -19,6 +19,8 @@ export function nodeResponse(node: typeof nodes.$inferSelect) {
     provisionLastCompletedStep: node.provisionLastCompletedStep,
     lastSeenAt: node.lastSeenAt?.toISOString() ?? null,
     lastTaskPollAt: node.lastTaskPollAt?.toISOString() ?? null,
+    agentUpgradeStatus: node.agentUpgradeStatus,
+    agentUpgradeTargetVersion: node.agentUpgradeTargetVersion,
     createdAt: node.createdAt.toISOString(),
     updatedAt: node.updatedAt.toISOString(),
   };

@@ -3,7 +3,8 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { copyText } from '@/lib/copy-text';
 import { filterEvents } from '@/lib/event-filter';
-import { buildAgentUpgradeCommand } from '@/lib/install-command';
+import { buildAgentUpgradeCommand, PROBE_AGENT_VERSION } from '@/lib/install-command';
+import { compareVersions, supportsRemoteUpgrade } from '@/lib/agent-version';
 
 type ViewId = 'overview' | 'nodes' | 'records' | 'domains' | 'nyanpass' | 'activity' | 'settings';
 
@@ -53,6 +54,7 @@ type NodeRow = {
   ownerId: string; ownerName?: string;
   // 机器分享：sharedWithMe 表示这台机器是分享给当前用户的；sharedWith 只有管理员能看到。
   sharedWithMe?: boolean; sharedWith?: Array<{ userId: string; username: string }>;
+  agentUpgradeStatus?: 'queued' | 'running' | null; agentUpgradeTargetVersion?: string | null;
 };
 type EventRow = { id: number; nodeId: string; nodeName: string; level: string; kind: string; message: string; createdAt: string };
 type DnsRecordRow = { id: string; nodeId: string; nodeName: string; ownerId: string; ownerName: string; domainName: string; recordV4: string | null; recordV6: string | null; createdAt: string };
@@ -140,6 +142,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
   const [syncingNyanpassIds, setSyncingNyanpassIds] = useState<Set<string>>(new Set());
   const [nyanpassErrors, setNyanpassErrors] = useState<Record<string, string>>({});
   const [agentUpgrade, setAgentUpgrade] = useState<{ nodeId: string; nodeName: string; command: string } | null>(null);
+  const [remoteUpgradeError, setRemoteUpgradeError] = useState('');
   const [copyFeedback, setCopyFeedback] = useState<'idle' | 'copying' | 'success' | 'error'>('idle');
   const [startupCopyFeedback, setStartupCopyFeedback] = useState<'idle' | 'copying' | 'success' | 'error'>('idle');
   const [now, setNow] = useState(0);
@@ -380,6 +383,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
     if (!resumeCreatedInstance) setCreatedNyanpass(null);
     setError(''); setEditError('');
     setAgentUpgrade({ nodeId: node.id, nodeName: node.name, command: buildAgentUpgradeCommand() });
+    setRemoteUpgradeError('');
     setCopyFeedback('idle');
   }
 
@@ -570,6 +574,25 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
   }
   const upgradedAgentNode = agentUpgrade ? nodes.find((node) => node.id === agentUpgrade.nodeId) : null;
   const agentUpgradeReady = Boolean(upgradedAgentNode && supportsRemoteSync(upgradedAgentNode.agentVersion) && hasRecentTaskPoll(upgradedAgentNode, now));
+  // 0.9.0 起的探针支持在面板上直接升级（被分享的用户不能升级机器上的探针）。
+  const canRemoteUpgrade = Boolean(upgradedAgentNode && !upgradedAgentNode.sharedWithMe && supportsRemoteUpgrade(upgradedAgentNode.agentVersion));
+  const agentIsLatest = Boolean(upgradedAgentNode && compareVersions(upgradedAgentNode.agentVersion, PROBE_AGENT_VERSION) >= 0);
+
+  async function startRemoteUpgrade() {
+    if (!upgradedAgentNode) return;
+    setSaving(true); setRemoteUpgradeError('');
+    try {
+      const response = await fetchWithTimeout(apiPath('/api/admin/nodes'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'agentUpgrade', id: upgradedAgentNode.id }) });
+      const result = await response.json().catch(() => ({ error: '主控返回了无效响应' })) as { node?: NodeRow; error?: string };
+      if (!response.ok || !result.node) { setRemoteUpgradeError(result.error ?? '无法开始升级'); return; }
+      const updated = result.node;
+      setNodes((current) => current.map((node) => node.id === updated.id ? { ...node, ...updated } : node));
+    } catch {
+      setRemoteUpgradeError('无法确认是否已开始升级，请刷新页面核对。');
+    } finally {
+      setSaving(false);
+    }
+  }
   const createdNyanpassNode = createdNyanpass ? nodes.find((node) => node.id === createdNyanpass.instance.nodeId) : null;
   const createdNyanpassNodeReady = Boolean(createdNyanpassNode && supportsRemoteSync(createdNyanpassNode.agentVersion) && nodeCanQueueTasks(createdNyanpassNode, nyanpass, now));
   const editingNyanpassRequiresCommand = Boolean(editingNyanpass && requiresFreshNyanpassCommand(editingNyanpass));
@@ -596,7 +619,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
               {navigation.filter((item) => item.group === group).map((item) => <NavLink key={item.id} item={item} active={activeView === item.id} onSelect={setActiveView} />)}
             </div>)}
           </nav>
-          <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.8.3 · {nodes.length} 个探针</small></div>
+          <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.9.0 · {nodes.length} 个探针</small></div>
         </aside>
 
         <section className="workspace" inert={hasModal}>
@@ -751,6 +774,14 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
           <p className="eyebrow cyan">探针升级</p><h2 id="agent-upgrade-title">升级 {agentUpgrade.nodeName} 的探针</h2>
           {agentUpgradeReady && <p className="form-success" role="status">当前 v{upgradedAgentNode?.agentVersion} 探针正在领取任务。</p>}
           <p className="modal-intro">原节点令牌和 DDNS 配置会保留，不会重新安装 Nyanpass。</p>
+          {canRemoteUpgrade && upgradedAgentNode && (upgradedAgentNode.agentUpgradeStatus
+            ? <p className="form-success" role="status">正在远程升级到 v{upgradedAgentNode.agentUpgradeTargetVersion ?? PROBE_AGENT_VERSION}：{upgradedAgentNode.agentUpgradeStatus === 'queued' ? '等待探针领取任务…' : '探针正在升级，完成后会以新版本重新上线…'}结果会写入事件记录。</p>
+            : agentIsLatest
+              ? <p className="form-hint">探针已经是最新版本 v{upgradedAgentNode.agentVersion}，无需升级。</p>
+              : <><button type="button" className="primary-button wide" disabled={saving} onClick={startRemoteUpgrade}>{saving ? '正在下发…' : `直接升级到 v${PROBE_AGENT_VERSION}`}</button>
+                <p className="form-hint">探针会在下次轮询时领取升级任务：先等正在进行的 Nyanpass 同步结束，再校验并运行固定版本的公共安装器，完成后自动以新版本上线。也可以复制下面的命令到机器上手动执行。</p></>)}
+          {!canRemoteUpgrade && upgradedAgentNode?.agentVersion && !upgradedAgentNode.sharedWithMe && <p className="form-hint">这台机器的探针 v{upgradedAgentNode.agentVersion} 还不支持在面板上直接升级，需要先把下面的命令复制到机器上执行一次；升级到 v{PROBE_AGENT_VERSION} 后，以后就能在这里直接升级。</p>}
+          {remoteUpgradeError && <p className="form-error" role="alert">{remoteUpgradeError}</p>}
           <pre className="install-command">{agentUpgrade.command}</pre>
           <button type="button" className="primary-button wide" disabled={copyFeedback === 'copying'} onClick={() => copyInstallCommand(agentUpgrade.command)}>{copyFeedback === 'copying' ? '正在复制…' : copyFeedback === 'success' ? '已复制升级命令' : '复制探针升级命令'}</button>
           {copyFeedback === 'success' && <p className="form-success" role="status">复制成功</p>}
@@ -788,7 +819,7 @@ function NodesPanel({ nodes, user, instances, onCreateInstance, onShare, now, on
         const sshChanged = ['failed', 'uncertain'].includes(node.nyanpassStatus) && node.provisionLastCompletedStep === 'ssh';
         const removing = removingNodeId === node.id;
         const statusLabel = bootstrapStalled ? 'User data 未执行' : bootstrapLocked ? bootstrapStatusLabel(node.nyanpassStatus) : hasReported ? '已上报' : '等待首次上报';
-        return [<tr key={node.id} className="machine-main-row"><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}{node.sharedWithMe && <b className="share-badge">共享</b>}</span>{node.sharedWith?.length ? <small>已分享给 {node.sharedWith.map((share) => share.username).join('、')}</small> : null}</td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported && !bootstrapLocked ? 'badge online' : 'badge warning'}>{statusLabel}</span>{bootstrapStalled && <small className="sync-error" role="alert">检查 User data、CRLF 和出站网络</small>}{node.provisionLastCompletedStep && bootstrapLocked && <small>最后完成：{provisionStepLabel(node.provisionLastCompletedStep)}</small>}{sshChanged && <small className="sync-error" role="alert">SSH 凭据已变更，请使用新密码核查</small>}</td><td>{node.sharedWithMe ? <button type="button" className="edit-link" disabled={bootstrapLocked} onClick={() => onCreateInstance(node.id)}>添加实例</button> : <div className="row-actions">
+        return [<tr key={node.id} className="machine-main-row"><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}{node.sharedWithMe && <b className="share-badge">共享</b>}</span>{node.sharedWith?.length ? <small>已分享给 {node.sharedWith.map((share) => share.username).join('、')}</small> : null}</td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported && !bootstrapLocked ? 'badge online' : 'badge warning'}>{statusLabel}</span>{bootstrapStalled && <small className="sync-error" role="alert">检查 User data、CRLF 和出站网络</small>}{node.provisionLastCompletedStep && bootstrapLocked && <small>最后完成：{provisionStepLabel(node.provisionLastCompletedStep)}</small>}{sshChanged && <small className="sync-error" role="alert">SSH 凭据已变更，请使用新密码核查</small>}{node.agentUpgradeStatus && <small>探针升级中 → v{node.agentUpgradeTargetVersion}</small>}</td><td>{node.sharedWithMe ? <button type="button" className="edit-link" disabled={bootstrapLocked} onClick={() => onCreateInstance(node.id)}>添加实例</button> : <div className="row-actions">
           <button type="button" className="edit-link" disabled={removing || loadingInstallationId !== null} onClick={() => onInstall(node)}>{loadingInstallationId === node.id ? '读取中…' : node.installationAvailable ? '安装命令' : '升级命令'}</button>
           {node.installationAvailable && node.nyanpassStatus === 'ready' && <button type="button" className="edit-link" disabled={removing} onClick={() => onUpgrade(node)}>升级命令</button>}
           {user.role === 'admin' && <button type="button" className="edit-link" disabled={removing} onClick={() => onShare(node)}>分享</button>}
@@ -1274,6 +1305,10 @@ function eventKindLabel(kind: string) {
     node_created: '节点创建',
     node_updated: '节点修改',
     node_shared: '机器分享',
+    agent_upgrade_requested: '请求升级探针',
+    agent_upgrade_started: '探针开始升级',
+    agent_upgrade_succeeded: '探针升级成功',
+    agent_upgrade_failed: '探针升级失败',
     node_unshared: '取消分享',
     dns_record_added: '添加解析',
     dns_record_removed: '移除解析',

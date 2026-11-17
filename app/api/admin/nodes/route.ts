@@ -5,7 +5,8 @@ import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { requireApiUser, type CurrentUser } from '@/lib/auth';
 import { canAccessNode, domainUsableBy } from '@/lib/ownership';
 import { syncAliDnsRecord } from '@/lib/alidns';
-import { buildNodeBootstrapConfig, buildNodeConnectCommand, DEFAULT_BBR_PROFILE, isBbrProfile, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES } from '@/lib/install-command';
+import { buildNodeBootstrapConfig, buildNodeConnectCommand, DEFAULT_BBR_PROFILE, isBbrProfile, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES, PROBE_AGENT_VERSION } from '@/lib/install-command';
+import { settleAgentUpgrades, supportsRemoteUpgrade, upgradeAvailable } from '@/lib/agent-upgrade';
 import { parseOfficialNyanpassCommand, validNyanpassServiceName } from '@/lib/nyanpass-command';
 import { publicOrigin } from '@/lib/public-origin';
 import { newAgentToken, newBootstrapDownloadToken, sha256 } from '@/lib/security';
@@ -26,6 +27,7 @@ export async function POST(request: Request) {
 
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   if (body?.action === 'installation') return installationCommands(request, db, user, body);
+  if (body?.action === 'agentUpgrade') return requestAgentUpgrade(db, user, body);
   const name = cleanText(body?.name, 60);
   const region = 'unknown';
   const bbrProfile = body?.bbrProfile === undefined || body?.bbrProfile === '' ? DEFAULT_BBR_PROFILE : body.bbrProfile;
@@ -126,6 +128,38 @@ export async function POST(request: Request) {
     expiresAt: null,
     instances: preparedInstances.map((instance) => ({ id: instance.id, nodeId: id, nodeName: name, ownerId: user.id, ownerName: user.username, name: instance.name, role: instance.role, panelUrl: instance.panelUrl, optimize: instance.optimize, status: 'bootstrap', hasCredential: false, lastReportedAt: null, syncError: null, activeTaskId: null, configRevision: 0, taskStatus: null, taskCreatedAt: null, taskClaimedAt: null, taskLeaseExpiresAt: null })),
   }, { status: 201, headers: { 'Cache-Control': 'no-store' } });
+}
+
+// 远程升级探针：只排队一个固定的升级任务，由探针下一次轮询时领取。
+async function requestAgentUpgrade(db: AppDb, user: CurrentUser, body: Record<string, unknown>) {
+  const id = cleanText(body.id, 64);
+  if (!id) return Response.json({ error: '缺少节点 ID' }, { status: 400 });
+  if (!await canAccessNode(db, user, id)) return Response.json({ error: '节点不存在' }, { status: 404 });
+  const now = new Date();
+  await settleAgentUpgrades(db, now, id);
+  const [node] = await db.select().from(nodes).where(eq(nodes.id, id)).limit(1);
+  if (!node) return Response.json({ error: '节点不存在' }, { status: 404 });
+  if (node.agentUpgradeId) return Response.json({ error: '这台机器的探针正在升级，请等待完成' }, { status: 409 });
+  if (isBootstrapLocked(node.nyanpassStatus)) return Response.json({ error: '开机安装尚未完成，暂时不能升级探针' }, { status: 409 });
+  if (!supportsRemoteUpgrade(node.agentVersion)) {
+    return Response.json({ error: `探针 ${node.agentVersion ? `v${node.agentVersion}` : '旧版本'} 还不支持远程升级，请先复制升级命令到机器上执行一次` }, { status: 409 });
+  }
+  if (!upgradeAvailable(node.agentVersion)) return Response.json({ error: `探针已经是最新版本 v${node.agentVersion}` }, { status: 409 });
+  if (!node.lastTaskPollAt || now.getTime() - node.lastTaskPollAt.getTime() > 2 * 60 * 1000) {
+    return Response.json({ error: '探针最近 2 分钟没有在线，无法远程升级；请确认机器正在运行' }, { status: 409 });
+  }
+  const upgradeId = crypto.randomUUID();
+  const queued = await db.update(nodes).set({
+    agentUpgradeId: upgradeId,
+    agentUpgradeStatus: 'queued',
+    agentUpgradeTargetVersion: PROBE_AGENT_VERSION,
+    agentUpgradeRequestedAt: now,
+    agentUpgradeStartedAt: null,
+  }).where(and(eq(nodes.id, id), isNull(nodes.agentUpgradeId)));
+  if (!affectedRows(queued)) return Response.json({ error: '这台机器的探针正在升级，请等待完成' }, { status: 409 });
+  await db.insert(events).values({ nodeId: id, kind: 'agent_upgrade_requested', message: `${user.username} 请求把探针从 v${node.agentVersion} 远程升级到 v${PROBE_AGENT_VERSION}`, createdAt: now });
+  const [latest] = await db.select().from(nodes).where(eq(nodes.id, id)).limit(1);
+  return Response.json({ node: nodeResponse(latest ?? node) });
 }
 
 async function installationCommands(request: Request, db: AppDb, user: CurrentUser, body: Record<string, unknown>) {

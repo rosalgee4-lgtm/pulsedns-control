@@ -67,6 +67,12 @@ export const nodes = mysqlTable('nodes', {
   dnsOperationExpiresAt: timestamp('dns_operation_expires_at'),
   lastSeenAt: timestamp('last_seen_at'),
   lastTaskPollAt: timestamp('last_task_poll_at'),
+  // 远程升级探针：queued = 等待探针领取，running = 探针已开始升级（等待新版本上报）。
+  agentUpgradeId: varchar('agent_upgrade_id', { length: 36 }),
+  agentUpgradeStatus: varchar('agent_upgrade_status', { length: 12, enum: ['queued', 'running'] }),
+  agentUpgradeTargetVersion: varchar('agent_upgrade_target_version', { length: 30 }),
+  agentUpgradeRequestedAt: timestamp('agent_upgrade_requested_at'),
+  agentUpgradeStartedAt: timestamp('agent_upgrade_started_at'),
   createdAt: timestamp('created_at').notNull(),
   updatedAt: timestamp('updated_at').notNull(),
   // MySQL 没有带条件的唯一索引：用生成列表达「启用同步时，同一主域名 + 主机记录只归一个节点」。

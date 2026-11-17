@@ -1,8 +1,10 @@
 import { and, asc, eq, exists, inArray } from 'drizzle-orm';
-import { getDb, runInTransaction } from '@/db';
+import { affectedRows, getDb, runInTransaction } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { expireAgentTasks } from '@/lib/agent-task-lifecycle';
+import { agentUpgradeFailureMessages, finishAgentUpgrade, settleAgentUpgrades } from '@/lib/agent-upgrade';
+import { PROBE_INSTALLER_SHA256, PROBE_INSTALLER_URL } from '@/lib/install-command';
 import { decryptNyanpassCredential } from '@/lib/nyanpass-credential';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
 import { reinstallArgs, upsertReinstallInstance } from '@/lib/reinstall-plan';
@@ -51,6 +53,27 @@ export async function GET(request: Request) {
   const [alreadyRunning] = await db.select({ id: agentTasks.id }).from(agentTasks)
     .where(and(eq(agentTasks.nodeId, node.id), eq(agentTasks.status, 'running'))).limit(1);
   if (alreadyRunning) return idleResponse();
+
+  // 远程升级探针：探针以新版本轮询即完成；升级进行中不再下发 Nyanpass 任务。
+  await settleAgentUpgrades(db, now, node.id);
+  const [upgrade] = await db.select({ id: nodes.agentUpgradeId, status: nodes.agentUpgradeStatus, target: nodes.agentUpgradeTargetVersion })
+    .from(nodes).where(eq(nodes.id, node.id)).limit(1);
+  if (upgrade?.id && upgrade.status === 'running') return idleResponse();
+  if (upgrade?.id && upgrade.status === 'queued') {
+    const started = await db.update(nodes).set({ agentUpgradeStatus: 'running', agentUpgradeStartedAt: now })
+      .where(and(eq(nodes.id, node.id), eq(nodes.agentUpgradeId, upgrade.id), eq(nodes.agentUpgradeStatus, 'queued')));
+    if (!affectedRows(started)) return idleResponse();
+    await db.insert(events).values({ nodeId: node.id, kind: 'agent_upgrade_started', message: `探针已领取升级任务，开始从 v${agentVersion || node.agentVersion} 升级到 v${upgrade.target}`, createdAt: now }).catch(() => undefined);
+    return Response.json({
+      status: 'job',
+      protocol: 1,
+      job: {
+        id: upgrade.id,
+        action: 'agent_upgrade_v1',
+        payload: { installerUrl: PROBE_INSTALLER_URL, installerSha256: PROBE_INSTALLER_SHA256, version: upgrade.target },
+      },
+    }, { headers: noStoreHeaders });
+  }
 
   const [task] = await db.select({
     id: agentTasks.id,
@@ -161,6 +184,17 @@ export async function POST(request: Request) {
   if (operationId === null) return errorResponse('节点正在处理其他操作，请稍后重试回执', 429);
   try {
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+  // 探针升级在启动前失败（参数、下载或校验未通过）时的回执。
+  if (body && 'upgradeId' in body) {
+    const upgradeId = cleanText(body.upgradeId, 64);
+    const errorCode = cleanText(body.errorCode, 40);
+    if (Object.keys(body).some((key) => !['upgradeId', 'outcome', 'errorCode'].includes(key)) || !/^[0-9a-f-]{36}$/.test(upgradeId)
+      || body.outcome !== 'failed' || !agentUpgradeFailureMessages[errorCode]) {
+      return errorResponse('回执参数无效', 400);
+    }
+    await finishAgentUpgrade(db, node.id, upgradeId, new Date(), 'error', 'agent_upgrade_failed', `探针升级失败：${agentUpgradeFailureMessages[errorCode]}`);
+    return okResponse();
+  }
   if (!body || Object.keys(body).some((key) => !['jobId', 'leaseToken', 'outcome', 'errorCode'].includes(key))) {
     return errorResponse('回执格式无效', 400);
   }

@@ -25,8 +25,10 @@ export function isBbrProfile(value: unknown): value is BbrProfile {
   return typeof value === 'string' && (BBR_PROFILES as readonly string[]).includes(value);
 }
 
-export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/661ef2da011e57ccf6d91518738a7fb07cfd8853/public/install.sh';
-export const PROBE_INSTALLER_SHA256 = 'c39616fbeec961dfa259bfc5503faa3f4b8025a0d94d0d3d0127ec2c0d63a87d';
+export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/740e21c79291ff6eb0c183b0c5a6f7525a30689b/public/install.sh';
+export const PROBE_INSTALLER_SHA256 = '80cd13187a6428384c529fcaba05e9606db7c3b171d44190a421c9821e687e9a';
+// 上面固定的公共安装器所安装的探针版本；远程升级以探针上报这个版本作为完成标志。
+export const PROBE_AGENT_VERSION = '0.9.0';
 export const MAX_CLOUD_LAUNCHER_BYTES = 15 * 1024;
 export const MAX_BOOTSTRAP_RESPONSE_BYTES = 64 * 1024;
 

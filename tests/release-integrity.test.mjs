@@ -52,11 +52,13 @@ test('release scripts and documentation pin every published SHA-256', () => {
 
 test('release version agrees across runtime entrypoints', () => {
   const version = JSON.parse(text('package.json')).version;
-  assert.equal(version, '0.8.3');
+  assert.equal(version, '0.9.0');
   for (const name of ['public/install.sh', 'public/monitor.sh']) {
     assert.equal(capture(name, /^VERSION="([0-9]+\.[0-9]+\.[0-9]+)"$/m), version);
   }
   assert.match(text('app/dashboard.tsx'), new RegExp(`v${version.replaceAll('.', '\\.')}`));
+  // 面板以「探针上报这个版本」判断远程升级完成，必须与固定的安装器版本一致。
+  assert.equal(capture('lib/install-command.ts', /PROBE_AGENT_VERSION = '([0-9]+\.[0-9]+\.[0-9]+)'/), version);
 });
 
 test('download URLs pin actual Git objects, not movable release branches', () => {
