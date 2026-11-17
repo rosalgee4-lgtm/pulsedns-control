@@ -124,7 +124,7 @@ git clone https://github.com/rosalgee4-lgtm/pulsedns-control.git
 ```
 
 ```bash
-git -C pulsedns-control checkout --detach __PANEL_SOURCE_COMMIT__
+git -C pulsedns-control checkout --detach 9e93fad3d239f31664e3f11f9bcfa12cd90a2155
 ```
 
 ```bash
@@ -168,12 +168,14 @@ proxy_set_header X-Forwarded-Proto $scheme;
 
 ### 5. 升级
 
+把 `NEW_COMMIT` 设为最新 README「获取固定版本的源码」一步中的 commit，然后执行：
+
 ```bash
 git -C pulsedns-control fetch origin
 ```
 
 ```bash
-git -C pulsedns-control checkout --detach <新的发布 commit>
+git -C pulsedns-control checkout --detach "$NEW_COMMIT"
 ```
 
 ```bash
