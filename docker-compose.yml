@@ -1,0 +1,22 @@
+# PulseDNS 控制面板：只包含面板容器，数据库使用你自己的 MySQL 8 / MariaDB 10.6+。
+# 端口只绑定 127.0.0.1，由宝塔等反向代理对外提供 HTTPS。
+services:
+  pulsedns:
+    build:
+      context: .
+      args:
+        PULSEDNS_BASE_PATH: ${PULSEDNS_BASE_PATH:?请在 .env 中设置 PULSEDNS_BASE_PATH}
+    image: pulsedns-control:local
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PULSEDNS_TRUST_PROXY: "1"
+    ports:
+      - "127.0.0.1:${PULSEDNS_PANEL_PORT:-3100}:3100"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

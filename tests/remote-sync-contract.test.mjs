@@ -12,7 +12,9 @@ const monitor = await readFile(new URL('../public/monitor.sh', import.meta.url),
 const installScript = await readFile(new URL('../public/install.sh', import.meta.url), 'utf8');
 const schema = await readFile(new URL('../db/schema.ts', import.meta.url), 'utf8');
 const credential = await readFile(new URL('../lib/nyanpass-credential.ts', import.meta.url), 'utf8');
-const panelInstaller = await readFile(new URL('../public/panel-install.sh', import.meta.url), 'utf8');
+const envExample = await readFile(new URL('../.env.example', import.meta.url), 'utf8');
+const dbInit = await readFile(new URL('../db/init.ts', import.meta.url), 'utf8');
+const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'utf8');
 const proxy = await readFile(new URL('../proxy.ts', import.meta.url), 'utf8');
 const lifecycle = await readFile(new URL('../lib/agent-task-lifecycle.ts', import.meta.url), 'utf8');
 const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
@@ -40,10 +42,9 @@ test('credentials are AES-GCM encrypted with task-bound AAD and fail closed with
   assert.match(credential, /PULSEDNS_TASK_ENCRYPTION_KEY/);
   assert.doesNotMatch(schema, /client_token|nyanpass_token|command TEXT/i);
   assert.match(schema, /credentialCiphertext/);
-  assert.match(panelInstaller, /generate_task_encryption_key/);
-  assert.match(panelInstaller, /chmod 0600 "\$ENV_FILE"/);
-  assert.match(panelInstaller, /TASK_KEY_FILE/);
-  assert.match(panelInstaller, /rewrite_env_task_encryption_key/);
+  assert.match(envExample, /PULSEDNS_TASK_ENCRYPTION_KEY=\n/, 'the example never ships a real key');
+  assert.match(envExample, /openssl rand -hex 32/);
+  assert.match(dbInit, /PULSEDNS_TASK_ENCRYPTION_KEY 至少 32 个字符/);
 });
 
 test('admin save encrypts the token and explicit sync queues only a fixed task kind', () => {
@@ -60,7 +61,7 @@ test('admin save encrypts the token and explicit sync queues only a fixed task k
 test('agent task endpoint authenticates, conditionally leases, validates revision, and scrubs the credential on success', () => {
   assert.match(taskRoute, /eq\(nodes\.tokenHash, await sha256\(token\)\)/);
   assert.match(taskRoute, /eq\(agentTasks\.status, 'queued'\)/);
-  assert.match(taskRoute, /await db\.batch\(\[/);
+  assert.match(taskRoute, /await runInTransaction\(db, \[/);
   assert.match(taskRoute, /taskWasClaimed/);
   assert.match(taskRoute, /activeTaskId !== task\.id|instance\.activeTaskId !== task\.id/);
   assert.match(taskRoute, /instanceRevision !== task\.revision|instance\.configRevision !== task\.revision/);
@@ -71,7 +72,7 @@ test('agent task endpoint authenticates, conditionally leases, validates revisio
   assert.match(taskRoute, /trustedNyanpassRelease/);
   assert.match(taskRoute, /release: nyanpassRelease/);
   assert.doesNotMatch(taskRoute, /shellCommand|bashCommand/);
-  assert.match(proxy, /'\/api\/v1\/tasks'/);
+  assert.doesNotMatch(proxy, /api\/v1/);
 });
 
 test('bootstrap completion is authenticated, durable, and gates remote tasks', () => {
@@ -93,7 +94,8 @@ test('bootstrap completion is authenticated, durable, and gates remote tasks', (
   assert.match(monitor, /attemptId/);
   assert.match(monitor, /accepted.*duplicate.*stale/);
   assert.match(monitor, /retry_provision_outcome/);
-  assert.match(proxy, /'\/api\/v1\/provision'/);
+  // 探针接口由节点令牌认证，代理层不再拦截任何 /api/v1 路径。
+  assert.doesNotMatch(proxy, /api\/v1/);
 });
 
 test('node operation lease serializes task delivery, bootstrap callbacks, and deletion-sensitive mutations', () => {
@@ -182,7 +184,7 @@ test('requeued jobs get a fresh queue time and late acknowledgements accept the 
 });
 
 test('probe executables use an HTTPS release plus a pinned digest', () => {
-  assert.match(panelInstaller, /SOURCE_LOCK_SHA256/);
+  assert.match(dockerfile, /pnpm install --frozen-lockfile/);
   assert.match(monitor, /NYANPASS_INSTALL_URL="https:\/\//);
   assert.match(installScript, /MONITOR_DOWNLOAD_URL="https:\/\/[^"]+"[\s\S]*MONITOR_SHA256="[a-f0-9]{64}"/);
   const pinnedMonitorHash = installScript.match(/MONITOR_SHA256="([a-f0-9]{64})"/)?.[1];
@@ -207,9 +209,8 @@ test('probe executables use an HTTPS release plus a pinned digest', () => {
 });
 
 test('self-hosted panels do not serve root shell payloads', () => {
-  assert.match(proxy, /const SELF_HOSTED_SCRIPT_PATHS = new Set\(\[[\s\S]*'\/install\.sh'[\s\S]*'\/monitor\.sh'[\s\S]*'\/update\.sh'/);
-  assert.match(proxy, /process\.env\.PULSEDNS_SELF_HOSTED !== '1'[\s\S]*return NextResponse\.next\(\)/);
-  assert.match(proxy, /SELF_HOSTED_SCRIPT_PATHS\.has\(pathname\)[\s\S]*status: 404/);
+  assert.match(proxy, /const SCRIPT_PATHS = new Set\(\[[\s\S]*'\/install\.sh'[\s\S]*'\/monitor\.sh'[\s\S]*'\/update\.sh'/);
+  assert.match(proxy, /SCRIPT_PATHS\.has\(request\.nextUrl\.pathname\)[\s\S]*status: 404/);
   const publicPaths = proxy.match(/const PUBLIC_PATHS = new Set\(\[([\s\S]*?)\]\);/)?.[1] ?? '';
   assert.doesNotMatch(publicPaths, /\/(?:install|monitor|update)\.sh/);
 });

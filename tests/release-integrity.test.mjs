@@ -23,7 +23,11 @@ const files = Object.fromEntries(await Promise.all([
   'public/install.sh',
   'public/monitor.sh',
   'public/og.png',
-  'public/panel-install.sh',
+  'Dockerfile',
+  'docker-compose.yml',
+  'db/schema.ts',
+  'lib/auth.ts',
+  'proxy.ts',
   'public/update.sh',
 ].map(async (name) => [name, await readFile(new URL(`../${name}`, import.meta.url))])));
 
@@ -39,21 +43,17 @@ test('release scripts and documentation pin every published SHA-256', () => {
   const monitorHash = digest('public/monitor.sh');
   const installHash = digest('public/install.sh');
   const updateHash = digest('public/update.sh');
-  const panelHash = digest('public/panel-install.sh');
 
   assert.equal(capture('public/install.sh', /^MONITOR_SHA256="([a-f0-9]{64})"$/m), monitorHash);
   assert.equal(capture('public/update.sh', /^MONITOR_SHA256="([a-f0-9]{64})"$/m), monitorHash);
   assert.equal(capture('lib/install-command.ts', /PROBE_INSTALLER_SHA256 = '([a-f0-9]{64})'/), installHash);
-  for (const hash of [installHash, updateHash, panelHash]) assert.ok(text('README.md').includes(hash), `README missing ${hash}`);
-
-  assert.equal(capture('public/panel-install.sh', /^SOURCE_LOCK_SHA256="([a-f0-9]{64})"$/m), digest('pnpm-lock.yaml'));
-  assert.equal(capture('public/panel-install.sh', /^SOURCE_OG_SHA256="([a-f0-9]{64})"$/m), digest('public/og.png'));
+  for (const hash of [installHash, updateHash]) assert.ok(text('README.md').includes(hash), `README missing ${hash}`);
 });
 
 test('release version agrees across runtime entrypoints', () => {
   const version = JSON.parse(text('package.json')).version;
   assert.equal(version, '0.8.3');
-  for (const name of ['public/install.sh', 'public/monitor.sh', 'public/panel-install.sh']) {
+  for (const name of ['public/install.sh', 'public/monitor.sh']) {
     assert.equal(capture(name, /^VERSION="([0-9]+\.[0-9]+\.[0-9]+)"$/m), version);
   }
   assert.match(text('app/dashboard.tsx'), new RegExp(`v${version.replaceAll('.', '\\.')}`));
@@ -75,30 +75,31 @@ test('download URLs pin actual Git objects, not movable release branches', () =>
   }
 });
 
-test('documented downloads and deployed panel source use matching immutable payloads', () => {
-  const urls = [...text('README.md').matchAll(/https:\/\/raw\.githubusercontent\.com\/rosalgee4-lgtm\/pulsedns-control\/([^/\s]+)\/(public\/(?:panel-install|install|update)\.sh)/g)];
-  assert.ok(urls.length >= 5);
+test('documented probe downloads and the Docker panel source use matching immutable payloads', () => {
+  const urls = [...text('README.md').matchAll(/https:\/\/raw\.githubusercontent\.com\/rosalgee4-lgtm\/pulsedns-control\/([^/\s]+)\/(public\/(?:install|update)\.sh)/g)];
+  assert.ok(urls.length >= 2);
   for (const [, commit, path] of urls) {
     assert.match(commit, /^[a-f0-9]{40}$/);
     const published = execFileSync('git', ['show', `${commit}:${path}`], { cwd: new URL('..', import.meta.url) });
     assert.equal(createHash('sha256').update(published).digest('hex'), digest(path), `${commit}:${path} differs from documented checksum`);
   }
-  const sourceCommit = capture('public/panel-install.sh', /^SOURCE_COMMIT="([a-f0-9]{40})"$/m);
-  for (const name of ['app/api/admin/nodes/route.ts', 'app/api/admin/nyanpass/route.ts', 'app/api/admin/nyanpass/sync/route.ts', 'app/dashboard.tsx', 'app/globals.css', 'lib/bootstrap-payload.ts', 'lib/install-command.ts', 'lib/node-response.ts', 'lib/nyanpass-command.ts', 'lib/nyanpass-credential.ts', 'lib/startup-launcher.ts', 'package.json']) {
-    const deployed = execFileSync('git', ['show', `${sourceCommit}:${name}`], { cwd: new URL('..', import.meta.url), encoding: 'utf8' });
-    assert.equal(deployed, text(name), `panel installer would deploy stale ${name}`);
+  // README 的 Docker 部署按固定 commit 检出源码；该 commit 必须就是当前发布的代码。
+  const sourceCommit = capture('README.md', /git -C pulsedns-control checkout --detach ([a-f0-9]{40})/);
+  for (const name of ['Dockerfile', 'docker-compose.yml', 'db/schema.ts', 'lib/auth.ts', 'proxy.ts', 'app/api/admin/nodes/route.ts', 'app/api/admin/nyanpass/route.ts', 'app/api/admin/nyanpass/sync/route.ts', 'app/dashboard.tsx', 'app/globals.css', 'lib/bootstrap-payload.ts', 'lib/install-command.ts', 'lib/node-response.ts', 'lib/nyanpass-command.ts', 'lib/nyanpass-credential.ts', 'lib/startup-launcher.ts', 'package.json', 'pnpm-lock.yaml']) {
+    const deployed = execFileSync('git', ['show', `${sourceCommit}:${name}`], { cwd: new URL('..', import.meta.url) });
+    assert.ok(deployed.equals(files[name]), `Docker deployment would build stale ${name}`);
   }
 });
 
-test('self-hosted build is independent of Google Fonts and panel source checks the launcher', () => {
+test('the Docker image is built from pinned inputs and runs unprivileged behind a local-only port', () => {
   assert.doesNotMatch(text('app/layout.tsx'), /next\/font\/google/);
-  assert.match(text('public/panel-install.sh'), /lib\/startup-launcher\.ts/);
-  assert.match(text('public/panel-install.sh'), /lib\/install-command\.ts/);
-  assert.match(text('public/panel-install.sh'), /app\/api\/admin\/nodes\/route\.ts/);
-  assert.match(text('public/panel-install.sh'), /grep -Fq 'startupScript'/);
-  assert.match(text('public/panel-install.sh'), /grep -Fq 'connectCommand'/);
-  assert.match(text('public/panel-install.sh'), /grep -Fq 'buildNodeBootstrapConfig'/);
-  assert.match(text('public/panel-install.sh'), /application\/octet-stream/);
-  assert.match(text('public/panel-install.sh'), /"\$ACTION" == "probe"/);
-  assert.match(text('public/panel-install.sh'), /^SOURCE_COMMIT="[a-f0-9]{40}"$/m);
+  const bases = [...text('Dockerfile').matchAll(/^FROM (\S+)/gm)].map((match) => match[1]);
+  assert.ok(bases.length >= 2);
+  for (const base of bases) assert.match(base, /^node:22\.\d+\.\d+-bookworm-slim@sha256:[a-f0-9]{64}$/, 'base images are pinned by digest');
+  assert.match(text('Dockerfile'), /corepack prepare pnpm@10\.28\.2 --activate/);
+  assert.match(text('Dockerfile'), /pnpm install --frozen-lockfile/);
+  assert.match(text('Dockerfile'), /^USER node$/m);
+  assert.match(text('docker-compose.yml'), /"127\.0\.0\.1:\$\{PULSEDNS_PANEL_PORT:-3100\}:3100"/);
+  assert.match(text('docker-compose.yml'), /no-new-privileges:true/);
+  assert.match(text('docker-compose.yml'), /cap_drop:\s*\n\s*- ALL/);
 });

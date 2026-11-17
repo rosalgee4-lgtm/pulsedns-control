@@ -5,7 +5,7 @@ import { copyText } from '@/lib/copy-text';
 import { filterEvents } from '@/lib/event-filter';
 import { buildAgentUpgradeCommand } from '@/lib/install-command';
 
-type ViewId = 'overview' | 'nodes' | 'records' | 'domains' | 'nyanpass' | 'activity';
+type ViewId = 'overview' | 'nodes' | 'records' | 'domains' | 'nyanpass' | 'activity' | 'settings';
 
 const navigation: Array<{ id: ViewId; label: string; group?: string }> = [
   { id: 'overview', label: '控制面板' },
@@ -14,6 +14,7 @@ const navigation: Array<{ id: ViewId; label: string; group?: string }> = [
   { id: 'domains', label: '阿里云主域名', group: 'DNS' },
   { id: 'nyanpass', label: '添加Nyanpass实例', group: 'Nyanpass' },
   { id: 'activity', label: '事件日志', group: '审计' },
+  { id: 'settings', label: '设置', group: '设置' },
 ];
 const navigationGroups = Array.from(new Set(navigation.map((item) => item.group).filter((group): group is string => Boolean(group))));
 
@@ -24,6 +25,7 @@ const viewDescriptions: Record<ViewId, string> = {
   domains: '先添加阿里云账号（AccessKey），再添加主域名并选择它属于哪个账号；添加或修改节点时从下拉框中选择主域名。',
   nyanpass: '保存新的官方命令后，点击同步到机器；探针只会领取固定类型的 Nyanpass 安装任务，不接受任意 Shell。',
   activity: '查看探针注册、IP 变化、DNS 同步和 Nyanpass 实例登记记录。',
+  settings: '修改自己的登录密码；管理员还可以开关多用户模式并管理用户。',
 };
 
 const viewTitles: Record<ViewId, string> = {
@@ -33,6 +35,7 @@ const viewTitles: Record<ViewId, string> = {
   domains: '阿里云主域名',
   nyanpass: '添加Nyanpass实例',
   activity: '事件日志',
+  settings: '设置',
 };
 
 function isViewId(value: string): value is ViewId {
@@ -47,6 +50,7 @@ type NodeRow = {
   agentVersion: string | null; lastTaskPollAt: string | null; nyanpassStatus: string;
   provisionLastCompletedStep: string | null;
   installationAvailable: boolean;
+  ownerId: string; ownerName?: string;
 };
 type EventRow = { id: number; nodeId: string; nodeName: string; level: string; kind: string; message: string; createdAt: string };
 type NyanpassStatusValue = 'ready' | 'pending' | 'running' | 'success' | 'failed' | 'uncertain' | 'bootstrap' | 'legacy' | '等待安装';
@@ -58,9 +62,11 @@ type NyanpassRow = {
   taskStatus: string | null; taskCreatedAt: string | null; taskClaimedAt: string | null; taskLeaseExpiresAt: string | null;
 };
 type NyanpassDraft = { name: string; command: string };
-type DomainRow = { name: string; accountId: string | null; createdAt: string };
-type AliyunAccountRow = { id: string; name: string; accessKeyId: string | null; createdAt: string };
-type AliyunState = { defaultAccount: { configured: boolean; accessKeyId: string | null }; accounts: AliyunAccountRow[] };
+type DomainRow = { name: string; ownerId: string; ownerName: string; accountId: string; createdAt: string };
+type AliyunAccountRow = { id: string; ownerId: string; ownerName: string; name: string; accessKeyId: string; accessKeySecret: string; createdAt: string };
+type SessionUser = { id: string; name: string; role: 'admin' | 'user' };
+type AdminUserRow = { id: string; username: string; role: string; nodeCount: number; createdAt: string };
+type AdminState = { multiUserEnabled: boolean; users: AdminUserRow[] };
 type InstallationCommands = { installUrl: string; connectCommand: string; startupScript: string; expiresAt: string | null; node: { id: string; name: string; region: string } };
 type CreatedNode = InstallationCommands & { instances: NyanpassRow[] };
 type CreatedNyanpass = { instance: NyanpassRow };
@@ -71,13 +77,16 @@ function emptyNyanpassDraft(): NyanpassDraft {
   return { name: '', command: '' };
 }
 
-export default function Dashboard({ basePath, user, initialNodes, initialDomains, initialAliyun, initialEvents, initialNyanpass }: { basePath: string; user: { name: string; email: string }; initialNodes: NodeRow[]; initialDomains: DomainRow[]; initialAliyun: AliyunState; initialEvents: EventRow[]; initialNyanpass: NyanpassRow[] }) {
+export default function Dashboard({ basePath, user, initialNodes, initialDomains, initialAliyun, initialEvents, initialNyanpass, initialAdmin }: { basePath: string; user: SessionUser; initialNodes: NodeRow[]; initialDomains: DomainRow[]; initialAliyun: AliyunAccountRow[]; initialEvents: EventRow[]; initialNyanpass: NyanpassRow[]; initialAdmin: AdminState | null }) {
   const apiPath = (path: string) => `${basePath}${path}`;
   const [activeView, setActiveView] = useState<ViewId>('overview');
   const [navOpen, setNavOpen] = useState(true);
   const [nodes, setNodes] = useState(initialNodes);
   const [domainList, setDomainList] = useState(initialDomains);
   const [aliyun, setAliyun] = useState(initialAliyun);
+  const [adminState, setAdminState] = useState(initialAdmin);
+  // 节点只能使用其所属用户自己的主域名。
+  const domainsOwnedBy = (ownerId: string) => domainList.filter((domain) => domain.ownerId === ownerId);
   const [events, setEvents] = useState(initialEvents);
   const [nyanpass, setNyanpass] = useState(initialNyanpass);
   const [showCreate, setShowCreate] = useState(false);
@@ -138,6 +147,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
       const sequence = ++refreshSequence.current;
       try {
         const response = await fetch(`${basePath}/api/admin/nyanpass`, { cache: 'no-store', signal: activeController.signal });
+        if (response.status === 401) { window.location.assign(`${basePath}/login`); return; }
         if (!response.ok) throw new Error(`管理接口返回 HTTP ${response.status}`);
         const result = await response.json() as { instances?: NyanpassRow[]; nodes?: NodeRow[]; events?: EventRow[] };
         if (!Array.isArray(result.instances) || !Array.isArray(result.nodes) || !Array.isArray(result.events)) throw new Error('管理接口返回内容不完整');
@@ -202,6 +212,11 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
     };
   }, []);
 
+  async function logout() {
+    await fetch(apiPath('/api/auth/logout'), { method: 'POST' }).catch(() => undefined);
+    window.location.assign(`${basePath}/login`);
+  }
+
   async function createNode(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSaving(true); setError('');
@@ -217,7 +232,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
       setStartupCopyFeedback('idle');
       setNyanpass((current) => [...result.instances, ...current]);
       setNodes((current) => [{
-        id: result.node.id, name: result.node.name, region: result.node.region, ipv4: null, ipv6: null,
+        id: result.node.id, ownerId: user.id, ownerName: user.name, name: result.node.name, region: result.node.region, ipv4: null, ipv6: null,
         recordV4: String(form.get('recordV4') || '') || null, recordV6: String(form.get('recordV6') || '') || null,
         lastSeenAt: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         provider: 'alidns', domainName: String(form.get('domainName') || '') || null,
@@ -527,7 +542,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
     <main className={`app-shell${navOpen ? '' : ' nav-collapsed'}`}>
       <header className="console-topbar" inert={hasModal}>
         <div className="console-brand"><span className="brand-word">Pulse<b>DNS</b></span><span className="console-service">DDNS 控制台</span></div>
-        <div className="top-actions"><span className={`sync-state${refreshError ? ' error' : ''}`} title={refreshError || (lastSuccessfulRefresh ? `上次刷新：${new Date(lastSuccessfulRefresh).toLocaleTimeString()}` : '页面已由主控加载')}><i /> {refreshError ? '状态刷新失败' : '主控在线'}</span><span className="user-chip" title={user.email}>{user.name.slice(0, 1).toUpperCase()}</span><span className="user-name">{user.name}</span></div>
+        <div className="top-actions"><span className={`sync-state${refreshError ? ' error' : ''}`} title={refreshError || (lastSuccessfulRefresh ? `上次刷新：${new Date(lastSuccessfulRefresh).toLocaleTimeString()}` : '页面已由主控加载')}><i /> {refreshError ? '状态刷新失败' : '主控在线'}</span><span className="user-chip" title={user.role === 'admin' ? '管理员' : '普通用户'}>{user.name.slice(0, 1).toUpperCase()}</span><span className="user-name">{user.name}</span><button type="button" className="logout-button" onClick={() => void logout()}>退出</button></div>
       </header>
       <nav className="console-breadcrumb" aria-label="当前位置" inert={hasModal}>
         <button type="button" className="console-nav-toggle" aria-label={navOpen ? '收起导航' : '展开导航'} aria-expanded={navOpen} onClick={() => setNavOpen((open) => !open)}><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.5" /><path d="M6 3v10" stroke="currentColor" strokeWidth="1.5" /></svg></button>
@@ -578,7 +593,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
             </section>}
   
             {activeView === 'domains' && <section className="view-page" aria-label={viewTitles.domains}>
-              <AliyunDomainsPanel apiPath={apiPath} domains={domainList} onDomainsChange={setDomainList} aliyun={aliyun} onAliyunChange={setAliyun} nodes={nodes} />
+              <AliyunDomainsPanel apiPath={apiPath} user={user} domains={domainList} onDomainsChange={setDomainList} accounts={aliyun} onAccountsChange={setAliyun} nodes={nodes} />
             </section>}
   
             {activeView === 'nyanpass' && <section className="view-page" aria-label={viewTitles.nyanpass}>
@@ -586,6 +601,10 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
               <NyanpassPanel instances={nyanpass} nodes={nodes} hasNodes={Boolean(nodes.length)} syncingIds={syncingNyanpassIds} errors={nyanpassErrors} now={now} onCreate={openNyanpassModal} onEdit={beginNyanpassEdit} onRemove={removeNyanpassInstance} onSync={syncNyanpassInstance} onCancel={cancelNyanpassSync} onUpgrade={showAgentUpgrade} />
             </section>}
   
+            {activeView === 'settings' && <section className="view-page" aria-label={viewTitles.settings}>
+              <SettingsPanel apiPath={apiPath} user={user} admin={adminState} onAdminChange={setAdminState} />
+            </section>}
+
             {activeView === 'activity' && <section className="view-page" aria-label={viewTitles.activity}>
               <ActivityPanel events={events} now={now} expanded />
             </section>}
@@ -603,8 +622,8 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
               <p className="form-hint">root 密码只会随开机安装凭据加密保存，不会进入节点列表、事件或日志；Spot 换机重装时沿用同一密码。</p>
               <label>BBR 优化<select name="bbrProfile" defaultValue="c6in"><option value="c6in">使用 c6in BBR 优化（10MB 缓冲）</option><option value="c5in">使用 c5in BBR 优化（50MB 缓冲）</option></select></label>
               <p className="form-hint">BBR + fq 和 sysctl 参数作用于整台机器，覆盖 /etc/sysctl.conf 前会先备份。</p>
-              <label>阿里云主域名<select name="domainName" defaultValue=""><option value="">不配置 DNS</option>{domainList.map((domain) => <option key={domain.name} value={domain.name}>{domain.name}</option>)}</select></label>
-              {!domainList.length && <p className="form-hint">还没有主域名，请先到「阿里云主域名」页面添加。</p>}
+              <label>阿里云主域名<select name="domainName" defaultValue=""><option value="">不配置 DNS</option>{domainsOwnedBy(user.id).map((domain) => <option key={domain.name} value={domain.name}>{domain.name}</option>)}</select></label>
+              {!domainsOwnedBy(user.id).length && <p className="form-hint">还没有主域名，请先到「阿里云主域名」页面添加。</p>}
               <div className="form-grid"><label>IPv4 主机记录<input name="recordV4" placeholder="home 或 @" /></label><label>IPv6 主机记录<input name="recordV6" placeholder="home 或 @" /></label></div>
               <p className="form-hint">例如 home.example.com：主域名填 example.com，主机记录填 home；根域名填 @。</p>
               <fieldset className="nyanpass-batch"><legend>Nyanpass 实例（可添加多个）</legend>{nodeNyanpass.map((instance, index) => <div className="nyanpass-draft" key={index}>
@@ -662,7 +681,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
           <p className="eyebrow cyan">修改节点</p><h2 id="edit-node-title">编辑 {editingNode.name}</h2><p className="modal-intro">修改名称和阿里云 DNS 映射。探针令牌、公网地址及安装状态不会改变，也不需要重新安装探针。</p>
           <form key={editingNode.id} onSubmit={updateNode} className="node-form">
             <label>节点名称<input name="name" required defaultValue={editingNode.name} /></label>
-            <label>阿里云主域名<select name="domainName" defaultValue={editingNode.domainName ?? ''}><option value="">不配置 DNS</option>{editingNode.domainName && !domainList.some((domain) => domain.name === editingNode.domainName) && <option value={editingNode.domainName}>{editingNode.domainName}</option>}{domainList.map((domain) => <option key={domain.name} value={domain.name}>{domain.name}</option>)}</select></label>
+            <label>阿里云主域名<select name="domainName" defaultValue={editingNode.domainName ?? ''}><option value="">不配置 DNS</option>{editingNode.domainName && !domainsOwnedBy(editingNode.ownerId).some((domain) => domain.name === editingNode.domainName) && <option value={editingNode.domainName}>{editingNode.domainName}</option>}{domainsOwnedBy(editingNode.ownerId).map((domain) => <option key={domain.name} value={domain.name}>{domain.name}</option>)}</select></label>
             <div className="form-grid"><label>IPv4 主机记录<input name="recordV4" defaultValue={editingNode.recordV4 ?? ''} placeholder="home 或 @" /></label><label>IPv6 主机记录<input name="recordV6" defaultValue={editingNode.recordV6 ?? ''} placeholder="home 或 @" /></label></div>
             <label className="nyanpass-check"><input name="syncEnabled" type="checkbox" defaultChecked={editingNode.syncEnabled} />启用阿里云 DNS 自动同步</label>
             <p className="form-hint">保存后会用当前已上报的 IP 立即刷新新记录。修改或清空映射不会自动删除旧的阿里云记录。</p>
@@ -732,11 +751,14 @@ function NodesPanel({ nodes, now, onCreate, onEdit, onRemove, onInstall, onUpgra
   </article>;
 }
 
-function AliyunDomainsPanel({ apiPath, domains, onDomainsChange, aliyun, onAliyunChange, nodes }: { apiPath: (path: string) => string; domains: DomainRow[]; onDomainsChange: (update: (current: DomainRow[]) => DomainRow[]) => void; aliyun: AliyunState; onAliyunChange: (update: (current: AliyunState) => AliyunState) => void; nodes: NodeRow[] }) {
+function AliyunDomainsPanel({ apiPath, user, domains, onDomainsChange, accounts, onAccountsChange, nodes }: { apiPath: (path: string) => string; user: SessionUser; domains: DomainRow[]; onDomainsChange: (update: (current: DomainRow[]) => DomainRow[]) => void; accounts: AliyunAccountRow[]; onAccountsChange: (update: (current: AliyunAccountRow[]) => AliyunAccountRow[]) => void; nodes: NodeRow[] }) {
   const [saving, setSaving] = useState(false);
   const [accountError, setAccountError] = useState('');
   const [domainError, setDomainError] = useState('');
   const [rotatingId, setRotatingId] = useState<string | null>(null);
+  const isAdmin = user.role === 'admin';
+  // 主域名只能绑定同一用户的阿里云账号；管理员添加的主域名属于管理员自己。
+  const myAccounts = accounts.filter((account) => account.ownerId === user.id);
 
   async function send(method: string, path: string, body?: unknown) {
     const response = await fetchWithTimeout(apiPath(path), { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -757,7 +779,7 @@ function AliyunDomainsPanel({ apiPath, domains, onDomainsChange, aliyun, onAliyu
       const { ok, result } = await send('POST', '/api/admin/aliyun-accounts', { name: form.get('name'), accessKeyId: form.get('accessKeyId'), accessKeySecret: form.get('accessKeySecret') });
       const account = result.account as AliyunAccountRow | undefined;
       if (!ok || !account) { setAccountError(result.error ?? '添加失败'); return; }
-      onAliyunChange((current) => ({ ...current, accounts: [...current.accounts, account].sort((a, b) => a.name.localeCompare(b.name)) }));
+      onAccountsChange((current) => [...current, account].sort((a, b) => a.name.localeCompare(b.name)));
       formElement.reset();
     });
   }
@@ -768,8 +790,7 @@ function AliyunDomainsPanel({ apiPath, domains, onDomainsChange, aliyun, onAliyu
     void run(setAccountError, '无法确认新 Key 是否保存成功，请刷新页面核对。', async () => {
       const { ok, result } = await send('PATCH', '/api/admin/aliyun-accounts', { id: account.id, accessKeyId: form.get('accessKeyId'), accessKeySecret: form.get('accessKeySecret') });
       if (!ok) { setAccountError(result.error ?? '更换失败'); return; }
-      const masked = typeof result.accessKeyId === 'string' ? result.accessKeyId : account.accessKeyId;
-      onAliyunChange((current) => ({ ...current, accounts: current.accounts.map((item) => item.id === account.id ? { ...item, accessKeyId: masked } : item) }));
+      onAccountsChange((current) => current.map((item) => item.id === account.id ? { ...item, accessKeyId: String(result.accessKeyId ?? item.accessKeyId), accessKeySecret: String(result.accessKeySecret ?? item.accessKeySecret) } : item));
       setRotatingId(null);
     });
   }
@@ -779,7 +800,7 @@ function AliyunDomainsPanel({ apiPath, domains, onDomainsChange, aliyun, onAliyu
     void run(setAccountError, '无法确认账号是否已经删除，请刷新页面核对。', async () => {
       const { ok, result } = await send('DELETE', `/api/admin/aliyun-accounts?id=${encodeURIComponent(account.id)}`);
       if (!ok) { setAccountError(result.error ?? '删除失败'); return; }
-      onAliyunChange((current) => ({ ...current, accounts: current.accounts.filter((item) => item.id !== account.id) }));
+      onAccountsChange((current) => current.filter((item) => item.id !== account.id));
     });
   }
 
@@ -800,7 +821,7 @@ function AliyunDomainsPanel({ apiPath, domains, onDomainsChange, aliyun, onAliyu
     void run(setDomainError, '无法确认主域名的账号是否修改成功，请刷新页面核对。', async () => {
       const { ok, result } = await send('PATCH', '/api/admin/domains', { name: domain.name, accountId });
       if (!ok) { setDomainError(result.error ?? '修改失败'); return; }
-      onDomainsChange((current) => current.map((item) => item.name === domain.name ? { ...item, accountId: accountId || null } : item));
+      onDomainsChange((current) => current.map((item) => item.name === domain.name ? { ...item, accountId } : item));
     });
   }
 
@@ -813,13 +834,11 @@ function AliyunDomainsPanel({ apiPath, domains, onDomainsChange, aliyun, onAliyu
     });
   }
 
-  const domainsOf = (accountId: string | null) => domains.filter((domain) => domain.accountId === accountId).map((domain) => domain.name);
-  const defaultLabel = aliyun.defaultAccount.configured ? '默认（安装时填写的 Key）' : '默认（安装时未填写 Key）';
-  const accountOptions = <><option value="">{defaultLabel}</option>{aliyun.accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</>;
+  const domainsOf = (accountId: string) => domains.filter((domain) => domain.accountId === accountId).map((domain) => domain.name);
 
   return <>
     <article className="panel dns-panel">
-      <div className="panel-heading"><div><h3>阿里云账号</h3><p>AccessKey Secret 加密保存在主控，页面只显示打码后的 AccessKey ID；保存时会向阿里云校验 Key</p></div></div>
+      <div className="panel-heading"><div><h3>阿里云账号</h3><p>AccessKey ID 与 Secret 加密保存在数据库，输入之后页面只显示头尾几位；保存时会向阿里云校验 Key</p></div></div>
       <form className="node-form domain-form" onSubmit={addAccount} autoComplete="off">
         <label>账号名称<input name="name" required maxLength={40} placeholder="例如：主账号" /></label>
         <label>AccessKey ID<input name="accessKeyId" required spellCheck={false} placeholder="LTAI…" /></label>
@@ -828,24 +847,20 @@ function AliyunDomainsPanel({ apiPath, domains, onDomainsChange, aliyun, onAliyu
       </form>
       {accountError && <p className="panel-error" role="alert">{accountError}</p>}
       <div className="table-wrap">
-        <table><thead><tr><th>账号</th><th>AccessKey ID</th><th>使用的主域名</th><th>操作</th></tr></thead><tbody>
-          <tr>
-            <td>默认<small>安装面板时填写</small></td>
-            <td>{aliyun.defaultAccount.accessKeyId ? <code>{aliyun.defaultAccount.accessKeyId}</code> : <span className="muted-value">未配置</span>}</td>
-            <td>{domainsOf(null).join('、') || <span className="muted-value">未使用</span>}</td>
-            <td><span className="muted-value">重新运行面板安装脚本可更换</span></td>
-          </tr>
-          {aliyun.accounts.map((account) => {
+        {accounts.length ? <table><thead><tr><th>账号</th>{isAdmin && <th>所属用户</th>}<th>AccessKey ID</th><th>AccessKey Secret</th><th>使用的主域名</th><th>操作</th></tr></thead><tbody>
+          {accounts.map((account) => {
             const used = domainsOf(account.id);
             return [<tr key={account.id}>
               <td>{account.name}</td>
+              {isAdmin && <td>{account.ownerName}</td>}
               <td><code>{account.accessKeyId}</code></td>
+              <td><code>{account.accessKeySecret}</code></td>
               <td>{used.join('、') || <span className="muted-value">未使用</span>}</td>
               <td><div className="row-actions">
                 <button type="button" className="edit-link" disabled={saving} onClick={() => setRotatingId(rotatingId === account.id ? null : account.id)}>{rotatingId === account.id ? '取消' : '更换 Key'}</button>
                 <button type="button" className="danger-link" disabled={saving || used.length > 0} title={used.length ? '有主域名正在使用，不能删除' : undefined} onClick={() => removeAccount(account)}>删除</button>
               </div></td>
-            </tr>, rotatingId === account.id && <tr key={`${account.id}-rotate`} className="account-rotate"><td colSpan={4}>
+            </tr>, rotatingId === account.id && <tr key={`${account.id}-rotate`} className="account-rotate"><td colSpan={isAdmin ? 6 : 5}>
               <form className="node-form domain-form" onSubmit={(event) => rotateKey(event, account)} autoComplete="off">
                 <label>新 AccessKey ID<input name="accessKeyId" required spellCheck={false} /></label>
                 <label>新 AccessKey Secret<input name="accessKeySecret" type="password" required autoComplete="new-password" spellCheck={false} /></label>
@@ -854,7 +869,7 @@ function AliyunDomainsPanel({ apiPath, domains, onDomainsChange, aliyun, onAliyu
               <p className="form-hint account-rotate-hint">新 Key 必须能管理 {used.length ? used.join('、') : '该账号'}，校验通过后才会替换旧 Key。</p>
             </td></tr>];
           })}
-        </tbody></table>
+        </tbody></table> : <div className="empty-state compact-empty"><span>◇</span><h4>还没有阿里云账号</h4><p>先添加一个阿里云账号（建议使用只授权解析权限的 RAM 子账号），再添加主域名。</p></div>}
       </div>
     </article>
 
@@ -862,22 +877,154 @@ function AliyunDomainsPanel({ apiPath, domains, onDomainsChange, aliyun, onAliyu
       <div className="panel-heading"><div><h3>主域名</h3><p>保存时会用所选账号的 Key 读取一次该域名的解析记录，读不到就不保存；不会改动阿里云上的记录</p></div></div>
       <form className="node-form domain-form" onSubmit={addDomain}>
         <label>主域名<input name="domain" required placeholder="example.com" autoComplete="off" spellCheck={false} /></label>
-        <label>阿里云账号<select name="accountId" defaultValue={aliyun.defaultAccount.configured || !aliyun.accounts.length ? '' : aliyun.accounts[0].id}>{accountOptions}</select></label>
-        <button className="primary-button" disabled={saving}>{saving ? '校验中…' : '添加主域名'}</button>
+        <label>阿里云账号<select name="accountId" required defaultValue={myAccounts[0]?.id ?? ''}>{myAccounts.length ? myAccounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>) : <option value="">请先添加阿里云账号</option>}</select></label>
+        <button className="primary-button" disabled={saving || !myAccounts.length}>{saving ? '校验中…' : '添加主域名'}</button>
       </form>
       {domainError && <p className="panel-error" role="alert">{domainError}</p>}
       <div className="table-wrap">
-        {domains.length ? <table><thead><tr><th>主域名</th><th>阿里云账号</th><th>使用中的节点</th><th>操作</th></tr></thead><tbody>{domains.map((domain) => {
+        {domains.length ? <table><thead><tr><th>主域名</th>{isAdmin && <th>所属用户</th>}<th>阿里云账号</th><th>使用中的节点</th><th>操作</th></tr></thead><tbody>{domains.map((domain) => {
           const users = nodes.filter((node) => node.domainName === domain.name);
+          const ownerAccounts = accounts.filter((account) => account.ownerId === domain.ownerId);
           return <tr key={domain.name}>
             <td><code>{domain.name}</code></td>
-            <td><select className="table-select" aria-label={`${domain.name} 的阿里云账号`} value={domain.accountId ?? ''} disabled={saving} onChange={(event) => changeDomainAccount(domain, event.target.value)}>{accountOptions}</select></td>
+            {isAdmin && <td>{domain.ownerName}</td>}
+            <td><select className="table-select" aria-label={`${domain.name} 的阿里云账号`} value={domain.accountId} disabled={saving} onChange={(event) => changeDomainAccount(domain, event.target.value)}>{ownerAccounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></td>
             <td>{users.length ? users.map((node) => node.name).join('、') : <span className="muted-value">未使用</span>}</td>
             <td><button type="button" className="danger-link" disabled={saving || users.length > 0} title={users.length ? '有节点正在使用，不能删除' : undefined} onClick={() => removeDomain(domain.name)}>删除</button></td>
           </tr>;
         })}</tbody></table> : <div className="empty-state compact-empty"><span>◇</span><h4>还没有主域名</h4><p>添加主域名并选择它所属的阿里云账号后，就能在添加节点时选择。</p></div>}
       </div>
     </article>
+  </>;
+}
+
+function SettingsPanel({ apiPath, user, admin, onAdminChange }: { apiPath: (path: string) => string; user: SessionUser; admin: AdminState | null; onAdminChange: (update: (current: AdminState | null) => AdminState | null) => void }) {
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string; scope: 'password' | 'admin' } | null>(null);
+  const [resettingId, setResettingId] = useState<string | null>(null);
+
+  async function send(method: string, path: string, body?: unknown) {
+    const response = await fetchWithTimeout(apiPath(path), { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+    const result = await response.json().catch(() => ({ error: '主控返回了无效响应' })) as Record<string, unknown> & { error?: string };
+    return { ok: response.ok, result };
+  }
+
+  async function run(scope: 'password' | 'admin', action: () => Promise<string | void>) {
+    setSaving(true); setMessage(null);
+    try {
+      const done = await action();
+      if (done) setMessage({ kind: 'success', text: done, scope });
+    } catch {
+      setMessage({ kind: 'error', text: '无法确认操作是否成功，请刷新页面核对。', scope });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function changePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    if (form.get('newPassword') !== form.get('confirmPassword')) { setMessage({ kind: 'error', text: '两次输入的新密码不一致', scope: 'password' }); return; }
+    void run('password', async () => {
+      const { ok, result } = await send('POST', '/api/account/password', { currentPassword: form.get('currentPassword'), newPassword: form.get('newPassword') });
+      if (!ok) { setMessage({ kind: 'error', text: result.error ?? '修改失败', scope: 'password' }); return; }
+      formElement.reset();
+      return '密码已修改，其他设备上的登录已失效';
+    });
+  }
+
+  function toggleMultiUser(enabled: boolean) {
+    if (!enabled && !window.confirm('关闭多用户模式后，只有管理员能登录；普通用户会被立即退出（他们的节点照常运行）。确定关闭吗？')) return;
+    void run('admin', async () => {
+      const { ok, result } = await send('PATCH', '/api/admin/settings', { multiUserEnabled: enabled });
+      if (!ok) { setMessage({ kind: 'error', text: result.error ?? '保存失败', scope: 'admin' }); return; }
+      onAdminChange((current) => current && { ...current, multiUserEnabled: enabled });
+      return enabled ? '已开启多用户模式' : '已关闭多用户模式，只允许管理员登录';
+    });
+  }
+
+  function addUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    void run('admin', async () => {
+      const { ok, result } = await send('POST', '/api/admin/users', { username: form.get('username'), password: form.get('password') });
+      const created = result.user as AdminUserRow | undefined;
+      if (!ok || !created) { setMessage({ kind: 'error', text: result.error ?? '添加失败', scope: 'admin' }); return; }
+      onAdminChange((current) => current && { ...current, users: [...current.users, created] });
+      formElement.reset();
+      return `已添加用户 ${created.username}`;
+    });
+  }
+
+  function resetPassword(event: FormEvent<HTMLFormElement>, target: AdminUserRow) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    void run('admin', async () => {
+      const { ok, result } = await send('PATCH', '/api/admin/users', { id: target.id, password: form.get('password') });
+      if (!ok) { setMessage({ kind: 'error', text: result.error ?? '重置失败', scope: 'admin' }); return; }
+      setResettingId(null);
+      return `已重置 ${target.username} 的密码，该用户需要重新登录`;
+    });
+  }
+
+  function removeUser(target: AdminUserRow) {
+    if (!window.confirm(`确定删除用户 ${target.username} 吗？`)) return;
+    void run('admin', async () => {
+      const { ok, result } = await send('DELETE', `/api/admin/users?id=${encodeURIComponent(target.id)}`);
+      if (!ok) { setMessage({ kind: 'error', text: result.error ?? '删除失败', scope: 'admin' }); return; }
+      onAdminChange((current) => current && { ...current, users: current.users.filter((item) => item.id !== target.id) });
+      return `已删除用户 ${target.username}`;
+    });
+  }
+
+  const notice = (scope: 'password' | 'admin') => message?.scope === scope && <p className={message.kind === 'error' ? 'panel-error' : 'panel-notice'} role={message.kind === 'error' ? 'alert' : 'status'}>{message.text}</p>;
+
+  return <>
+    <article className="panel dns-panel">
+      <div className="panel-heading"><div><h3>修改密码</h3><p>当前账号：{user.name}（{user.role === 'admin' ? '管理员' : '普通用户'}）。密码只保存单向哈希</p></div></div>
+      <form className="node-form domain-form" onSubmit={changePassword} autoComplete="off">
+        <label>当前密码<input name="currentPassword" type="password" required autoComplete="current-password" /></label>
+        <label>新密码<input name="newPassword" type="password" required minLength={12} maxLength={128} autoComplete="new-password" placeholder="12-128 位" /></label>
+        <label>再次输入新密码<input name="confirmPassword" type="password" required minLength={12} maxLength={128} autoComplete="new-password" /></label>
+        <button className="primary-button" disabled={saving}>修改密码</button>
+      </form>
+      {notice('password')}
+    </article>
+
+    {admin && <article className="panel dns-panel">
+      <div className="panel-heading"><div><h3>管理员设置</h3><p>多用户模式关闭时只允许管理员登录；开启后，普通用户只能看到和管理自己的节点、主域名与阿里云账号</p></div></div>
+      <div className="setting-row">
+        <div><strong>多用户模式</strong><small>{admin.multiUserEnabled ? '已开启：普通用户可以登录' : '已关闭：只允许管理员登录'}</small></div>
+        <label className="switch"><input type="checkbox" role="switch" checked={admin.multiUserEnabled} disabled={saving} onChange={(event) => toggleMultiUser(event.target.checked)} /><span aria-hidden="true" />{admin.multiUserEnabled ? '开启' : '关闭'}</label>
+      </div>
+      <form className="node-form domain-form" onSubmit={addUser} autoComplete="off">
+        <label>新用户名<input name="username" required minLength={3} maxLength={32} pattern="[A-Za-z0-9_.\-]{3,32}" placeholder="3-32 位字母、数字、点、下划线或短横线" /></label>
+        <label>初始密码<input name="password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" placeholder="12-128 位" /></label>
+        <button className="primary-button" disabled={saving}>添加用户</button>
+      </form>
+      {notice('admin')}
+      <div className="table-wrap">
+        <table><thead><tr><th>用户名</th><th>角色</th><th>节点数</th><th>创建时间</th><th>操作</th></tr></thead><tbody>
+          {admin.users.map((member) => [<tr key={member.id}>
+            <td>{member.username}</td>
+            <td>{member.role === 'admin' ? '管理员' : '普通用户'}</td>
+            <td>{member.nodeCount}</td>
+            <td>{new Date(member.createdAt).toLocaleString()}</td>
+            <td>{member.role === 'admin' ? <span className="muted-value">在上方修改自己的密码</span> : <div className="row-actions">
+              <button type="button" className="edit-link" disabled={saving} onClick={() => setResettingId(resettingId === member.id ? null : member.id)}>{resettingId === member.id ? '取消' : '重置密码'}</button>
+              <button type="button" className="danger-link" disabled={saving || member.nodeCount > 0} title={member.nodeCount ? '该用户还有节点，不能删除' : undefined} onClick={() => removeUser(member)}>删除</button>
+            </div>}</td>
+          </tr>, resettingId === member.id && <tr key={`${member.id}-reset`} className="account-rotate"><td colSpan={5}>
+            <form className="node-form domain-form" onSubmit={(event) => resetPassword(event, member)} autoComplete="off">
+              <label>{member.username} 的新密码<input name="password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" placeholder="12-128 位" /></label>
+              <button className="primary-button" disabled={saving}>保存</button>
+            </form>
+          </td></tr>])}
+        </tbody></table>
+      </div>
+    </article>}
   </>;
 }
 

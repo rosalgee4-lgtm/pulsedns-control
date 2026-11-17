@@ -43,7 +43,7 @@ test('node creation returns both a download-run command and a boot-resilient lau
   assert.match(post, /const startupScript = buildNodeStartupLauncher\(id, installUrl, provisionGeneration, bbrProfile\)/);
   assert.match(post, /if \(!isBbrProfile\(bbrProfile\)\)/);
   assert.match(post, /encryptBootstrapPayload\([\s\S]*bbrProfile,[\s\S]*instances/);
-  assert.match(post, /domainRegistered\(db, domainName\)/);
+  assert.match(post, /domainUsableBy\(db, user\.id, domainName\)/);
   assert.match(successResponse, /\n\s*installUrl,/);
   assert.match(successResponse, /\n\s*connectCommand,/);
   assert.match(successResponse, /\n\s*startupScript,/);
@@ -98,9 +98,11 @@ test('provision outcomes keep the encrypted bootstrap secrets for spot replaceme
   assert.match(provisionRoute, /ddns[\s\S]*nyanpass[\s\S]*bbr[\s\S]*ssh/);
 });
 
-test('self-hosted auth proxy publishes only the node-specific bootstrap prefix', () => {
-  assert.match(proxy, /pathname\.startsWith\('\/api\/v1\/bootstrap\/'\)\) return NextResponse\.next\(\)/);
-  assert.doesNotMatch(proxy, /PUBLIC_PATHS[\s\S]*['"]\/api\/v1\/bootstrap['"]/);
+test('the proxy no longer gates the bootstrap link; it only adds anti-framing headers', () => {
+  // 开机配置链接由节点专属的 256 位下载凭据保护，面板登录与它无关。
+  assert.doesNotMatch(proxy, /bootstrap/);
+  assert.match(proxy, /X-Frame-Options', 'DENY'/);
+  assert.match(proxy, /frame-ancestors 'none'/);
 });
 
 test('bootstrap payload encrypts round-trip and binds ciphertext to node plus generation AAD', async () => {

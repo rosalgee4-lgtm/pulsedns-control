@@ -1,7 +1,4 @@
-import { isSelfHosted } from '@/db';
-
+// 主控加密密钥：加密开机配置、Nyanpass Token 与阿里云 AccessKey。
 export async function controlPlaneEncryptionSecret() {
-  if (isSelfHosted()) return process.env.PULSEDNS_TASK_ENCRYPTION_KEY?.trim() ?? '';
-  const { env } = await import('cloudflare:workers');
-  return env.PULSEDNS_TASK_ENCRYPTION_KEY?.trim() ?? '';
+  return process.env.PULSEDNS_TASK_ENCRYPTION_KEY?.trim() ?? '';
 }

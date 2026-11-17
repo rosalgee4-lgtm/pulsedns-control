@@ -35,7 +35,9 @@ export async function findDnsOwnershipConflict(
 
 export function isDnsOwnershipConstraintError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  return /idx_nodes_dns_v[46]_owner|UNIQUE constraint failed:\s*nodes\.domain_name,\s*nodes\.record_v[46]/i.test(message);
+  const cause = (error as { cause?: unknown } | null)?.cause;
+  const detail = cause instanceof Error ? `${message} ${cause.message}` : message;
+  return /idx_nodes_dns_v[46]_owner/i.test(detail);
 }
 
 export function dnsOwnershipConflictMessage(conflict: Pick<DnsOwnershipConflict, 'type' | 'nodeName'>) {

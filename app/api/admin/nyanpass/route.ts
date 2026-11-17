@@ -1,11 +1,12 @@
-import { and, desc, eq, isNull } from 'drizzle-orm';
-import { getChatGPTUser } from '@/app/chatgpt-auth';
-import { getDb } from '@/db';
+import { and, eq, isNull } from 'drizzle-orm';
+import { affectedRows, runInTransaction } from '@/db';
 import { ensureSchema } from '@/db/init';
-import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
+import { events, nodes, nyanpassInstances } from '@/db/schema';
+import { requireApiUser } from '@/lib/auth';
+import { instanceResponse, listEvents, listInstances, listNodes } from '@/lib/dashboard-data';
+import { canAccessNode } from '@/lib/ownership';
 import { expireAgentTasks } from '@/lib/agent-task-lifecycle';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
-import { nodeResponse } from '@/lib/node-response';
 import { parseOfficialNyanpassCommand, validNyanpassServiceName } from '@/lib/nyanpass-command';
 import { encryptNyanpassCredential } from '@/lib/nyanpass-credential';
 import { removeReinstallInstance } from '@/lib/reinstall-plan';
@@ -15,56 +16,26 @@ import { pruneEvents } from '@/lib/event-retention';
 
 const busyStatuses = new Set(['pending', 'running']);
 
-export async function GET() {
-  const user = await getChatGPTUser();
-  if (!user) return Response.json({ error: '需要管理员登录' }, { status: 401 });
+export async function GET(request: Request) {
   await ensureSchema();
-  const db = await getDb();
+  const auth = await requireApiUser(request);
+  if ('response' in auth) return auth.response;
+  const { db, user } = auth;
   await expireProvisionAttempts(db, new Date());
   await expireAgentTasks(db, new Date());
   await pruneEvents(db).catch(() => undefined);
-  const rows = await db.select({
-    id: nyanpassInstances.id,
-    nodeId: nyanpassInstances.nodeId,
-    nodeName: nodes.name,
-    name: nyanpassInstances.name,
-    role: nyanpassInstances.role,
-    panelUrl: nyanpassInstances.panelUrl,
-    optimize: nyanpassInstances.optimize,
-    status: nyanpassInstances.status,
-    lastReportedAt: nyanpassInstances.lastReportedAt,
-    syncError: nyanpassInstances.syncError,
-    activeTaskId: nyanpassInstances.activeTaskId,
-    configRevision: nyanpassInstances.configRevision,
-    credentialCiphertext: nyanpassInstances.credentialCiphertext,
-    taskStatus: agentTasks.status,
-    taskCreatedAt: agentTasks.updatedAt,
-    taskClaimedAt: agentTasks.claimedAt,
-    taskLeaseExpiresAt: agentTasks.leaseExpiresAt,
-  }).from(nyanpassInstances)
-    .leftJoin(nodes, eq(nyanpassInstances.nodeId, nodes.id))
-    .leftJoin(agentTasks, eq(nyanpassInstances.activeTaskId, agentTasks.id))
-    .orderBy(desc(nyanpassInstances.createdAt));
-  const nodeRows = await db.select().from(nodes).orderBy(desc(nodes.createdAt));
-  const latestEvents = await db.select({
-    id: events.id,
-    nodeId: events.nodeId,
-    nodeName: nodes.name,
-    level: events.level,
-    kind: events.kind,
-    message: events.message,
-    createdAt: events.createdAt,
-  }).from(events).leftJoin(nodes, eq(events.nodeId, nodes.id)).orderBy(desc(events.createdAt)).limit(100);
   return Response.json({
-    instances: rows.map(instanceResponse),
-    nodes: nodeRows.map(nodeResponse),
-    events: latestEvents.map((event) => ({ ...event, nodeName: event.nodeName ?? '已删除节点', createdAt: event.createdAt.toISOString() })),
+    instances: await listInstances(db, user),
+    nodes: await listNodes(db, user),
+    events: await listEvents(db, user),
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
 export async function POST(request: Request) {
-  const user = await getChatGPTUser();
-  if (!user) return Response.json({ error: '需要管理员登录' }, { status: 401 });
+  await ensureSchema();
+  const auth = await requireApiUser(request);
+  if ('response' in auth) return auth.response;
+  const { db, user } = auth;
 
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   const nodeId = cleanText(body?.nodeId, 64);
@@ -76,8 +47,7 @@ export async function POST(request: Request) {
   if (!validNyanpassServiceName(name)) return Response.json({ error: '实例名须为 1-48 位字母、数字、点、下划线或短横线，不能使用系统保留名称或单元后缀' }, { status: 400 });
   if (!parsedCommand.ok) return Response.json({ error: parsedCommand.error }, { status: 400 });
 
-  await ensureSchema();
-  const db = await getDb();
+  if (!await canAccessNode(db, user, nodeId)) return Response.json({ error: '所属节点不存在' }, { status: 404 });
   const operationId = await acquireNodeOperationLock(db, nodeId);
   if (operationId === undefined) return Response.json({ error: '所属节点不存在' }, { status: 404 });
   if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试' }, { status: 409 });
@@ -101,7 +71,7 @@ export async function POST(request: Request) {
 
     const now = new Date();
     const roleLabel = parsedCommand.role === 'outbound' ? '出口' : '入口';
-    await db.batch([
+    await runInTransaction(db, [
       db.insert(nyanpassInstances).values({
         id,
         nodeId,
@@ -115,7 +85,7 @@ export async function POST(request: Request) {
         createdAt: now,
         updatedAt: now,
       }),
-      db.insert(events).values({ nodeId, kind: 'nyanpass_created', message: `${user.email} 添加了${roleLabel}实例 ${name}，等待同步`, createdAt: now }),
+      db.insert(events).values({ nodeId, kind: 'nyanpass_created', message: `${user.username} 添加了${roleLabel}实例 ${name}，等待同步`, createdAt: now }),
     ]);
 
     return Response.json({
@@ -127,8 +97,10 @@ export async function POST(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  const user = await getChatGPTUser();
-  if (!user) return Response.json({ error: '需要管理员登录' }, { status: 401 });
+  await ensureSchema();
+  const auth = await requireApiUser(request);
+  if ('response' in auth) return auth.response;
+  const { db, user } = auth;
 
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   const id = cleanText(body?.id, 64);
@@ -139,10 +111,8 @@ export async function PATCH(request: Request) {
   if (!id) return Response.json({ error: '缺少实例 ID' }, { status: 400 });
   if (!validNyanpassServiceName(name)) return Response.json({ error: '实例名须为 1-48 位字母、数字、点、下划线或短横线，不能使用系统保留名称或单元后缀' }, { status: 400 });
 
-  await ensureSchema();
-  const db = await getDb();
   const [located] = await db.select({ nodeId: nyanpassInstances.nodeId }).from(nyanpassInstances).where(eq(nyanpassInstances.id, id)).limit(1);
-  if (!located) return Response.json({ error: '实例不存在' }, { status: 404 });
+  if (!located || !await canAccessNode(db, user, located.nodeId)) return Response.json({ error: '实例不存在' }, { status: 404 });
   const operationId = await acquireNodeOperationLock(db, located.nodeId);
   if (operationId === undefined) return Response.json({ error: '所属节点不存在' }, { status: 404 });
   if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试' }, { status: 409 });
@@ -202,19 +172,15 @@ export async function PATCH(request: Request) {
     eq(nyanpassInstances.status, current.status),
     eq(nyanpassInstances.configRevision, current.configRevision),
     activeTaskCondition,
-  )).returning({ id: nyanpassInstances.id });
-  if (!updated.length) return Response.json({ error: '实例状态同时发生了变化，请刷新后重试' }, { status: 409 });
+  ));
+  if (!affectedRows(updated)) return Response.json({ error: '实例状态同时发生了变化，请刷新后重试' }, { status: 409 });
   const roleLabel = role === 'outbound' ? '出口' : '入口';
-  const [updatedEvent] = await db.insert(events).values({
-    nodeId: current.nodeId,
-    kind: 'nyanpass_updated',
-    message: `${user.email} 更新了${roleLabel}实例 ${current.name} 的同步配置`,
-    createdAt: now,
-  }).returning({ id: events.id, nodeId: events.nodeId, level: events.level, kind: events.kind, message: events.message, createdAt: events.createdAt });
+  const updatedEvent = { nodeId: current.nodeId, level: 'info', kind: 'nyanpass_updated', message: `${user.username} 更新了${roleLabel}实例 ${current.name} 的同步配置`, createdAt: now };
+  const [{ id: updatedEventId }] = await db.insert(events).values(updatedEvent).$returningId();
 
   return Response.json({
     instance: instanceResponse({ id, nodeId: current.nodeId, nodeName: node.name, name: current.name, role, panelUrl, optimize: hasCommand ? optimize : current.optimize, status, hasCredential: Boolean(credentialCiphertext), lastReportedAt: current.lastReportedAt, syncError, activeTaskId, configRevision: revision, taskStatus: null, taskCreatedAt: null, taskClaimedAt: null, taskLeaseExpiresAt: null }),
-    event: { ...updatedEvent, nodeName: node.name },
+    event: { ...updatedEvent, id: updatedEventId, nodeName: node.name },
   }, { headers: { 'Cache-Control': 'no-store' } });
   } finally {
     await releaseNodeOperationLock(db, located.nodeId, operationId);
@@ -222,15 +188,15 @@ export async function PATCH(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const user = await getChatGPTUser();
-  if (!user) return Response.json({ error: '需要管理员登录' }, { status: 401 });
+  await ensureSchema();
+  const auth = await requireApiUser(request);
+  if ('response' in auth) return auth.response;
+  const { db, user } = auth;
   const searchParams = new URL(request.url).searchParams;
   const id = searchParams.get('id');
   if (!id) return Response.json({ error: '缺少实例 ID' }, { status: 400 });
-  await ensureSchema();
-  const db = await getDb();
   const [located] = await db.select({ nodeId: nyanpassInstances.nodeId }).from(nyanpassInstances).where(eq(nyanpassInstances.id, id)).limit(1);
-  if (!located) return Response.json({ error: '实例不存在' }, { status: 404 });
+  if (!located || !await canAccessNode(db, user, located.nodeId)) return Response.json({ error: '实例不存在' }, { status: 404 });
   const operationId = await acquireNodeOperationLock(db, located.nodeId);
   if (operationId === undefined) return Response.json({ error: '所属节点不存在' }, { status: 404 });
   if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试' }, { status: 409 });
@@ -250,46 +216,14 @@ export async function DELETE(request: Request) {
     eq(nyanpassInstances.status, current.status),
     eq(nyanpassInstances.configRevision, current.configRevision),
     activeTaskCondition,
-  )).returning({ id: nyanpassInstances.id });
-  if (!deleted.length) return Response.json({ error: '实例状态同时发生了变化，请刷新后重试' }, { status: 409 });
+  ));
+  if (!affectedRows(deleted)) return Response.json({ error: '实例状态同时发生了变化，请刷新后重试' }, { status: 409 });
   // 移除登记后，Spot 换机重装的新机器不再安装这个实例（不会卸载当前机器上的服务）。
   await removeReinstallInstance(db, current.nodeId, current.name).catch(() => false);
   return Response.json({ status: 'ok' });
   } finally {
     await releaseNodeOperationLock(db, located.nodeId, operationId);
   }
-}
-
-function instanceResponse(instance: {
-  id: string;
-  nodeId: string;
-  nodeName: string | null;
-  name: string;
-  role: 'inbound' | 'outbound';
-  panelUrl: string;
-  optimize: boolean;
-  status: string;
-  lastReportedAt: Date | null;
-  syncError: string | null;
-  activeTaskId: string | null;
-  configRevision: number;
-  hasCredential?: boolean;
-  credentialCiphertext?: string | null;
-  taskStatus: string | null;
-  taskCreatedAt: Date | null;
-  taskClaimedAt: Date | null;
-  taskLeaseExpiresAt: Date | null;
-}) {
-  const { credentialCiphertext, ...safeInstance } = instance;
-  return {
-    ...safeInstance,
-    hasCredential: instance.hasCredential ?? Boolean(credentialCiphertext),
-    nodeName: instance.nodeName ?? '已删除节点',
-    lastReportedAt: instance.lastReportedAt?.toISOString() ?? null,
-    taskCreatedAt: instance.taskCreatedAt?.toISOString() ?? null,
-    taskClaimedAt: instance.taskClaimedAt?.toISOString() ?? null,
-    taskLeaseExpiresAt: instance.taskLeaseExpiresAt?.toISOString() ?? null,
-  };
 }
 
 function safeEncryptionError(error: unknown) {

@@ -1,8 +1,9 @@
 import { and, eq, inArray, isNull } from 'drizzle-orm';
-import { getChatGPTUser } from '@/app/chatgpt-auth';
-import { getDb } from '@/db';
+import { affectedRows, runInTransaction, type AppDb } from '@/db';
 import { ensureSchema } from '@/db/init';
-import { agentTasks, domains, events, nodes, nyanpassInstances } from '@/db/schema';
+import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
+import { requireApiUser, type CurrentUser } from '@/lib/auth';
+import { canAccessNode, domainUsableBy } from '@/lib/ownership';
 import { syncAliDnsRecord } from '@/lib/alidns';
 import { buildNodeBootstrapConfig, buildNodeConnectCommand, DEFAULT_BBR_PROFILE, isBbrProfile, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES } from '@/lib/install-command';
 import { parseOfficialNyanpassCommand, validNyanpassServiceName } from '@/lib/nyanpass-command';
@@ -18,11 +19,13 @@ import { trustedNyanpassRelease } from '@/lib/nyanpass-release';
 import { dnsOwnershipConflictMessage, findDnsOwnershipConflict, isDnsOwnershipConstraintError } from '@/lib/dns-ownership';
 
 export async function POST(request: Request) {
-  const user = await getChatGPTUser();
-  if (!user) return Response.json({ error: '需要管理员登录' }, { status: 401 });
+  await ensureSchema();
+  const auth = await requireApiUser(request);
+  if ('response' in auth) return auth.response;
+  const { db, user } = auth;
 
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
-  if (body?.action === 'installation') return installationCommands(request, body);
+  if (body?.action === 'installation') return installationCommands(request, db, user, body);
   const name = cleanText(body?.name, 60);
   const region = 'unknown';
   const bbrProfile = body?.bbrProfile === undefined || body?.bbrProfile === '' ? DEFAULT_BBR_PROFILE : body.bbrProfile;
@@ -100,16 +103,14 @@ export async function POST(request: Request) {
     return Response.json({ error: '开机启动器超过 AWS user-data 的 15 KiB 安全上限' }, { status: 500 });
   }
 
-  await ensureSchema();
-  const db = await getDb();
-  if (domainName && !await domainRegistered(db, domainName)) return Response.json({ error: `主域名 ${domainName} 不在域名列表中，请先在「域名」页面添加` }, { status: 400 });
+  if (domainName && !await domainUsableBy(db, user.id, domainName)) return Response.json({ error: `主域名 ${domainName} 不在你的「阿里云主域名」列表中，请先添加` }, { status: 400 });
   const ownershipConflict = await findDnsOwnershipConflict(db, { domainName, recordV4, recordV6 });
   if (ownershipConflict) return Response.json({ error: dnsOwnershipConflictMessage(ownershipConflict) }, { status: 409 });
   try {
-    await db.batch([
-      db.insert(nodes).values({ id, name, region, tokenHash, provider: 'alidns', domainName, recordV4, recordV6, nyanpassStatus: 'awaiting', provisionGeneration, bootstrapPayloadCiphertext, bootstrapDownloadTokenHash, createdAt: now, updatedAt: now }),
+    await runInTransaction(db, [
+      db.insert(nodes).values({ id, ownerId: user.id, name, region, tokenHash, provider: 'alidns', domainName, recordV4, recordV6, nyanpassStatus: 'awaiting', provisionGeneration, bootstrapPayloadCiphertext, bootstrapDownloadTokenHash, createdAt: now, updatedAt: now }),
       ...preparedInstances.map((instance) => db.insert(nyanpassInstances).values({ id: instance.id, nodeId: id, name: instance.name, role: instance.role, panelUrl: instance.panelUrl, status: 'bootstrap', bootstrapGeneration: provisionGeneration, optimize: instance.optimize, createdAt: now, updatedAt: now })),
-      db.insert(events).values({ nodeId: id, kind: 'node_created', message: `${user.email} 创建了节点并预配 ${preparedInstances.length} 个 Nyanpass 实例`, createdAt: now }),
+      db.insert(events).values({ nodeId: id, kind: 'node_created', message: `${user.username} 创建了节点并预配 ${preparedInstances.length} 个 Nyanpass 实例`, createdAt: now }),
     ]);
   } catch (error) {
     if (!isDnsOwnershipConstraintError(error)) throw error;
@@ -127,14 +128,13 @@ export async function POST(request: Request) {
   }, { status: 201, headers: { 'Cache-Control': 'no-store' } });
 }
 
-async function installationCommands(request: Request, body: Record<string, unknown>) {
+async function installationCommands(request: Request, db: AppDb, user: CurrentUser, body: Record<string, unknown>) {
   const id = cleanText(body.id, 64);
   const headers = { 'Cache-Control': 'no-store, private', 'Referrer-Policy': 'no-referrer' };
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) {
     return Response.json({ error: '节点 ID 无效' }, { status: 400, headers });
   }
-  await ensureSchema();
-  const db = await getDb();
+  if (!await canAccessNode(db, user, id)) return Response.json({ error: '节点不存在' }, { status: 404, headers });
   const operationId = await acquireNodeOperationLock(db, id);
   if (operationId === undefined) return Response.json({ error: '节点不存在' }, { status: 404, headers });
   if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试' }, { status: 409, headers });
@@ -164,8 +164,6 @@ async function installationCommands(request: Request, body: Record<string, unkno
       await db.update(nodes).set({
         bootstrapPayloadCiphertext: ciphertext,
         bootstrapDownloadTokenHash: await sha256(downloadToken),
-        bootstrapDownloadExpiresAt: null,
-        bootstrapDownloadConsumedAt: null,
       }).where(and(eq(nodes.id, id), eq(nodes.dnsOperationId, operationId)));
     }
     return Response.json({
@@ -180,11 +178,6 @@ async function installationCommands(request: Request, body: Record<string, unkno
   }
 }
 
-async function domainRegistered(db: Awaited<ReturnType<typeof getDb>>, name: string) {
-  const [domain] = await db.select({ name: domains.name }).from(domains).where(eq(domains.name, name)).limit(1);
-  return Boolean(domain);
-}
-
 function safeBootstrapEncryptionError(error: unknown) {
   return error instanceof Error && error.message.includes('PULSEDNS_TASK_ENCRYPTION_KEY')
     ? error.message
@@ -192,8 +185,10 @@ function safeBootstrapEncryptionError(error: unknown) {
 }
 
 export async function PATCH(request: Request) {
-  const user = await getChatGPTUser();
-  if (!user) return Response.json({ error: '需要管理员登录' }, { status: 401 });
+  await ensureSchema();
+  const auth = await requireApiUser(request);
+  if ('response' in auth) return auth.response;
+  const { db, user } = auth;
 
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   const id = cleanText(body?.id, 64);
@@ -210,16 +205,15 @@ export async function PATCH(request: Request) {
   if (recordV4 && !validDnsRr(recordV4)) return Response.json({ error: 'IPv4 主机记录格式无效' }, { status: 400 });
   if (recordV6 && !validDnsRr(recordV6)) return Response.json({ error: 'IPv6 主机记录格式无效' }, { status: 400 });
 
-  await ensureSchema();
-  const db = await getDb();
+  if (!await canAccessNode(db, user, id)) return Response.json({ error: '节点不存在' }, { status: 404 });
   const operationId = await acquireNodeOperationLock(db, id);
   if (operationId === undefined) return Response.json({ error: '节点不存在' }, { status: 404 });
   if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试修改' }, { status: 409 });
   try {
     const [current] = await db.select().from(nodes).where(eq(nodes.id, id)).limit(1);
     if (!current) return Response.json({ error: '节点不存在' }, { status: 404 });
-    if (domainName && domainName !== current.domainName && !await domainRegistered(db, domainName)) {
-      return Response.json({ error: `主域名 ${domainName} 不在域名列表中，请先在「域名」页面添加` }, { status: 400 });
+    if (domainName && domainName !== current.domainName && !await domainUsableBy(db, current.ownerId, domainName)) {
+      return Response.json({ error: `主域名 ${domainName} 不在该节点所属用户的「阿里云主域名」列表中，请先添加` }, { status: 400 });
     }
 
     if (syncEnabled) {
@@ -237,13 +231,9 @@ export async function PATCH(request: Request) {
   }
 
   const returnedEvents: Array<{ id: number; nodeId: string; nodeName: string; level: string; kind: string; message: string; createdAt: Date }> = [];
-  const [updatedEvent] = await db.insert(events).values({
-    nodeId: id,
-    kind: 'node_updated',
-    message: `${user.email} 修改了节点 ${name} 的控制台配置`,
-    createdAt: now,
-  }).returning({ id: events.id, nodeId: events.nodeId, level: events.level, kind: events.kind, message: events.message, createdAt: events.createdAt });
-  returnedEvents.push({ ...updatedEvent, nodeName: name });
+  const updatedEvent = { nodeId: id, level: 'info', kind: 'node_updated', message: `${user.username} 修改了节点 ${name} 的控制台配置`, createdAt: now };
+  const [updatedEventId] = await db.insert(events).values(updatedEvent).$returningId();
+  returnedEvents.push({ ...updatedEvent, id: updatedEventId.id, nodeName: name });
 
   const warnings: string[] = [];
   const dnsMappingChanged = current.domainName !== domainName || current.recordV4 !== recordV4 || current.recordV6 !== recordV6;
@@ -263,7 +253,7 @@ export async function PATCH(request: Request) {
       if (!target.record || !target.ip) continue;
       const result = await syncAliDnsRecord(domainName, target.record, target.type, target.ip);
       if (!result.ok) warnings.push(`${target.type} 同步失败：${result.error}`);
-      const [dnsEvent] = await db.insert(events).values({
+      const dnsEvent = {
         nodeId: id,
         level: result.ok ? 'info' : 'error',
         kind: result.ok ? 'dns_synced' : 'dns_failed',
@@ -271,8 +261,9 @@ export async function PATCH(request: Request) {
         ipType: target.type,
         ip: target.ip,
         createdAt: now,
-      }).returning({ id: events.id, nodeId: events.nodeId, level: events.level, kind: events.kind, message: events.message, createdAt: events.createdAt });
-      returnedEvents.push({ ...dnsEvent, nodeName: name });
+      };
+      const [dnsEventId] = await db.insert(events).values(dnsEvent).$returningId();
+      returnedEvents.push({ id: dnsEventId.id, nodeId: id, level: dnsEvent.level, kind: dnsEvent.kind, message: dnsEvent.message, createdAt: now, nodeName: name });
     }
   }
 
@@ -288,13 +279,14 @@ export async function PATCH(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const user = await getChatGPTUser();
-  if (!user) return Response.json({ error: '需要管理员登录' }, { status: 401 });
+  await ensureSchema();
+  const auth = await requireApiUser(request);
+  if ('response' in auth) return auth.response;
+  const { db, user } = auth;
   const searchParams = new URL(request.url).searchParams;
   const id = searchParams.get('id');
   if (!id) return Response.json({ error: '缺少节点 ID' }, { status: 400 });
-  await ensureSchema();
-  const db = await getDb();
+  if (!await canAccessNode(db, user, id)) return Response.json({ error: '节点不存在' }, { status: 404 });
   const operationId = await acquireNodeOperationLock(db, id);
   if (operationId === undefined) return Response.json({ error: '节点不存在' }, { status: 404 });
   if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试删除' }, { status: 409 });
@@ -321,8 +313,8 @@ export async function DELETE(request: Request) {
       }, { status: 409 });
     }
     const attemptCondition = node.provisionAttemptId === null ? isNull(nodes.provisionAttemptId) : eq(nodes.provisionAttemptId, node.provisionAttemptId);
-    const deleted = await db.delete(nodes).where(and(eq(nodes.id, id), eq(nodes.nyanpassStatus, node.nyanpassStatus), attemptCondition)).returning({ id: nodes.id });
-    if (!deleted.length) return Response.json({ error: '节点开机安装状态已经变化，请刷新后重试' }, { status: 409 });
+    const deleted = await db.delete(nodes).where(and(eq(nodes.id, id), eq(nodes.nyanpassStatus, node.nyanpassStatus), attemptCondition));
+    if (!affectedRows(deleted)) return Response.json({ error: '节点开机安装状态已经变化，请刷新后重试' }, { status: 409 });
     return Response.json({ status: 'ok' });
   } finally {
     await releaseNodeOperationLock(db, id, operationId);

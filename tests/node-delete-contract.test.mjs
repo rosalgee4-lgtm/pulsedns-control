@@ -21,7 +21,7 @@ test('successful deletion removes related client state', () => {
 
 test('server deletion remains authenticated and keyed by node id', () => {
   assert.match(route, /export async function DELETE/);
-  assert.match(route, /if \(!user\).*status: 401/);
+  assert.match(route, /export async function DELETE[\s\S]*requireApiUser\(request\)[\s\S]*canAccessNode\(db, user, id\)/);
   assert.match(route, /searchParams\.get\('id'\)/);
   assert.match(route, /db\.delete\(nodes\)\.where\(and\(eq\(nodes\.id, id\), eq\(nodes\.nyanpassStatus, node\.nyanpassStatus\), attemptCondition\)\)/);
   assert.match(route, /requiresUncertainConfirmation: true/);

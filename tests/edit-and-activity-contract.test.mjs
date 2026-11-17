@@ -9,6 +9,7 @@ const nodeRoute = await readFile(new URL('../app/api/admin/nodes/route.ts', impo
 const nyanpassRoute = await readFile(new URL('../app/api/admin/nyanpass/route.ts', import.meta.url), 'utf8');
 const page = await readFile(new URL('../app/page.tsx', import.meta.url), 'utf8');
 const nodeResponse = await readFile(new URL('../lib/node-response.ts', import.meta.url), 'utf8');
+const dashboardData = await readFile(new URL('../lib/dashboard-data.ts', import.meta.url), 'utf8');
 
 function handler(source, method, nextMethod) {
   const start = source.indexOf(`export async function ${method}`);
@@ -28,11 +29,12 @@ function dashboardFunction(name) {
 
 test('node editing is authenticated, constrained, audited, and refreshes current DNS', () => {
   const patch = handler(nodeRoute, 'PATCH', 'DELETE');
-  assert.match(patch, /if \(!user\).*status: 401/);
+  assert.match(patch, /requireApiUser\(request\)[\s\S]*if \('response' in auth\) return auth\.response/);
+  assert.match(patch, /canAccessNode\(db, user, id\)[\s\S]*status: 404/);
   assert.match(patch, /if \(!id\).*status: 400/);
   assert.match(patch, /if \(!current\).*status: 404/);
   assert.match(patch, /db\.update\(nodes\)\.set\(\{ name, domainName, recordV4, recordV6, syncEnabled, updatedAt: now \}\)/);
-  assert.match(patch, /domainRegistered\(db, domainName\)/);
+  assert.match(patch, /domainUsableBy\(db, current\.ownerId, domainName\)/);
   assert.doesNotMatch(patch, /\.set\(\{[^}]*tokenHash/);
   assert.doesNotMatch(patch, /\.set\(\{[^}]*(?:ipv4|ipv6|lastSeenAt|createdAt)/);
   assert.match(patch, /syncAliDnsRecord\(domainName, target\.record, target\.type, target\.ip\)/);
@@ -44,7 +46,8 @@ test('node editing is authenticated, constrained, audited, and refreshes current
 
 test('Nyanpass editing keeps the node fixed and encrypts a newly supplied official command for explicit sync', () => {
   const patch = handler(nyanpassRoute, 'PATCH', 'DELETE');
-  assert.match(patch, /if \(!user\).*status: 401/);
+  assert.match(patch, /requireApiUser\(request\)[\s\S]*if \('response' in auth\) return auth\.response/);
+  assert.match(patch, /canAccessNode\(db, user, located\.nodeId\)/);
   assert.match(patch, /if \(!id\).*status: 400/);
   assert.match(patch, /if \(!current\).*status: 404/);
   assert.match(patch, /parseOfficialNyanpassCommand\(body\?\.command\)/);
@@ -114,7 +117,7 @@ test('states without reusable credentials require a new official command before 
   assert.match(dashboard, /!instance\.hasCredential/);
   assert.match(dashboard, /editingNyanpass && requiresFreshNyanpassCommand\(editingNyanpass\)/);
   assert.match(nyanpassRoute, /!current\.credentialCiphertext && !hasCommand/);
-  assert.match(nyanpassRoute, /hasCredential: instance\.hasCredential \?\? Boolean\(credentialCiphertext\)/);
+  assert.match(dashboardData, /hasCredential: instance\.hasCredential \?\? Boolean\(credentialCiphertext\)/);
   assert.match(dashboard, /<textarea name="command" required=\{editingNyanpassRequiresCommand\}/);
   assert.match(nyanpassRoute, /current\.status === 'uncertain' && !confirmUncertain/);
   assert.match(dashboard, /confirmUncertain: editingNyanpass\.status === 'uncertain' \? 'checked'/);
@@ -127,14 +130,15 @@ test('Nyanpass machine service names are immutable so an old VPS service is neve
 });
 
 test('browser node DTO excludes credential hashes and internal operation identities', () => {
-  assert.match(page, /nodeRows\.map\(nodeResponse\)/);
-  assert.match(nyanpassRoute, /nodes: nodeRows\.map\(nodeResponse\)/);
+  assert.match(page, /initialNodes=\{await listNodes\(db, user\)\}/);
+  assert.match(nyanpassRoute, /nodes: await listNodes\(db, user\)/);
+  assert.match(dashboardData, /\.\.\.nodeResponse\(node\), ownerName/);
   assert.doesNotMatch(nodeResponse, /\.\.\.node|tokenHash|provisionAttemptId|dnsOperationId/);
   assert.doesNotMatch(dashboard, /tokenHash/);
 });
 
 test('live refresh updates full node report state and OPTIMIZE is always off', () => {
-  assert.match(nyanpassRoute, /const nodeRows = await db\.select\(\)\.from\(nodes\)/);
+  assert.match(dashboardData, /db\.select\(\{ node: nodes, ownerName: users\.username \}\)\.from\(nodes\)/);
   assert.match(nodeResponse, /lastSeenAt: node\.lastSeenAt\?\.toISOString\(\) \?\? null/);
   assert.match(nodeResponse, /provisionLastCompletedStep: node\.provisionLastCompletedStep/);
   assert.match(dashboard, /setNodes\(refreshedNodes\)/);

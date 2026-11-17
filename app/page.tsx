@@ -1,88 +1,44 @@
-import { asc, desc, eq } from 'drizzle-orm';
-import { requireChatGPTUser } from '@/app/chatgpt-auth';
+import { asc, count } from 'drizzle-orm';
 import Dashboard from './dashboard';
 import { getDb } from '@/db';
 import { ensureSchema } from '@/db/init';
-import { agentTasks, domains, events, nodes, nyanpassInstances } from '@/db/schema';
+import { nodes, users } from '@/db/schema';
 import { listAccounts } from '@/lib/aliyun-accounts';
-import { nodeResponse } from '@/lib/node-response';
-import { expireProvisionAttempts } from '@/lib/provision-lifecycle';
+import { basePath, requirePageUser } from '@/lib/auth';
+import { listEvents, listInstances, listNodes } from '@/lib/dashboard-data';
+import { listDomains } from '@/lib/domains';
 import { pruneEvents } from '@/lib/event-retention';
+import { expireProvisionAttempts } from '@/lib/provision-lifecycle';
+import { multiUserEnabled } from '@/lib/settings';
 
 export const dynamic = 'force-dynamic';
 
-export default function Home() {
-  return <AuthenticatedDashboard />;
-}
-
-async function AuthenticatedDashboard() {
-  const user = await requireChatGPTUser('/');
-  const configuredBasePath = process.env.PULSEDNS_BASE_PATH?.trim() ?? '';
-  const basePath = /^\/[a-f0-9]{32}$/.test(configuredBasePath) ? configuredBasePath : '';
+export default async function Home() {
   await ensureSchema();
+  const user = await requirePageUser();
   const db = await getDb();
   await expireProvisionAttempts(db, new Date());
   await pruneEvents(db).catch(() => undefined);
-  const nodeRows = await db.select().from(nodes).orderBy(desc(nodes.createdAt));
-  const domainRows = await db.select().from(domains).orderBy(asc(domains.name));
-  const aliyun = await listAccounts(db);
-  const eventRows = await db.select({
-    id: events.id,
-    nodeId: events.nodeId,
-    nodeName: nodes.name,
-    level: events.level,
-    kind: events.kind,
-    message: events.message,
-    createdAt: events.createdAt,
-  }).from(events).leftJoin(nodes, eq(events.nodeId, nodes.id)).orderBy(desc(events.createdAt)).limit(100);
-  const nyanpassRows = await db.select({
-    id: nyanpassInstances.id,
-    nodeId: nyanpassInstances.nodeId,
-    nodeName: nodes.name,
-    name: nyanpassInstances.name,
-    role: nyanpassInstances.role,
-    panelUrl: nyanpassInstances.panelUrl,
-    optimize: nyanpassInstances.optimize,
-    status: nyanpassInstances.status,
-    lastReportedAt: nyanpassInstances.lastReportedAt,
-    syncError: nyanpassInstances.syncError,
-    activeTaskId: nyanpassInstances.activeTaskId,
-    configRevision: nyanpassInstances.configRevision,
-    credentialCiphertext: nyanpassInstances.credentialCiphertext,
-    taskStatus: agentTasks.status,
-    taskCreatedAt: agentTasks.updatedAt,
-    taskClaimedAt: agentTasks.claimedAt,
-    taskLeaseExpiresAt: agentTasks.leaseExpiresAt,
-  }).from(nyanpassInstances)
-    .leftJoin(nodes, eq(nyanpassInstances.nodeId, nodes.id))
-    .leftJoin(agentTasks, eq(nyanpassInstances.activeTaskId, agentTasks.id))
-    .orderBy(desc(nyanpassInstances.createdAt));
+
+  let admin: { multiUserEnabled: boolean; users: Array<{ id: string; username: string; role: string; nodeCount: number; createdAt: string }> } | null = null;
+  if (user.role === 'admin') {
+    const rows = await db.select({ id: users.id, username: users.username, role: users.role, createdAt: users.createdAt }).from(users).orderBy(asc(users.createdAt));
+    const counts = await db.select({ ownerId: nodes.ownerId, total: count() }).from(nodes).groupBy(nodes.ownerId);
+    const byOwner = new Map(counts.map((row) => [row.ownerId, row.total]));
+    admin = {
+      multiUserEnabled: await multiUserEnabled(db),
+      users: rows.map((row) => ({ ...row, nodeCount: byOwner.get(row.id) ?? 0, createdAt: row.createdAt.toISOString() })),
+    };
+  }
 
   return <Dashboard
-    basePath={basePath}
-    user={{ name: user.displayName, email: user.email }}
-    initialNodes={nodeRows.map(nodeResponse)}
-    initialDomains={domainRows.map((domain) => ({ name: domain.name, accountId: domain.accountId, createdAt: domain.createdAt.toISOString() }))}
-    initialAliyun={aliyun}
-    initialEvents={eventRows.map((event) => ({ ...event, createdAt: event.createdAt.toISOString(), nodeName: event.nodeName ?? '已删除节点' }))}
-    initialNyanpass={nyanpassRows.map((instance) => ({
-      id: instance.id,
-      nodeId: instance.nodeId,
-      nodeName: instance.nodeName ?? '已删除节点',
-      name: instance.name,
-      role: instance.role,
-      panelUrl: instance.panelUrl,
-      optimize: instance.optimize,
-      status: instance.status,
-      hasCredential: Boolean(instance.credentialCiphertext),
-      syncError: instance.syncError,
-      activeTaskId: instance.activeTaskId,
-      configRevision: instance.configRevision,
-      taskStatus: instance.taskStatus,
-      lastReportedAt: instance.lastReportedAt?.toISOString() ?? null,
-      taskCreatedAt: instance.taskCreatedAt?.toISOString() ?? null,
-      taskClaimedAt: instance.taskClaimedAt?.toISOString() ?? null,
-      taskLeaseExpiresAt: instance.taskLeaseExpiresAt?.toISOString() ?? null,
-    }))}
+    basePath={basePath()}
+    user={{ id: user.id, name: user.username, role: user.role }}
+    initialNodes={await listNodes(db, user)}
+    initialDomains={await listDomains(db, user)}
+    initialAliyun={await listAccounts(db, user)}
+    initialEvents={await listEvents(db, user)}
+    initialNyanpass={await listInstances(db, user)}
+    initialAdmin={admin}
   />;
 }

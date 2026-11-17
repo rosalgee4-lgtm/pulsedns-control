@@ -1,9 +1,10 @@
 import { and, eq, exists, gt, isNull } from 'drizzle-orm';
-import { getChatGPTUser } from '@/app/chatgpt-auth';
-import { getDb } from '@/db';
+import { runInTransaction } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
+import { requireApiUser } from '@/lib/auth';
+import { canAccessNode } from '@/lib/ownership';
 import { cleanText } from '@/lib/validation';
 import { expireProvisionAttempts, isBootstrapLocked } from '@/lib/provision-lifecycle';
 
@@ -11,16 +12,16 @@ const maxPollAgeMs = 2 * 60 * 1000;
 const noStoreHeaders = { 'Cache-Control': 'no-store, max-age=0' };
 
 export async function POST(request: Request) {
-  const user = await getChatGPTUser();
-  if (!user) return Response.json({ error: '需要管理员登录' }, { status: 401, headers: noStoreHeaders });
+  await ensureSchema();
+  const auth = await requireApiUser(request);
+  if ('response' in auth) return auth.response;
+  const { db, user } = auth;
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   const id = cleanText(body?.id, 64);
   if (!id) return Response.json({ error: '缺少实例 ID' }, { status: 400, headers: noStoreHeaders });
 
-  await ensureSchema();
-  const db = await getDb();
   const [located] = await db.select({ nodeId: nyanpassInstances.nodeId }).from(nyanpassInstances).where(eq(nyanpassInstances.id, id)).limit(1);
-  if (!located) return Response.json({ error: '实例不存在' }, { status: 404, headers: noStoreHeaders });
+  if (!located || !await canAccessNode(db, user, located.nodeId)) return Response.json({ error: '实例不存在' }, { status: 404, headers: noStoreHeaders });
   const operationId = await acquireNodeOperationLock(db, located.nodeId);
   if (operationId === undefined) return Response.json({ error: '所属节点不存在' }, { status: 404, headers: noStoreHeaders });
   if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试同步' }, { status: 409, headers: noStoreHeaders });
@@ -89,7 +90,7 @@ export async function POST(request: Request) {
   const expectedActiveTask = instance.activeTaskId ? eq(nyanpassInstances.activeTaskId, instance.activeTaskId) : isNull(nyanpassInstances.activeTaskId);
   try {
     if (existingTask && reusable) {
-      await db.batch([
+      await runInTransaction(db, [
         db.update(agentTasks).set({
           id: taskId,
           status: 'queued',
@@ -111,7 +112,7 @@ export async function POST(request: Request) {
         )),
       ]);
     } else {
-      await db.batch([
+      await runInTransaction(db, [
         db.insert(agentTasks).values({
           id: taskId,
           nodeId: instance.nodeId,
@@ -171,7 +172,7 @@ export async function POST(request: Request) {
   await db.insert(events).values({
     nodeId: instance.nodeId,
     kind: 'nyanpass_sync_queued',
-    message: `${user.email} 将实例 ${instance.name}${existingTask ? '重新' : ''}加入机器同步队列`,
+    message: `${user.username} 将实例 ${instance.name}${existingTask ? '重新' : ''}加入机器同步队列`,
     createdAt: now,
   });
   return Response.json({
@@ -194,14 +195,14 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const user = await getChatGPTUser();
-  if (!user) return Response.json({ error: '需要管理员登录' }, { status: 401, headers: noStoreHeaders });
+  await ensureSchema();
+  const auth = await requireApiUser(request);
+  if ('response' in auth) return auth.response;
+  const { db, user } = auth;
   const id = cleanText(new URL(request.url).searchParams.get('id'), 64);
   if (!id) return Response.json({ error: '缺少实例 ID' }, { status: 400, headers: noStoreHeaders });
-  await ensureSchema();
-  const db = await getDb();
   const [located] = await db.select({ nodeId: nyanpassInstances.nodeId }).from(nyanpassInstances).where(eq(nyanpassInstances.id, id)).limit(1);
-  if (!located) return Response.json({ error: '实例不存在' }, { status: 404, headers: noStoreHeaders });
+  if (!located || !await canAccessNode(db, user, located.nodeId)) return Response.json({ error: '实例不存在' }, { status: 404, headers: noStoreHeaders });
   const operationId = await acquireNodeOperationLock(db, located.nodeId);
   if (operationId === undefined) return Response.json({ error: '所属节点不存在' }, { status: 404, headers: noStoreHeaders });
   if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试取消' }, { status: 409, headers: noStoreHeaders });
@@ -230,7 +231,7 @@ export async function DELETE(request: Request) {
     eq(agentTasks.status, 'canceled'),
     eq(agentTasks.updatedAt, now),
   )));
-  await db.batch([
+  await runInTransaction(db, [
     db.update(agentTasks).set({
       status: 'canceled',
       errorCode: 'canceled_by_admin',
@@ -255,7 +256,7 @@ export async function DELETE(request: Request) {
   if (task?.status !== 'canceled' || task.updatedAt.getTime() !== now.getTime()) {
     return Response.json({ error: '探针已经领取任务，不能远程取消安装' }, { status: 409, headers: noStoreHeaders });
   }
-  await db.insert(events).values({ nodeId: instance.nodeId, kind: 'nyanpass_sync_canceled', message: `${user.email} 取消了实例 ${instance.name} 的排队任务`, createdAt: now });
+  await db.insert(events).values({ nodeId: instance.nodeId, kind: 'nyanpass_sync_canceled', message: `${user.username} 取消了实例 ${instance.name} 的排队任务`, createdAt: now });
   return Response.json({ status: 'ok' }, { headers: noStoreHeaders });
   } finally {
     await releaseNodeOperationLock(db, located.nodeId, operationId);

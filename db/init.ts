@@ -1,152 +1,15 @@
-import { getLocalSqlite, isSelfHosted } from './index';
+import { join } from 'node:path';
+import { migrate } from 'drizzle-orm/mysql2/migrator';
+import { count } from 'drizzle-orm';
+import { getDb } from './index';
+import { users } from './schema';
+import { hashPassword, validPassword, validUsername } from '@/lib/passwords';
 
 let initialized = false;
 let initialization: Promise<void> | null = null;
 
-const schemaStatements = [
-  `CREATE TABLE IF NOT EXISTS nodes (
-    id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL,
-    region TEXT NOT NULL DEFAULT 'unknown',
-    token_hash TEXT NOT NULL,
-    provider TEXT NOT NULL DEFAULT 'alidns',
-    domain_name TEXT,
-    record_v4 TEXT,
-    record_v6 TEXT,
-    sync_enabled INTEGER NOT NULL DEFAULT 1,
-    ipv4 TEXT,
-    ipv6 TEXT,
-    agent_version TEXT,
-    nyanpass_status TEXT NOT NULL DEFAULT '未安装',
-    provision_generation INTEGER NOT NULL DEFAULT 0,
-    provision_attempt_id TEXT,
-    provision_lease_expires_at INTEGER,
-    provision_last_completed_step TEXT,
-    bootstrap_payload_ciphertext TEXT,
-    bootstrap_download_token_hash TEXT,
-    bootstrap_download_expires_at INTEGER,
-    bootstrap_download_consumed_at INTEGER,
-    dns_operation_id TEXT,
-    dns_operation_expires_at INTEGER,
-    last_seen_at INTEGER,
-    last_task_poll_at INTEGER,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-    node_id TEXT NOT NULL,
-    level TEXT NOT NULL DEFAULT 'info',
-    kind TEXT NOT NULL,
-    message TEXT NOT NULL,
-    ip_type TEXT,
-    ip TEXT,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (node_id) REFERENCES nodes(id) ON UPDATE no action ON DELETE cascade
-  )`,
-  `CREATE TABLE IF NOT EXISTS nyanpass_instances (
-    id TEXT PRIMARY KEY NOT NULL,
-    node_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'outbound',
-    panel_url TEXT NOT NULL,
-    ws_port INTEGER,
-    status TEXT NOT NULL DEFAULT 'legacy',
-    optimize INTEGER NOT NULL DEFAULT 0,
-    credential_ciphertext TEXT,
-    config_revision INTEGER NOT NULL DEFAULT 0,
-    bootstrap_generation INTEGER,
-    active_task_id TEXT,
-    sync_error TEXT,
-    last_reported_at INTEGER,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    FOREIGN KEY (node_id) REFERENCES nodes(id) ON UPDATE no action ON DELETE cascade
-  )`,
-  `CREATE TABLE IF NOT EXISTS agent_tasks (
-    id TEXT PRIMARY KEY NOT NULL,
-    node_id TEXT NOT NULL,
-    instance_id TEXT NOT NULL,
-    kind TEXT NOT NULL DEFAULT 'nyanpass_apply_v1',
-    revision INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'queued',
-    lease_token_hash TEXT,
-    lease_expires_at INTEGER,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    error_code TEXT,
-    error_message TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    claimed_at INTEGER,
-    finished_at INTEGER,
-    FOREIGN KEY (node_id) REFERENCES nodes(id) ON UPDATE no action ON DELETE cascade,
-    FOREIGN KEY (instance_id) REFERENCES nyanpass_instances(id) ON UPDATE no action ON DELETE cascade
-  )`,
-  `CREATE TABLE IF NOT EXISTS domains (
-    name TEXT PRIMARY KEY NOT NULL,
-    account_id TEXT,
-    created_at INTEGER NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS aliyun_accounts (
-    id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL,
-    access_key_id TEXT NOT NULL,
-    secret_ciphertext TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  )`,
-  'CREATE UNIQUE INDEX IF NOT EXISTS idx_aliyun_accounts_name ON aliyun_accounts(name)',
-  'CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_token_hash ON nodes(token_hash)',
-  'CREATE INDEX IF NOT EXISTS idx_nodes_last_seen_at ON nodes(last_seen_at)',
-  'CREATE INDEX IF NOT EXISTS idx_events_node_created ON events(node_id, created_at)',
-  'CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at)',
-  'CREATE UNIQUE INDEX IF NOT EXISTS idx_nyanpass_node_name ON nyanpass_instances(node_id, name)',
-  'CREATE UNIQUE INDEX IF NOT EXISTS idx_nyanpass_node_ws_port ON nyanpass_instances(node_id, ws_port)',
-  'CREATE INDEX IF NOT EXISTS idx_nyanpass_node_status ON nyanpass_instances(node_id, status)',
-];
-
-const taskIndexStatements = [
-  'CREATE INDEX IF NOT EXISTS idx_nodes_provision_lease ON nodes(nyanpass_status, provision_lease_expires_at)',
-  'CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_bootstrap_download_token_hash ON nodes(bootstrap_download_token_hash)',
-  'CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_dns_v4_owner ON nodes(domain_name, record_v4) WHERE sync_enabled = 1 AND domain_name IS NOT NULL AND record_v4 IS NOT NULL',
-  'CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_dns_v6_owner ON nodes(domain_name, record_v6) WHERE sync_enabled = 1 AND domain_name IS NOT NULL AND record_v6 IS NOT NULL',
-  'CREATE INDEX IF NOT EXISTS idx_nyanpass_active_task ON nyanpass_instances(active_task_id)',
-  'CREATE INDEX IF NOT EXISTS idx_domains_account ON domains(account_id)',
-  'CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_tasks_instance_revision ON agent_tasks(instance_id, revision)',
-  "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_tasks_one_running_per_node ON agent_tasks(node_id) WHERE status = 'running'",
-  'CREATE INDEX IF NOT EXISTS idx_agent_tasks_node_status_created ON agent_tasks(node_id, status, created_at)',
-  'CREATE INDEX IF NOT EXISTS idx_agent_tasks_instance_status ON agent_tasks(instance_id, status)',
-];
-
-const conflictedDnsOwners = `WITH ranked_v4 AS (
-  SELECT id, ROW_NUMBER() OVER (PARTITION BY domain_name, record_v4 ORDER BY created_at, id) AS owner_rank
-  FROM nodes
-  WHERE sync_enabled = 1 AND domain_name IS NOT NULL AND record_v4 IS NOT NULL
-), ranked_v6 AS (
-  SELECT id, ROW_NUMBER() OVER (PARTITION BY domain_name, record_v6 ORDER BY created_at, id) AS owner_rank
-  FROM nodes
-  WHERE sync_enabled = 1 AND domain_name IS NOT NULL AND record_v6 IS NOT NULL
-)
-SELECT id FROM ranked_v4 WHERE owner_rank > 1
-UNION
-SELECT id FROM ranked_v6 WHERE owner_rank > 1`;
-
-// 升级时把现有节点已经填写的主域名导入「域名」列表。
-const importNodeDomains = `INSERT OR IGNORE INTO domains (name, created_at)
-  SELECT DISTINCT domain_name, CAST(strftime('%s', 'now') AS INTEGER) * 1000 FROM nodes WHERE domain_name IS NOT NULL AND domain_name <> ''`;
-
-const dnsOwnershipCleanupStatements = [
-  `INSERT INTO events (node_id, level, kind, message, created_at)
-   SELECT nodes.id, 'error', 'dns_ownership_conflict', '升级时发现该 DNS 记录同时由多个节点管理，已安全暂停自动同步；请检查节点配置后重新启用', CAST(strftime('%s', 'now') AS INTEGER) * 1000
-   FROM nodes
-   WHERE nodes.sync_enabled = 1
-     AND nodes.id IN (${conflictedDnsOwners})
-     AND NOT EXISTS (SELECT 1 FROM events WHERE events.node_id = nodes.id AND events.kind = 'dns_ownership_conflict')`,
-  `UPDATE nodes
-   SET sync_enabled = 0, updated_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000
-   WHERE sync_enabled = 1 AND id IN (${conflictedDnsOwners})`,
-];
-
+// 启动后第一次访问数据库时：执行未应用的迁移；如果还没有任何账号，
+// 用 PULSEDNS_INITIAL_ADMIN_USER / PULSEDNS_INITIAL_ADMIN_PASSWORD 创建管理员（只保存哈希）。
 export async function ensureSchema() {
   if (initialized) return;
   if (initialization) return initialization;
@@ -159,95 +22,38 @@ export async function ensureSchema() {
   }
 }
 
-async function initializeSchema() {
-
-  if (isSelfHosted()) {
-    const db = await getLocalSqlite();
-    db.exec(`${schemaStatements.join(';\n')};`);
-    const nodeColumns = db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>;
-    if (!nodeColumns.some((column) => column.name === 'domain_name')) db.exec('ALTER TABLE nodes ADD COLUMN domain_name TEXT');
-    if (!nodeColumns.some((column) => column.name === 'nyanpass_status')) db.exec("ALTER TABLE nodes ADD COLUMN nyanpass_status TEXT NOT NULL DEFAULT '未安装'");
-    if (!nodeColumns.some((column) => column.name === 'last_task_poll_at')) db.exec('ALTER TABLE nodes ADD COLUMN last_task_poll_at INTEGER');
-    if (!nodeColumns.some((column) => column.name === 'provision_generation')) db.exec('ALTER TABLE nodes ADD COLUMN provision_generation INTEGER NOT NULL DEFAULT 0');
-    if (!nodeColumns.some((column) => column.name === 'provision_attempt_id')) db.exec('ALTER TABLE nodes ADD COLUMN provision_attempt_id TEXT');
-    if (!nodeColumns.some((column) => column.name === 'provision_lease_expires_at')) db.exec('ALTER TABLE nodes ADD COLUMN provision_lease_expires_at INTEGER');
-    if (!nodeColumns.some((column) => column.name === 'provision_last_completed_step')) db.exec('ALTER TABLE nodes ADD COLUMN provision_last_completed_step TEXT');
-    if (!nodeColumns.some((column) => column.name === 'bootstrap_payload_ciphertext')) db.exec('ALTER TABLE nodes ADD COLUMN bootstrap_payload_ciphertext TEXT');
-    if (!nodeColumns.some((column) => column.name === 'bootstrap_download_token_hash')) db.exec('ALTER TABLE nodes ADD COLUMN bootstrap_download_token_hash TEXT');
-    if (!nodeColumns.some((column) => column.name === 'bootstrap_download_expires_at')) db.exec('ALTER TABLE nodes ADD COLUMN bootstrap_download_expires_at INTEGER');
-    if (!nodeColumns.some((column) => column.name === 'bootstrap_download_consumed_at')) db.exec('ALTER TABLE nodes ADD COLUMN bootstrap_download_consumed_at INTEGER');
-    if (!nodeColumns.some((column) => column.name === 'dns_operation_id')) db.exec('ALTER TABLE nodes ADD COLUMN dns_operation_id TEXT');
-    if (!nodeColumns.some((column) => column.name === 'dns_operation_expires_at')) db.exec('ALTER TABLE nodes ADD COLUMN dns_operation_expires_at INTEGER');
-    const nyanpassColumns = db.prepare('PRAGMA table_info(nyanpass_instances)').all() as Array<{ name: string }>;
-    if (!nyanpassColumns.some((column) => column.name === 'role')) db.exec("ALTER TABLE nyanpass_instances ADD COLUMN role TEXT NOT NULL DEFAULT 'outbound'");
-    if (!nyanpassColumns.some((column) => column.name === 'optimize')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN optimize INTEGER NOT NULL DEFAULT 0');
-    if (!nyanpassColumns.some((column) => column.name === 'credential_ciphertext')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN credential_ciphertext TEXT');
-    if (!nyanpassColumns.some((column) => column.name === 'config_revision')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN config_revision INTEGER NOT NULL DEFAULT 0');
-    if (!nyanpassColumns.some((column) => column.name === 'active_task_id')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN active_task_id TEXT');
-    if (!nyanpassColumns.some((column) => column.name === 'sync_error')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN sync_error TEXT');
-    if (!nyanpassColumns.some((column) => column.name === 'bootstrap_generation')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN bootstrap_generation INTEGER');
-    const domainColumns = db.prepare('PRAGMA table_info(domains)').all() as Array<{ name: string }>;
-    if (!domainColumns.some((column) => column.name === 'account_id')) db.exec('ALTER TABLE domains ADD COLUMN account_id TEXT');
-    db.exec(`UPDATE nodes SET provider = 'alidns' WHERE provider = 'cloudflare'; UPDATE nodes SET nyanpass_status = 'uncertain', provision_generation = CASE WHEN provision_generation < 1 THEN 1 ELSE provision_generation END WHERE nyanpass_status = 'provisioning' AND provision_attempt_id IS NULL; UPDATE nodes SET bootstrap_download_expires_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 1800000 WHERE bootstrap_download_token_hash IS NOT NULL AND bootstrap_download_expires_at IS NULL; UPDATE nyanpass_instances SET bootstrap_generation = 1 WHERE config_revision = 0 AND status IN ('bootstrap', 'uncertain') AND bootstrap_generation IS NULL; UPDATE nyanpass_instances SET status = 'legacy' WHERE status = '等待安装';`);
-    db.exec(importNodeDomains);
-    db.exec(`${dnsOwnershipCleanupStatements.join(';\n')};`);
-    db.exec(`${taskIndexStatements.join(';\n')}; PRAGMA optimize;`);
-    return;
+// 启动时检查关键配置，配置错误时给出明确提示，而不是在运行中途失败。
+function validateEnvironment() {
+  const key = process.env.PULSEDNS_TASK_ENCRYPTION_KEY?.trim() ?? '';
+  if (key.length < 32) throw new Error('PULSEDNS_TASK_ENCRYPTION_KEY 至少 32 个字符（建议 openssl rand -hex 32 生成）');
+  const publicUrl = process.env.PULSEDNS_PUBLIC_URL?.trim();
+  if (publicUrl && !publicUrl.startsWith('https://') && process.env.PULSEDNS_ALLOW_HTTP !== '1') {
+    throw new Error('PULSEDNS_PUBLIC_URL 必须是 https:// 地址（由宝塔等反向代理提供 HTTPS）');
   }
-
-  const { env } = await import('cloudflare:workers');
-  const db = env.DB;
-  if (!db) throw new Error('D1 binding DB is unavailable');
-  await db.batch(schemaStatements.map((statement) => db.prepare(statement)));
-
-  const nodeColumns = await db.prepare('PRAGMA table_info(nodes)').all<{ name: string }>();
-  if (!nodeColumns.results.some((column) => column.name === 'domain_name')) {
-    await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN domain_name TEXT');
-  }
-  if (!nodeColumns.results.some((column) => column.name === 'nyanpass_status')) {
-    await addD1Column(db, "ALTER TABLE nodes ADD COLUMN nyanpass_status TEXT NOT NULL DEFAULT '未安装'");
-  }
-  if (!nodeColumns.results.some((column) => column.name === 'last_task_poll_at')) {
-    await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN last_task_poll_at INTEGER');
-  }
-  if (!nodeColumns.results.some((column) => column.name === 'provision_generation')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN provision_generation INTEGER NOT NULL DEFAULT 0');
-  if (!nodeColumns.results.some((column) => column.name === 'provision_attempt_id')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN provision_attempt_id TEXT');
-  if (!nodeColumns.results.some((column) => column.name === 'provision_lease_expires_at')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN provision_lease_expires_at INTEGER');
-  if (!nodeColumns.results.some((column) => column.name === 'provision_last_completed_step')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN provision_last_completed_step TEXT');
-  if (!nodeColumns.results.some((column) => column.name === 'bootstrap_payload_ciphertext')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN bootstrap_payload_ciphertext TEXT');
-  if (!nodeColumns.results.some((column) => column.name === 'bootstrap_download_token_hash')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN bootstrap_download_token_hash TEXT');
-  if (!nodeColumns.results.some((column) => column.name === 'bootstrap_download_expires_at')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN bootstrap_download_expires_at INTEGER');
-  if (!nodeColumns.results.some((column) => column.name === 'bootstrap_download_consumed_at')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN bootstrap_download_consumed_at INTEGER');
-  if (!nodeColumns.results.some((column) => column.name === 'dns_operation_id')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN dns_operation_id TEXT');
-  if (!nodeColumns.results.some((column) => column.name === 'dns_operation_expires_at')) await addD1Column(db, 'ALTER TABLE nodes ADD COLUMN dns_operation_expires_at INTEGER');
-  const nyanpassColumns = await db.prepare('PRAGMA table_info(nyanpass_instances)').all<{ name: string }>();
-  if (!nyanpassColumns.results.some((column) => column.name === 'role')) {
-    await addD1Column(db, "ALTER TABLE nyanpass_instances ADD COLUMN role TEXT NOT NULL DEFAULT 'outbound'");
-  }
-  if (!nyanpassColumns.results.some((column) => column.name === 'optimize')) await addD1Column(db, 'ALTER TABLE nyanpass_instances ADD COLUMN optimize INTEGER NOT NULL DEFAULT 0');
-  if (!nyanpassColumns.results.some((column) => column.name === 'credential_ciphertext')) await addD1Column(db, 'ALTER TABLE nyanpass_instances ADD COLUMN credential_ciphertext TEXT');
-  if (!nyanpassColumns.results.some((column) => column.name === 'config_revision')) await addD1Column(db, 'ALTER TABLE nyanpass_instances ADD COLUMN config_revision INTEGER NOT NULL DEFAULT 0');
-  if (!nyanpassColumns.results.some((column) => column.name === 'active_task_id')) await addD1Column(db, 'ALTER TABLE nyanpass_instances ADD COLUMN active_task_id TEXT');
-  if (!nyanpassColumns.results.some((column) => column.name === 'sync_error')) await addD1Column(db, 'ALTER TABLE nyanpass_instances ADD COLUMN sync_error TEXT');
-  if (!nyanpassColumns.results.some((column) => column.name === 'bootstrap_generation')) await addD1Column(db, 'ALTER TABLE nyanpass_instances ADD COLUMN bootstrap_generation INTEGER');
-  const domainColumns = await db.prepare('PRAGMA table_info(domains)').all<{ name: string }>();
-  if (!domainColumns.results.some((column) => column.name === 'account_id')) await addD1Column(db, 'ALTER TABLE domains ADD COLUMN account_id TEXT');
-  await db.prepare("UPDATE nodes SET provider = 'alidns' WHERE provider = 'cloudflare'").run();
-  await db.prepare("UPDATE nodes SET nyanpass_status = 'uncertain', provision_generation = CASE WHEN provision_generation < 1 THEN 1 ELSE provision_generation END WHERE nyanpass_status = 'provisioning' AND provision_attempt_id IS NULL").run();
-  await db.prepare("UPDATE nodes SET bootstrap_download_expires_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 1800000 WHERE bootstrap_download_token_hash IS NOT NULL AND bootstrap_download_expires_at IS NULL").run();
-  await db.prepare("UPDATE nyanpass_instances SET bootstrap_generation = 1 WHERE config_revision = 0 AND status IN ('bootstrap', 'uncertain') AND bootstrap_generation IS NULL").run();
-  await db.prepare("UPDATE nyanpass_instances SET status = 'legacy' WHERE status = '等待安装'").run();
-  await db.prepare(importNodeDomains).run();
-  await db.batch(dnsOwnershipCleanupStatements.map((statement) => db.prepare(statement)));
-  await db.batch(taskIndexStatements.map((statement) => db.prepare(statement)));
-  await db.prepare('PRAGMA optimize').run();
 }
 
-async function addD1Column(db: { prepare(query: string): { run(): Promise<unknown> } }, statement: string) {
-  try {
-    await db.prepare(statement).run();
-  } catch (error) {
-    if (error instanceof Error && /duplicate column name/i.test(error.message)) return;
-    throw error;
+async function initializeSchema() {
+  validateEnvironment();
+  const db = await getDb();
+  await migrate(db, { migrationsFolder: process.env.PULSEDNS_MIGRATIONS_DIR || join(process.cwd(), 'drizzle') });
+  const [{ total }] = await db.select({ total: count() }).from(users);
+  if (total > 0) return;
+  const username = process.env.PULSEDNS_INITIAL_ADMIN_USER?.trim() ?? '';
+  const password = process.env.PULSEDNS_INITIAL_ADMIN_PASSWORD ?? '';
+  if (!validUsername(username) || !validPassword(password)) {
+    throw new Error('数据库里还没有管理员：请设置 PULSEDNS_INITIAL_ADMIN_USER 与 PULSEDNS_INITIAL_ADMIN_PASSWORD（12-128 位）后重启');
   }
+  const now = new Date();
+  await db.insert(users).values({
+    id: crypto.randomUUID(),
+    username,
+    role: 'admin',
+    passwordHash: await hashPassword(password),
+    createdAt: now,
+    updatedAt: now,
+  }).catch(async (error) => {
+    // 多个进程同时启动时只有一个能创建成功。
+    const [{ total: after }] = await db.select({ total: count() }).from(users);
+    if (after === 0) throw error;
+  });
 }

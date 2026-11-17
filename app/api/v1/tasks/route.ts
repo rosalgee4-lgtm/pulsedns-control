@@ -1,5 +1,5 @@
 import { and, asc, eq, exists, inArray } from 'drizzle-orm';
-import { getDb } from '@/db';
+import { getDb, runInTransaction } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { expireAgentTasks } from '@/lib/agent-task-lifecycle';
@@ -96,7 +96,7 @@ export async function GET(request: Request) {
     eq(agentTasks.leaseTokenHash, leaseTokenHash),
   )));
   try {
-    await db.batch([
+    await runInTransaction(db, [
       db.update(agentTasks).set({
         status: 'running',
         leaseTokenHash,
@@ -238,7 +238,7 @@ export async function POST(request: Request) {
   }).where(eq(nodes.id, node.id));
 
   if (instanceMatches && normalizedOutcome === 'succeeded') {
-    await db.batch([
+    await runInTransaction(db, [
       taskUpdate,
       db.update(nyanpassInstances).set({
         status: 'success',
@@ -256,7 +256,7 @@ export async function POST(request: Request) {
       nodeUpdate,
     ]);
   } else if (instanceMatches && normalizedOutcome === 'failed') {
-    await db.batch([
+    await runInTransaction(db, [
       taskUpdate,
       db.update(nyanpassInstances).set({ status: 'failed', syncError: errorMessage, updatedAt: now }).where(and(
         eq(nyanpassInstances.id, task.instanceId),
@@ -267,7 +267,7 @@ export async function POST(request: Request) {
       nodeUpdate,
     ]);
   } else if (instanceMatches) {
-    await db.batch([
+    await runInTransaction(db, [
       taskUpdate,
       db.update(nyanpassInstances).set({
         status: 'uncertain',
@@ -283,7 +283,7 @@ export async function POST(request: Request) {
       nodeUpdate,
     ]);
   } else {
-    await db.batch([taskUpdate, nodeUpdate]);
+    await runInTransaction(db, [taskUpdate, nodeUpdate]);
   }
 
   const [transitioned] = await db.select({ status: agentTasks.status, updatedAt: agentTasks.updatedAt })
@@ -351,7 +351,7 @@ async function failInvalidTask(
     eq(agentTasks.status, 'failed'),
     eq(agentTasks.errorCode, 'invalid_config'),
   )));
-  await db.batch([
+  await runInTransaction(db, [
     db.update(agentTasks).set({
       status: 'failed',
       errorCode: 'invalid_config',

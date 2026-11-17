@@ -5,6 +5,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const workspaceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
 export async function resolve(specifier, context, nextResolve) {
+  // next 包没有 exports 映射，Node ESM 需要显式的 .js 后缀。
+  if (specifier === 'next/headers' || specifier === 'next/navigation' || specifier === 'next/server') {
+    return nextResolve(`${specifier}.js`, context);
+  }
   if (specifier.startsWith('@/')) {
     const target = resolveSourceFile(join(workspaceRoot, specifier.slice(2)));
     if (!target) throw new Error(`Unable to resolve test alias: ${specifier}`);

@@ -1,6 +1,6 @@
 import { and, eq, exists, gt, isNull, lt, notExists, or } from 'drizzle-orm';
-import { alias } from 'drizzle-orm/sqlite-core';
-import { getDb } from '@/db';
+import { alias } from 'drizzle-orm/mysql-core';
+import { affectedRows, getDb, runInTransaction } from '@/db';
 import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 
 const queuedLifetimeMs = 5 * 60 * 1000;
@@ -41,36 +41,32 @@ export async function expireAgentTasks(
     queuedAt: agentTasks.updatedAt,
   }).from(agentTasks).innerJoin(nodes, eq(agentTasks.nodeId, nodes.id)).where(and(...queuedConditions));
   for (const task of staleQueued) {
-    const nodeStillOffline = exists(db.select({ id: nodes.id }).from(nodes).where(and(
-      eq(nodes.id, task.nodeId),
-      or(isNull(nodes.lastTaskPollAt), lt(nodes.lastTaskPollAt, queuedCutoff)),
-    )));
-    const nodeStillIdle = notExists(db.select({ id: runningTask.id }).from(runningTask).where(and(
-      eq(runningTask.nodeId, task.nodeId),
-      eq(runningTask.status, 'running'),
-      gt(runningTask.leaseExpiresAt, now),
-    )));
-    const queueTimedOut = exists(db.select({ id: agentTasks.id }).from(agentTasks).where(and(
-      eq(agentTasks.id, task.id),
-      eq(agentTasks.status, 'failed'),
-      eq(agentTasks.errorCode, 'queue_timeout'),
-    )));
-    await db.batch([
-      db.update(agentTasks).set({
+    // MySQL 不允许 UPDATE 的子查询读取同一张表：在事务里先锁住任务行并重新确认
+    // 「节点仍离线、节点上没有运行中的任务」，再结束排队。
+    await db.transaction(async (tx) => {
+      const [locked] = await tx.select({ status: agentTasks.status, updatedAt: agentTasks.updatedAt })
+        .from(agentTasks).where(eq(agentTasks.id, task.id)).for('update');
+      if (locked?.status !== 'queued' || locked.updatedAt.getTime() !== task.queuedAt.getTime() || !(locked.updatedAt < queuedCutoff)) return;
+      const [offline] = await tx.select({ id: nodes.id }).from(nodes).where(and(
+        eq(nodes.id, task.nodeId),
+        or(isNull(nodes.lastTaskPollAt), lt(nodes.lastTaskPollAt, queuedCutoff)),
+      )).limit(1);
+      if (!offline) return;
+      const [running] = await tx.select({ id: runningTask.id }).from(runningTask).where(and(
+        eq(runningTask.nodeId, task.nodeId),
+        eq(runningTask.status, 'running'),
+        gt(runningTask.leaseExpiresAt, now),
+      )).limit(1);
+      if (running) return;
+      const failed = await tx.update(agentTasks).set({
         status: 'failed',
         errorCode: 'queue_timeout',
         errorMessage: '探针 5 分钟内未领取任务',
         updatedAt: now,
         finishedAt: now,
-      }).where(and(
-        eq(agentTasks.id, task.id),
-        eq(agentTasks.status, 'queued'),
-        eq(agentTasks.updatedAt, task.queuedAt),
-        lt(agentTasks.updatedAt, queuedCutoff),
-        nodeStillOffline,
-        nodeStillIdle,
-      )),
-      db.update(nyanpassInstances).set({
+      }).where(and(eq(agentTasks.id, task.id), eq(agentTasks.status, 'queued')));
+      if (!affectedRows(failed)) return;
+      await tx.update(nyanpassInstances).set({
         status: 'failed',
         syncError: '探针 5 分钟内未领取，排队已自动结束；确认探针在线后可重试',
         updatedAt: now,
@@ -79,9 +75,8 @@ export async function expireAgentTasks(
         eq(nyanpassInstances.status, 'pending'),
         eq(nyanpassInstances.activeTaskId, task.id),
         eq(nyanpassInstances.configRevision, task.revision),
-        queueTimedOut,
-      )),
-    ]);
+      ));
+    });
     const [changed] = await db.select({ status: agentTasks.status, errorCode: agentTasks.errorCode, updatedAt: agentTasks.updatedAt })
       .from(agentTasks).where(eq(agentTasks.id, task.id)).limit(1);
     if (changed?.status === 'failed' && changed.errorCode === 'queue_timeout' && changed.updatedAt.getTime() === now.getTime()) {
@@ -107,7 +102,7 @@ export async function expireAgentTasks(
       eq(agentTasks.status, 'uncertain'),
       eq(agentTasks.errorCode, 'lease_expired'),
     )));
-    await db.batch([
+    await runInTransaction(db, [
       db.update(agentTasks).set({
         status: 'uncertain',
         errorCode: 'lease_expired',

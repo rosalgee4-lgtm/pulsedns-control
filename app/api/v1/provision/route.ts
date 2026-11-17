@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNull } from 'drizzle-orm';
-import { getDb } from '@/db';
+import { getDb, runInTransaction } from '@/db';
 import { ensureSchema } from '@/db/init';
 import { events, nodes, nyanpassInstances } from '@/db/schema';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
@@ -64,7 +64,7 @@ export async function POST(request: Request) {
     const replacement = node.nyanpassStatus === 'ready'
       || (node.nyanpassStatus === 'uncertain' && node.provisionAttemptId !== attemptId);
     if (node.nyanpassStatus === 'awaiting' || node.nyanpassStatus === 'failed' || replacement) {
-      const [transitioned] = await db.batch([
+      const [transitioned] = await runInTransaction(db, [
         db.update(nodes).set({
           nyanpassStatus: 'provisioning',
           provisionAttemptId: attemptId,
@@ -77,7 +77,7 @@ export async function POST(request: Request) {
           eq(nodes.provisionGeneration, numericGeneration),
           eq(nodes.nyanpassStatus, node.nyanpassStatus),
           node.provisionAttemptId === null ? isNull(nodes.provisionAttemptId) : eq(nodes.provisionAttemptId, node.provisionAttemptId),
-        )).returning({ id: nodes.id }),
+        )),
         db.insert(events).values({
           nodeId: node.id,
           kind: 'nyanpass_bootstrap_started',
@@ -87,7 +87,7 @@ export async function POST(request: Request) {
           createdAt: now,
         }),
       ]);
-      if (transitioned.length) {
+      if (transitioned) {
         // 重新安装换机重装列表中的全部实例（创建时预配的 + 后来同步成功的）：
         // 恢复为 bootstrap，由本次最终回执决定结果。
         await db.update(nyanpassInstances).set({ status: 'bootstrap', syncError: null, updatedAt: now }).where(and(
@@ -165,7 +165,7 @@ async function finishProvision(
 
   if (node.nyanpassStatus === targetStatus) {
     if (outcome === 'succeeded') {
-      await db.batch([
+      await runInTransaction(db, [
         db.update(nodes).set({
           ...(lastCompletedStep ? { provisionLastCompletedStep: lastCompletedStep } : {}),
           updatedAt: now,
@@ -178,7 +178,7 @@ async function finishProvision(
         instanceUpdate,
       ]);
     } else {
-      await db.batch([
+      await runInTransaction(db, [
         db.update(nodes).set({ ...(lastCompletedStep ? { provisionLastCompletedStep: lastCompletedStep } : {}), updatedAt: now }).where(and(
           eq(nodes.id, node.id),
           eq(nodes.provisionGeneration, generation),
@@ -190,7 +190,7 @@ async function finishProvision(
     }
     return okResponse('duplicate');
   }
-  const [transitioned] = await db.batch([
+  const [transitioned] = await runInTransaction(db, [
     db.update(nodes).set({
       nyanpassStatus: targetStatus,
       provisionLeaseExpiresAt: null,
@@ -203,7 +203,7 @@ async function finishProvision(
       eq(nodes.provisionGeneration, generation),
       eq(nodes.provisionAttemptId, attemptId),
       inArray(nodes.nyanpassStatus, ['provisioning', 'uncertain']),
-    )).returning({ id: nodes.id }),
+    )),
     instanceUpdate,
     db.insert(events).values({
       nodeId: node.id,
@@ -215,7 +215,7 @@ async function finishProvision(
       createdAt: now,
     }),
   ]);
-  if (!transitioned.length) return okResponse('conflict');
+  if (!transitioned) return okResponse('conflict');
   return okResponse('accepted');
 }
 

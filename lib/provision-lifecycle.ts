@@ -1,5 +1,5 @@
 import { and, eq, lt } from 'drizzle-orm';
-import { getDb } from '@/db';
+import { affectedRows, getDb, runInTransaction } from '@/db';
 import { events, nodes, nyanpassInstances } from '@/db/schema';
 
 export const bootstrapLockedStatuses = new Set(['awaiting', 'provisioning', 'failed', 'uncertain']);
@@ -38,9 +38,9 @@ export async function expireProvisionAttempts(
       eq(nodes.provisionGeneration, node.generation),
       eq(nodes.provisionAttemptId, node.attemptId),
       eq(nodes.provisionLeaseExpiresAt, node.leaseExpiresAt),
-    )).returning({ id: nodes.id });
-    if (!transitioned.length) continue;
-    await db.batch([
+    ));
+    if (!affectedRows(transitioned)) continue;
+    await runInTransaction(db, [
       db.update(nyanpassInstances).set({
         status: 'uncertain',
         syncError: `开机安装心跳已超时，机器可能发生部分变更${node.lastCompletedStep ? `；最后完成步骤：${node.lastCompletedStep}` : ''}；请先核查 VPS`,

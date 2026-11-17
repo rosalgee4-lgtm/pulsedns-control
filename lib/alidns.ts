@@ -22,15 +22,12 @@ const HOST = 'alidns.aliyuncs.com';
 const VERSION = '2015-01-09';
 
 export async function syncAliDnsRecord(domainName: string, rr: string, type: DnsType, value: string) {
-  // 按主域名绑定的阿里云账号取 Key；未绑定的主域名使用安装时填写的默认 Key。
+  // 按主域名绑定的阿里云账号取 Key。
   let credentials: AliDnsCredentials;
   try {
     credentials = await domainCredentials(await getDb(), domainName);
   } catch (error) {
     return { ok: false, error: (error instanceof Error ? error.message : '读取阿里云账号失败').slice(0, 180) } as const;
-  }
-  if (!credentials.accessKeyId || !credentials.accessKeySecret) {
-    return { ok: false, skipped: true, error: '未配置阿里云 AccessKey' } as const;
   }
 
   try {
@@ -84,8 +81,7 @@ export async function syncAliDnsRecord(domainName: string, rr: string, type: Dns
 }
 
 async function callAliDns(credentials: AliDnsCredentials, action: string, parameters: Record<string, string>) {
-  const { accessKeyId, accessKeySecret, securityToken } = credentials;
-  if (!accessKeyId || !accessKeySecret) throw new Error('未配置阿里云 AccessKey');
+  const { accessKeyId, accessKeySecret } = credentials;
 
   const date = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
   const nonce = crypto.randomUUID();
@@ -98,7 +94,6 @@ async function callAliDns(credentials: AliDnsCredentials, action: string, parame
     date,
     nonce,
     parameters,
-    securityToken,
   });
 
   const headers: Record<string, string> = {
@@ -110,7 +105,6 @@ async function callAliDns(credentials: AliDnsCredentials, action: string, parame
     'x-acs-signature-nonce': nonce,
     'x-acs-version': VERSION,
   };
-  if (securityToken) headers['x-acs-security-token'] = securityToken;
 
   const response = await fetch(`https://${HOST}/?${signed.canonicalQuery}`, {
     method: 'POST',

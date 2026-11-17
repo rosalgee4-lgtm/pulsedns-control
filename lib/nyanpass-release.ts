@@ -1,5 +1,3 @@
-import { isSelfHosted } from '@/db';
-
 export type TrustedNyanpassRelease = {
   installerUrl: string;
   installerSha256: string;
@@ -21,9 +19,7 @@ export const DEFAULT_NYANPASS_RELEASE: TrustedNyanpassRelease = {
 };
 
 export async function trustedNyanpassRelease(): Promise<TrustedNyanpassRelease> {
-  const environment = isSelfHosted()
-    ? process.env
-    : (await import('cloudflare:workers')).env;
+  const environment = process.env;
   const manifest = {
     installerUrl: environment.PULSEDNS_NYANPASS_INSTALLER_URL?.trim() || DEFAULT_NYANPASS_RELEASE.installerUrl,
     installerSha256: environment.PULSEDNS_NYANPASS_INSTALLER_SHA256?.trim() || DEFAULT_NYANPASS_RELEASE.installerSha256,

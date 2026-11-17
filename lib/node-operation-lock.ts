@@ -1,5 +1,5 @@
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
-import { getDb } from '@/db';
+import { affectedRows, getDb } from '@/db';
 import { nodes } from '@/db/schema';
 
 const lockLifetimeMs = 3 * 60 * 1000;
@@ -17,8 +17,8 @@ export async function acquireNodeOperationLock(db: Awaited<ReturnType<typeof get
     }).where(and(
       eq(nodes.id, nodeId),
       or(isNull(nodes.dnsOperationId), isNull(nodes.dnsOperationExpiresAt), lt(nodes.dnsOperationExpiresAt, now)),
-    )).returning({ id: nodes.id });
-    if (changed.length) return operationId;
+    ));
+    if (affectedRows(changed)) return operationId;
     const [existing] = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.id, nodeId)).limit(1);
     if (!existing) return undefined;
     await new Promise((resolve) => setTimeout(resolve, 100));

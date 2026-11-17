@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 const source = await readFile(new URL('../public/install.sh', import.meta.url), 'utf8');
-const panelSource = await readFile(new URL('../public/panel-install.sh', import.meta.url), 'utf8');
+const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'utf8');
 const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
 
 function body(name) {
@@ -414,29 +413,15 @@ test('DDNS uninstall removes persisted task leases but leaves Nyanpass itself al
   assert.doesNotMatch(uninstall, /nyanpass\.uninstall|systemctl.*nyanpass/i);
 });
 
-test('panel installer uses immutable source and README verifies the downloaded entrypoint', () => {
-  const sourceCommit = panelSource.match(/^SOURCE_COMMIT="([a-f0-9]{40})"$/m)?.[1];
-  assert.ok(sourceCommit, 'panel source must be pinned to a full commit');
-  assert.match(panelSource, /archive\/\$\{SOURCE_COMMIT\}\.tar\.gz/);
-  assert.doesNotMatch(panelSource, /archive\/refs\/heads|SOURCE_REF=/);
-
-  const panelHash = createHash('sha256').update(panelSource).digest('hex');
-  assert.equal(readme.includes(panelHash), true, 'README panel command must pin the entrypoint digest');
-  assert.match(panelSource, /lib\/startup-launcher\.ts/);
-  assert.match(panelSource, /startupScript/);
-  assert.match(panelSource, /lib\/install-command\.ts/);
-  assert.match(panelSource, /connectCommand/);
-  assert.match(panelSource, /buildNodeBootstrapConfig/);
-  assert.match(panelSource, /application\/octet-stream/);
-  assert.match(panelSource, /public\/install\.sh/);
-  assert.match(panelSource, /"\$ACTION" == "probe"/);
-  assert.match(panelSource, /next\/font\/google/);
-  const panelCommands = readme.split('\n').filter((line) => line.includes('panel-install.sh?v=0.8.3'));
-  assert.equal(panelCommands.length, 2);
-  for (const command of panelCommands) {
-    assert.match(command, /^\( set -eu; tmp="\$\(mktemp\)";/);
-    assert.match(command, /sha256sum -c -; bash "\$tmp" (install|update) \)/);
-    const syntax = spawnSync(process.env.BASH_EXE || 'bash', ['-n'], { input: command, encoding: 'utf8' });
+test('the Docker panel is built from a pinned commit and README deployment commands are valid shell', () => {
+  assert.match(readme, /git clone https:\/\/github\.com\/rosalgee4-lgtm\/pulsedns-control\.git/);
+  assert.match(readme, /git -C pulsedns-control checkout --detach [a-f0-9]{40}/, 'Docker deployment must pin a full commit');
+  assert.doesNotMatch(readme, /checkout (?:main|master|spot-reinstall)\b/);
+  assert.match(dockerfile, /pnpm install --frozen-lockfile/);
+  const blocks = [...readme.matchAll(/```bash\n([\s\S]*?)```/g)].map((match) => match[1]).filter((block) => /docker compose|git -C pulsedns-control/.test(block));
+  assert.ok(blocks.length >= 4);
+  for (const block of blocks) {
+    const syntax = spawnSync(process.env.BASH_EXE || 'bash', ['-n'], { input: block, encoding: 'utf8' });
     assert.equal(syntax.status, 0, syntax.stderr);
   }
 });

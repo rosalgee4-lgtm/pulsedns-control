@@ -1,97 +1,143 @@
 import { sql } from 'drizzle-orm';
-import { index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { bigint, boolean, datetime, index, int, mediumtext, mysqlTable, text, uniqueIndex, varchar } from 'drizzle-orm/mysql-core';
 
-export const nodes = sqliteTable('nodes', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  region: text('region').notNull().default('unknown'),
-  tokenHash: text('token_hash').notNull(),
-  provider: text('provider').notNull().default('alidns'),
-  domainName: text('domain_name'),
-  recordV4: text('record_v4'),
-  recordV6: text('record_v6'),
-  syncEnabled: integer('sync_enabled', { mode: 'boolean' }).notNull().default(true),
-  ipv4: text('ipv4'),
-  ipv6: text('ipv6'),
-  agentVersion: text('agent_version'),
-  nyanpassStatus: text('nyanpass_status').notNull().default('未安装'),
-  provisionGeneration: integer('provision_generation').notNull().default(0),
-  provisionAttemptId: text('provision_attempt_id'),
-  provisionLeaseExpiresAt: integer('provision_lease_expires_at', { mode: 'timestamp_ms' }),
-  provisionLastCompletedStep: text('provision_last_completed_step'),
-  bootstrapPayloadCiphertext: text('bootstrap_payload_ciphertext'),
-  bootstrapDownloadTokenHash: text('bootstrap_download_token_hash'),
-  bootstrapDownloadExpiresAt: integer('bootstrap_download_expires_at', { mode: 'timestamp_ms' }),
-  bootstrapDownloadConsumedAt: integer('bootstrap_download_consumed_at', { mode: 'timestamp_ms' }),
-  dnsOperationId: text('dns_operation_id'),
-  dnsOperationExpiresAt: integer('dns_operation_expires_at', { mode: 'timestamp_ms' }),
-  lastSeenAt: integer('last_seen_at', { mode: 'timestamp_ms' }),
-  lastTaskPollAt: integer('last_task_poll_at', { mode: 'timestamp_ms' }),
-  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
-  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+// 时间统一按 UTC 毫秒精度保存。
+const timestamp = (name: string) => datetime(name, { mode: 'date', fsp: 3 });
+
+// 面板账号：管理员（role=admin，仅一个）与普通用户。密码只保存 scrypt 哈希。
+export const users = mysqlTable('users', {
+  id: varchar('id', { length: 36 }).primaryKey(),
+  username: varchar('username', { length: 32 }).notNull(),
+  role: varchar('role', { length: 10, enum: ['admin', 'user'] }).notNull(),
+  passwordHash: varchar('password_hash', { length: 255 }).notNull(),
+  createdAt: timestamp('created_at').notNull(),
+  updatedAt: timestamp('updated_at').notNull(),
+}, (table) => [
+  uniqueIndex('idx_users_username').on(table.username),
+]);
+
+// 登录会话：Cookie 中只有随机令牌，数据库只保存它的 SHA-256。
+export const sessions = mysqlTable('sessions', {
+  tokenHash: varchar('token_hash', { length: 64 }).primaryKey(),
+  userId: varchar('user_id', { length: 36 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at').notNull(),
+  expiresAt: timestamp('expires_at').notNull(),
+}, (table) => [
+  index('idx_sessions_user').on(table.userId),
+  index('idx_sessions_expires').on(table.expiresAt),
+]);
+
+// 面板设置（键值）。multi_user_enabled：是否允许普通用户登录。
+export const settings = mysqlTable('settings', {
+  key: varchar('key', { length: 64 }).primaryKey(),
+  value: varchar('value', { length: 255 }).notNull(),
+  updatedAt: timestamp('updated_at').notNull(),
+});
+
+// 防爆破：按「来源 IP」和「来源 IP + 用户名」统计失败次数。
+export const loginAttempts = mysqlTable('login_attempts', {
+  scope: varchar('scope', { length: 200 }).primaryKey(),
+  failures: int('failures').notNull(),
+  windowStartedAt: timestamp('window_started_at').notNull(),
+  lockedUntil: timestamp('locked_until'),
+});
+
+export const nodes = mysqlTable('nodes', {
+  id: varchar('id', { length: 36 }).primaryKey(),
+  ownerId: varchar('owner_id', { length: 36 }).notNull().references(() => users.id),
+  name: varchar('name', { length: 64 }).notNull(),
+  region: varchar('region', { length: 32 }).notNull().default('unknown'),
+  tokenHash: varchar('token_hash', { length: 64 }).notNull(),
+  provider: varchar('provider', { length: 16 }).notNull().default('alidns'),
+  domainName: varchar('domain_name', { length: 253 }),
+  recordV4: varchar('record_v4', { length: 253 }),
+  recordV6: varchar('record_v6', { length: 253 }),
+  syncEnabled: boolean('sync_enabled').notNull().default(true),
+  ipv4: varchar('ipv4', { length: 15 }),
+  ipv6: varchar('ipv6', { length: 45 }),
+  agentVersion: varchar('agent_version', { length: 30 }),
+  nyanpassStatus: varchar('nyanpass_status', { length: 20 }).notNull().default('awaiting'),
+  provisionGeneration: int('provision_generation').notNull().default(0),
+  provisionAttemptId: varchar('provision_attempt_id', { length: 36 }),
+  provisionLeaseExpiresAt: timestamp('provision_lease_expires_at'),
+  provisionLastCompletedStep: varchar('provision_last_completed_step', { length: 16 }),
+  bootstrapPayloadCiphertext: mediumtext('bootstrap_payload_ciphertext'),
+  bootstrapDownloadTokenHash: varchar('bootstrap_download_token_hash', { length: 64 }),
+  dnsOperationId: varchar('dns_operation_id', { length: 36 }),
+  dnsOperationExpiresAt: timestamp('dns_operation_expires_at'),
+  lastSeenAt: timestamp('last_seen_at'),
+  lastTaskPollAt: timestamp('last_task_poll_at'),
+  createdAt: timestamp('created_at').notNull(),
+  updatedAt: timestamp('updated_at').notNull(),
+  // MySQL 没有带条件的唯一索引：用生成列表达「启用同步时，同一主域名 + 主机记录只归一个节点」。
+  dnsV4Owner: varchar('dns_v4_owner', { length: 510 }).generatedAlwaysAs(sql`(case when \`sync_enabled\` = 1 and \`domain_name\` is not null and \`record_v4\` is not null then concat(\`domain_name\`, '|', \`record_v4\`) end)`, { mode: 'stored' }),
+  dnsV6Owner: varchar('dns_v6_owner', { length: 510 }).generatedAlwaysAs(sql`(case when \`sync_enabled\` = 1 and \`domain_name\` is not null and \`record_v6\` is not null then concat(\`domain_name\`, '|', \`record_v6\`) end)`, { mode: 'stored' }),
 }, (table) => [
   uniqueIndex('idx_nodes_token_hash').on(table.tokenHash),
-  uniqueIndex('idx_nodes_dns_v4_owner').on(table.domainName, table.recordV4).where(sql`${table.syncEnabled} = 1 AND ${table.domainName} IS NOT NULL AND ${table.recordV4} IS NOT NULL`),
-  uniqueIndex('idx_nodes_dns_v6_owner').on(table.domainName, table.recordV6).where(sql`${table.syncEnabled} = 1 AND ${table.domainName} IS NOT NULL AND ${table.recordV6} IS NOT NULL`),
+  uniqueIndex('idx_nodes_dns_v4_owner').on(table.dnsV4Owner),
+  uniqueIndex('idx_nodes_dns_v6_owner').on(table.dnsV6Owner),
+  uniqueIndex('idx_nodes_bootstrap_download_token_hash').on(table.bootstrapDownloadTokenHash),
+  index('idx_nodes_owner').on(table.ownerId),
   index('idx_nodes_last_seen_at').on(table.lastSeenAt),
   index('idx_nodes_provision_lease').on(table.nyanpassStatus, table.provisionLeaseExpiresAt),
-  uniqueIndex('idx_nodes_bootstrap_download_token_hash').on(table.bootstrapDownloadTokenHash),
 ]);
 
-// 阿里云账号：在「阿里云主域名」页面添加，AccessKey Secret 加密保存。
-// 安装面板时填写的全局 AccessKey 仍是默认账号，不存放在这张表里。
-export const aliyunAccounts = sqliteTable('aliyun_accounts', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  accessKeyId: text('access_key_id').notNull(),
-  secretCiphertext: text('secret_ciphertext').notNull(),
-  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
-  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+// 阿里云账号：AccessKey ID 与 Secret 都加密保存；页面只显示打码后的头尾几位。
+export const aliyunAccounts = mysqlTable('aliyun_accounts', {
+  id: varchar('id', { length: 36 }).primaryKey(),
+  ownerId: varchar('owner_id', { length: 36 }).notNull().references(() => users.id),
+  name: varchar('name', { length: 40 }).notNull(),
+  keyCiphertext: text('key_ciphertext').notNull(),
+  accessKeyIdHint: varchar('access_key_id_hint', { length: 32 }).notNull(),
+  accessKeySecretHint: varchar('access_key_secret_hint', { length: 32 }).notNull(),
+  createdAt: timestamp('created_at').notNull(),
+  updatedAt: timestamp('updated_at').notNull(),
 }, (table) => [
-  uniqueIndex('idx_aliyun_accounts_name').on(table.name),
+  uniqueIndex('idx_aliyun_accounts_owner_name').on(table.ownerId, table.name),
 ]);
 
-// 阿里云主域名：在「阿里云主域名」页面手动添加，添加节点时从中选择。
-// accountId 为空表示使用安装时填写的默认 AccessKey。
-export const domains = sqliteTable('domains', {
-  name: text('name').primaryKey(),
-  accountId: text('account_id'),
-  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+// 阿里云主域名：每个主域名属于一个用户，并绑定该用户的一个阿里云账号。
+export const domains = mysqlTable('domains', {
+  name: varchar('name', { length: 253 }).primaryKey(),
+  ownerId: varchar('owner_id', { length: 36 }).notNull().references(() => users.id),
+  accountId: varchar('account_id', { length: 36 }).notNull().references(() => aliyunAccounts.id),
+  createdAt: timestamp('created_at').notNull(),
 }, (table) => [
+  index('idx_domains_owner').on(table.ownerId),
   index('idx_domains_account').on(table.accountId),
 ]);
 
-export const events = sqliteTable('events', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  nodeId: text('node_id').notNull().references(() => nodes.id, { onDelete: 'cascade' }),
-  level: text('level').notNull().default('info'),
-  kind: text('kind').notNull(),
+export const events = mysqlTable('events', {
+  id: bigint('id', { mode: 'number', unsigned: true }).autoincrement().primaryKey(),
+  nodeId: varchar('node_id', { length: 36 }).notNull().references(() => nodes.id, { onDelete: 'cascade' }),
+  level: varchar('level', { length: 10 }).notNull().default('info'),
+  kind: varchar('kind', { length: 40 }).notNull(),
   message: text('message').notNull(),
-  ipType: text('ip_type'),
-  ip: text('ip'),
-  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  ipType: varchar('ip_type', { length: 4 }),
+  ip: varchar('ip', { length: 45 }),
+  createdAt: timestamp('created_at').notNull(),
 }, (table) => [
   index('idx_events_node_created').on(table.nodeId, table.createdAt),
   index('idx_events_created_at').on(table.createdAt),
 ]);
 
-export const nyanpassInstances = sqliteTable('nyanpass_instances', {
-  id: text('id').primaryKey(),
-  nodeId: text('node_id').notNull().references(() => nodes.id, { onDelete: 'cascade' }),
-  name: text('name').notNull(),
-  role: text('role', { enum: ['inbound', 'outbound'] }).notNull().default('outbound'),
-  panelUrl: text('panel_url').notNull(),
-  wsPort: integer('ws_port'),
-  status: text('status', { enum: ['ready', 'pending', 'running', 'success', 'failed', 'uncertain', 'bootstrap', 'legacy', '等待安装'] }).notNull().default('legacy'),
-  optimize: integer('optimize', { mode: 'boolean' }).notNull().default(false),
+export const nyanpassInstances = mysqlTable('nyanpass_instances', {
+  id: varchar('id', { length: 36 }).primaryKey(),
+  nodeId: varchar('node_id', { length: 36 }).notNull().references(() => nodes.id, { onDelete: 'cascade' }),
+  name: varchar('name', { length: 64 }).notNull(),
+  role: varchar('role', { length: 10, enum: ['inbound', 'outbound'] }).notNull().default('outbound'),
+  panelUrl: varchar('panel_url', { length: 255 }).notNull(),
+  wsPort: int('ws_port'),
+  status: varchar('status', { length: 12, enum: ['ready', 'pending', 'running', 'success', 'failed', 'uncertain', 'bootstrap', 'legacy'] }).notNull().default('legacy'),
+  optimize: boolean('optimize').notNull().default(false),
   credentialCiphertext: text('credential_ciphertext'),
-  configRevision: integer('config_revision').notNull().default(0),
-  bootstrapGeneration: integer('bootstrap_generation'),
-  activeTaskId: text('active_task_id'),
+  configRevision: int('config_revision').notNull().default(0),
+  bootstrapGeneration: int('bootstrap_generation'),
+  activeTaskId: varchar('active_task_id', { length: 36 }),
   syncError: text('sync_error'),
-  lastReportedAt: integer('last_reported_at', { mode: 'timestamp_ms' }),
-  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
-  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  lastReportedAt: timestamp('last_reported_at'),
+  createdAt: timestamp('created_at').notNull(),
+  updatedAt: timestamp('updated_at').notNull(),
 }, (table) => [
   uniqueIndex('idx_nyanpass_node_name').on(table.nodeId, table.name),
   uniqueIndex('idx_nyanpass_node_ws_port').on(table.nodeId, table.wsPort),
@@ -99,25 +145,29 @@ export const nyanpassInstances = sqliteTable('nyanpass_instances', {
   index('idx_nyanpass_active_task').on(table.activeTaskId),
 ]);
 
-export const agentTasks = sqliteTable('agent_tasks', {
-  id: text('id').primaryKey(),
-  nodeId: text('node_id').notNull().references(() => nodes.id, { onDelete: 'cascade' }),
-  instanceId: text('instance_id').notNull().references(() => nyanpassInstances.id, { onDelete: 'cascade' }),
-  kind: text('kind').notNull().default('nyanpass_apply_v1'),
-  revision: integer('revision').notNull(),
-  status: text('status').notNull().default('queued'),
-  leaseTokenHash: text('lease_token_hash'),
-  leaseExpiresAt: integer('lease_expires_at', { mode: 'timestamp_ms' }),
-  attempts: integer('attempts').notNull().default(0),
-  errorCode: text('error_code'),
+export const agentTasks = mysqlTable('agent_tasks', {
+  id: varchar('id', { length: 36 }).primaryKey(),
+  // 不在 node_id 上建级联外键：MySQL 不允许生成列的基础列使用级联动作。
+  // 删除节点时经由 实例 → 任务 的级联一并删除。
+  nodeId: varchar('node_id', { length: 36 }).notNull(),
+  instanceId: varchar('instance_id', { length: 36 }).notNull().references(() => nyanpassInstances.id, { onDelete: 'cascade' }),
+  kind: varchar('kind', { length: 32 }).notNull().default('nyanpass_apply_v1'),
+  revision: int('revision').notNull(),
+  status: varchar('status', { length: 12 }).notNull().default('queued'),
+  leaseTokenHash: varchar('lease_token_hash', { length: 64 }),
+  leaseExpiresAt: timestamp('lease_expires_at'),
+  attempts: int('attempts').notNull().default(0),
+  errorCode: varchar('error_code', { length: 40 }),
   errorMessage: text('error_message'),
-  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
-  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
-  claimedAt: integer('claimed_at', { mode: 'timestamp_ms' }),
-  finishedAt: integer('finished_at', { mode: 'timestamp_ms' }),
+  createdAt: timestamp('created_at').notNull(),
+  updatedAt: timestamp('updated_at').notNull(),
+  claimedAt: timestamp('claimed_at'),
+  finishedAt: timestamp('finished_at'),
+  // 每个节点同一时间最多一个 running 任务（生成列 + 唯一索引）。
+  runningNodeId: varchar('running_node_id', { length: 36 }).generatedAlwaysAs(sql`(case when \`status\` = 'running' then \`node_id\` end)`, { mode: 'stored' }),
 }, (table) => [
   uniqueIndex('idx_agent_tasks_instance_revision').on(table.instanceId, table.revision),
-  uniqueIndex('idx_agent_tasks_one_running_per_node').on(table.nodeId).where(sql`${table.status} = 'running'`),
+  uniqueIndex('idx_agent_tasks_one_running_per_node').on(table.runningNodeId),
   index('idx_agent_tasks_node_status_created').on(table.nodeId, table.status, table.createdAt),
   index('idx_agent_tasks_instance_status').on(table.instanceId, table.status),
 ]);

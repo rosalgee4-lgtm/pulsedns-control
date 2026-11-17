@@ -161,7 +161,7 @@ async function logDnsFailure(db: AppDb, input: {
 }
 
 async function insertReportEvent(db: AppDb, values: typeof events.$inferInsert) {
-  const [inserted] = await db.insert(events).values(values).returning({ id: events.id });
+  const [inserted] = await db.insert(events).values(values).$returningId();
   if (inserted) await pruneEventsAfterInsert(db, inserted.id).catch(() => undefined);
 }
 

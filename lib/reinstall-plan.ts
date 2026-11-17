@@ -1,9 +1,7 @@
 import { and, eq } from 'drizzle-orm';
-import type { getDb } from '@/db';
+import { affectedRows, type AppDb } from '@/db';
 import { nodes, nyanpassInstances } from '@/db/schema';
 import { decryptBootstrapPayload, encryptBootstrapPayload } from '@/lib/bootstrap-payload';
-
-type AppDb = Awaited<ReturnType<typeof getDb>>;
 
 const MAX_REINSTALL_INSTANCES = 16;
 
@@ -55,9 +53,8 @@ async function updatePlan(
   if (!instances) return false;
   const ciphertext = await encryptBootstrapPayload({ ...payload, instances }, context);
   const updated = await db.update(nodes).set({ bootstrapPayloadCiphertext: ciphertext })
-    .where(and(eq(nodes.id, nodeId), eq(nodes.bootstrapPayloadCiphertext, node.ciphertext)))
-    .returning({ id: nodes.id });
-  if (!updated.length) return false;
+    .where(and(eq(nodes.id, nodeId), eq(nodes.bootstrapPayloadCiphertext, node.ciphertext)));
+  if (!affectedRows(updated)) return false;
   if (instanceId) {
     await db.update(nyanpassInstances).set({ bootstrapGeneration: node.generation })
       .where(and(eq(nyanpassInstances.id, instanceId), eq(nyanpassInstances.nodeId, nodeId)));

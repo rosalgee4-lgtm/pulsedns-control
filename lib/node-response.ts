@@ -3,6 +3,7 @@ import { nodes } from '@/db/schema';
 export function nodeResponse(node: typeof nodes.$inferSelect) {
   return {
     id: node.id,
+    ownerId: node.ownerId,
     name: node.name,
     region: node.region,
     provider: node.provider,

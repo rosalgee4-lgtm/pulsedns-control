@@ -1,6 +1,6 @@
 # PulseDNS
 
-PulseDNS 把原仓库的多份 VPS Shell 脚本合并为一个 Web 主控和一个通用安装脚本。实现范围以原脚本为基线，只加入明确要求的 Web 界面、安装操作菜单、阿里云 DNS 和多 Nyanpass 面板/实例管理。
+PulseDNS 把原仓库的多份 VPS Shell 脚本合并为一个 Web 主控（Docker + 外置 MySQL / MariaDB）和一个通用安装脚本。实现范围以原脚本为基线，只加入明确要求的 Web 界面、安装操作菜单、阿里云 DNS 和多 Nyanpass 面板/实例管理。
 
 ## 原功能还原范围
 
@@ -53,48 +53,139 @@ PulseDNS Web 主控 /api/v1/provision
 
 ## 阿里云 DNS 配置
 
-主控运行环境需要配置：
+阿里云 AccessKey 只在面板的「阿里云主域名」页面添加，不再写入环境变量：
 
-```text
-ALIBABA_CLOUD_ACCESS_KEY_ID
-ALIBABA_CLOUD_ACCESS_KEY_SECRET
-ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
+1. 先添加阿里云账号（名称 + AccessKey ID + AccessKey Secret）。保存时调用一次 `DescribeDomains` 校验 Key 是否有效；只授权了部分域名的 RAM 用户被拒绝列出域名时，仍视为 Key 有效。
+2. 再添加主域名并选择它属于哪个账号。保存主域名、把主域名改到其他账号、更换账号 Key 时，都会用对应 Key 调用一次 `DescribeDomainRecords` 读取该域名，读不到就不保存。
+3. 添加节点时从下拉框选择主域名并填写主机记录，根记录填 `@`。
+
+AccessKey ID 与 Secret 用 `PULSEDNS_TASK_ENCRYPTION_KEY` 派生的 AES-GCM 密钥一起加密后存入数据库，只在输入时可见；之后页面和接口只显示头尾各 4 位，例如 `LTAI****x9Qk`。正在被主域名使用的账号不能删除，正在被节点使用的主域名不能删除。
+
+同一主域名与主机记录的 A、AAAA 归属分别唯一，多个启用节点不能争用同类型记录（数据库用生成列 + 唯一索引保证）。临时同步失败会由探针周期性自愈，同一记录、类型和 IP 的重复失败一小时只记一次，自动事件路径把事件表控制在约 10,000 条。
+
+### RAM 子账号需要的权限
+
+根据阿里云文档《云解析 DNS · RAM 权限策略的操作资源和条件》以及各接口文档的授权信息，PulseDNS 只调用下面 4 个接口：
+
+| 接口 | RAM 操作 | 用途 | 资源 |
+| --- | --- | --- | --- |
+| DescribeDomainRecords | `alidns:DescribeDomainRecords` | 查询主机记录；保存主域名时校验 | `acs:alidns::{账号ID}:domain/{域名}`，可按域名授权 |
+| AddDomainRecord | `alidns:AddDomainRecord` | 记录不存在时新建 A / AAAA | `acs:alidns::{账号ID}:domain/{域名}`，可按域名授权 |
+| UpdateDomainRecord | `alidns:UpdateDomainRecord` | IP 变化时更新记录 | 文档给出的格式是 `acs:alidns::{账号ID}:domain/{#domainId}` |
+| DescribeDomains | `alidns:DescribeDomains` | 仅在添加或更换 Key 时校验 Key（可选） | 只能授权 `*` |
+
+前三个是必需的。`DescribeDomains` 不授权也能用：面板遇到它被拒绝时会继续把 Key 视为有效。建议给 RAM 用户只授予下面的自定义策略，把 `example.com` 换成你的主域名，多个域名写多行：
+
+```json
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["alidns:DescribeDomainRecords", "alidns:AddDomainRecord", "alidns:UpdateDomainRecord"],
+      "Resource": ["acs:alidns:*:*:domain/example.com"]
+    }
+  ]
+}
 ```
 
-建议使用只允许目标域名执行 `alidns:DescribeDomainRecords`、`alidns:AddDomainRecord`、`alidns:UpdateDomainRecord` 的 RAM 身份。
+注意：阿里云文档里 `UpdateDomainRecord` 的资源写的是 `{#domainId}` 而不是域名，文档没有进一步说明。如果按域名授权后，事件日志里出现更新记录被拒（`Forbidden` / `NoPermission`），请把 `alidns:UpdateDomainRecord` 单独放到一条资源为 `acs:alidns:*:*:domain/*` 的语句里。不要直接使用主账号 AccessKey 或 `AliyunDNSFullAccess` 这类全量权限。
 
-面板的「阿里云主域名」页面可以管理多个阿里云账号和多个主域名：先添加阿里云账号（名称 + AccessKey ID + Secret），再添加主域名并选择它属于哪个账号；安装面板时填写的 AccessKey 作为「默认」账号继续可用，升级前已有的主域名都使用默认账号。AccessKey Secret 用 `PULSEDNS_TASK_ENCRYPTION_KEY` 加密保存，页面和接口只显示打码后的 AccessKey ID。保存账号时会调用一次 `DescribeDomains` 校验 Key（只授权了部分域名的 RAM 身份被拒绝列出域名时仍视为有效）；保存主域名、修改主域名所属账号或更换账号 Key 时，会用对应 Key 调用一次 `DescribeDomainRecords` 读取该域名，读不到就不保存。正在被主域名使用的账号不能删除；默认账号需要重新运行面板安装脚本才能更换。
+## 登录、多用户与安全
 
-先在「阿里云主域名」页面添加主域名（例如 `example.com`；正在被节点使用的主域名不能删除，升级时会自动导入现有节点已填写的主域名），添加节点时从下拉框选择主域名并填写主机记录；根记录填写 `@`。同一主域名与主机记录的 A、AAAA 归属分别唯一，多个启用节点不能争用同类型记录；升级检测到历史冲突时会安全暂停较新的冲突节点并留下错误事件。临时同步失败会由探针周期性自愈，同一记录、类型和 IP 的重复失败一小时只记一次，自动事件路径把事件表控制在约 10,000 条。
+- **登录**：独立登录页 + 会话 Cookie（`HttpOnly`、`SameSite=Strict`、HTTPS 下 `Secure`），会话 12 小时后失效，可随时退出。数据库只保存会话令牌的 SHA-256。
+- **密码**：管理员与用户的密码只保存 scrypt 加盐哈希，无法还原，忘记只能重置。首次启动时由 `PULSEDNS_INITIAL_ADMIN_USER` / `PULSEDNS_INITIAL_ADMIN_PASSWORD` 创建唯一的管理员；创建后可以把这两行从 `.env` 删除，之后在「设置」里修改密码。
+- **多用户模式**：在「设置 → 管理员设置」中开关，默认关闭。关闭时只允许管理员登录，已登录的普通用户会立即被退出（他们的节点照常运行、照常同步解析）。开启后，普通用户只能看到和管理自己的节点、Nyanpass 实例、主域名和阿里云账号；管理员可以看到全部。普通用户由管理员在「设置」中创建，不开放注册；还有节点、主域名或阿里云账号的用户不能删除。
+- **防爆破**：15 分钟内同一来源 IP + 用户名失败 5 次，或同一来源 IP 失败 20 次（不论用户名），对应来源锁定 15 分钟，锁定期间密码正确也会被拒绝。用户名不存在时也执行同等耗时的校验，避免按耗时探测用户名。
+- **跨站请求防护**：所有修改类接口（包括登录）只接受面板自己页面发出的请求（`Sec-Fetch-Site: same-origin`；旧浏览器比对 `Origin` 与 `Host`）。页面禁止被其他网站嵌入（`X-Frame-Options: DENY`、`frame-ancestors 'none'`）。
+- **HTTPS**：面板容器只提供 HTTP，并且只绑定本机 `127.0.0.1`，由宝塔反向代理对外提供 HTTPS。未经 HTTPS 的登录会被拒绝。
+- **加密存储**：阿里云 AccessKey、root 密码、开机配置和 Nyanpass Token 都用 `PULSEDNS_TASK_ENCRYPTION_KEY` 加密后存入数据库。这个密钥一旦使用就不能更换或丢失，请和数据库备份分开保管。
 
-## 安装与菜单
+## 部署 Web 主控面板（Docker + 外置数据库）
 
-### 一键安装 Web 主控面板
+面板以 Docker 容器运行，数据保存在你自己的 MySQL 8.0+ 或 MariaDB 10.6+（已在 MySQL 8.4 与 MariaDB 11.4 上测试）。启动时自动建表和升级表结构。
 
-准备一台使用 systemd、glibc 2.28 或更高版本的 x86_64/arm64 Linux VPS，并确保至少有 2 GiB 可用磁盘及 768 MiB 可用内存与 swap；Alpine/musl、Docker、WSL 和 chroot 不受支持。安装器会自动识别公网 IPv4、询问 HTTP 端口（默认 `3100`），并生成 32 位随机访问路径；不需要域名、证书邮箱或 GitHub Token。只需向自己的来源 IP 放行所选端口，然后以 root 执行：
+### 1. 准备数据库
+
+在数据库服务器上创建独立的库和用户，只授予这个库的权限：
+
+```sql
+CREATE DATABASE pulsedns CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'pulsedns'@'%' IDENTIFIED BY '请替换为强密码';
+GRANT ALL PRIVILEGES ON pulsedns.* TO 'pulsedns'@'%';
+```
+
+如果数据库在另一台服务器上，请只对面板服务器的 IP 开放 3306 端口，并尽量走内网。
+
+### 2. 获取固定版本的源码并配置
 
 ```bash
-( set -eu; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT; curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/e6942428649f1f4735cece5d313cbe4818527c63/public/panel-install.sh?v=0.8.3' -o "$tmp"; printf '%s  %s\n' 'ff16463f1976047266f3a527b048fec332bdedfa620399c875e41017f6a87595' "$tmp" | sha256sum -c -; bash "$tmp" install )
+git clone https://github.com/rosalgee4-lgtm/pulsedns-control.git
 ```
-
-脚本会询问端口、管理员账号和阿里云 AccessKey，随后自动安装经过校验的 Node.js、构建 PulseDNS、创建本地 SQLite 数据库、配置管理员 Basic Auth 并注册 systemd 服务。Caddy、域名和 HTTPS 证书流程已完全移除。完成后会显示类似 `http://203.0.113.10:3100/32位随机路径` 的唯一入口；直接访问 IP 与端口根路径不能进入面板。再次不带参数运行同一脚本会打开操作菜单：
-
-1. 一键安装 Web 主控面板
-2. 升级面板
-3. 查看运行状态
-4. 卸载面板（保留数据库）
-
-一键升级命令：
 
 ```bash
-( set -eu; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT; curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/e6942428649f1f4735cece5d313cbe4818527c63/public/panel-install.sh?v=0.8.3' -o "$tmp"; printf '%s  %s\n' 'ff16463f1976047266f3a527b048fec332bdedfa620399c875e41017f6a87595' "$tmp" | sha256sum -c -; bash "$tmp" update )
+git -C pulsedns-control checkout --detach __PANEL_SOURCE_COMMIT__
 ```
 
-面板数据保存在 `/var/lib/pulsedns-control/pulsedns.db`；管理员密码、阿里云凭据和独立生成的远程任务与开机凭据加密密钥保存在权限为 `0600` 的 `/etc/pulsedns-control.env`。密钥还会以 `0600` 权限单独保存在 `/var/lib/pulsedns-control/task-encryption.key`，以便卸载程序但保留数据库后仍能恢复待处理任务；升级旧面板时会自动补齐并校验该密钥。
+```bash
+cd pulsedns-control && cp .env.example .env && chmod 600 .env
+```
 
-无人值守预配使用的 Nyanpass 安装器与三种架构二进制仍必须通过 SHA-256 校验，但可信清单由主控动态注入。默认值对应当前官方发布；上游正常轮换后，可在 `/etc/pulsedns-control.env` 设置 `PULSEDNS_NYANPASS_INSTALLER_URL`、`PULSEDNS_NYANPASS_INSTALLER_SHA256`、`PULSEDNS_NYANPASS_BINARY_BASE_URL`、`PULSEDNS_NYANPASS_BINARY_RELEASE`、`PULSEDNS_NYANPASS_BINARY_AMD64_SHA256`、`PULSEDNS_NYANPASS_BINARY_AMD64V3_SHA256`、`PULSEDNS_NYANPASS_BINARY_ARM64_SHA256` 并重启 `pulsedns-control`。主控只接受 `https://dl.nyafw.com/download/` 官方路径、UUIDv4 发布 ID 和小写 64 位摘要；配置错误时会停止生成新节点配置，而不是绕过校验。
+编辑 `.env`，逐项填写：
 
-### 探针安装与菜单
+| 变量 | 说明 |
+| --- | --- |
+| `PULSEDNS_DATABASE_URL` | `mysql://用户:密码@主机:3306/pulsedns`；密码里的特殊字符要做 URL 编码 |
+| `PULSEDNS_PUBLIC_URL` | 宝塔里绑定的 HTTPS 地址，例如 `https://panel.example.com`，安装命令和开机脚本都用它 |
+| `PULSEDNS_BASE_PATH` | 随机入口路径，用 `printf '/%s\n' "$(openssl rand -hex 16)"` 生成 |
+| `PULSEDNS_TASK_ENCRYPTION_KEY` | 加密密钥，用 `openssl rand -hex 32` 生成，之后不能更换 |
+| `PULSEDNS_INITIAL_ADMIN_USER` / `PULSEDNS_INITIAL_ADMIN_PASSWORD` | 首次启动创建的管理员，密码 12-128 位 |
+| `PULSEDNS_PANEL_PORT` | 面板在本机监听的端口，默认 `3100`，只绑定 `127.0.0.1` |
+
+### 3. 启动
+
+```bash
+docker compose up -d --build
+```
+
+镜像在本机按上面固定的 commit 构建，基础镜像按摘要固定；容器以非 root 用户、只读根文件系统运行，并去掉全部 Linux capabilities。查看日志：`docker compose logs -f pulsedns`。
+
+### 4. 在宝塔中开启 HTTPS 反向代理
+
+1. 「网站」→「添加站点」，域名填 `panel.example.com`（需先解析到这台服务器）。
+2. 站点设置 →「SSL」→ 申请 Let's Encrypt 证书，并打开「强制 HTTPS」。
+3. 站点设置 →「反向代理」→ 添加反向代理，目标 URL 填 `http://127.0.0.1:3100`，发送域名填 `$host`。
+4. 编辑反向代理的配置文件，确认包含下面几行（宝塔默认缺少 `X-Forwarded-Proto`，缺少时面板会因为“未经 HTTPS”拒绝登录）：
+
+```nginx
+proxy_set_header Host $host;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+防爆破按 `X-Real-IP` 识别来源。容器端口只绑定本机，外部无法绕过宝塔直接访问，所以面板信任这些代理头。完成后打开 `https://panel.example.com/<随机入口路径>/` 登录；直接访问域名根路径不能进入面板。
+
+### 5. 升级
+
+```bash
+git -C pulsedns-control fetch origin
+```
+
+```bash
+git -C pulsedns-control checkout --detach <新的发布 commit>
+```
+
+```bash
+cd pulsedns-control && docker compose up -d --build
+```
+
+### Nyanpass 可信发布清单
+
+无人值守预配使用的 Nyanpass 安装器与三种架构二进制必须通过 SHA-256 校验，可信清单由主控注入。默认值对应当前官方发布；上游正常轮换后，可在 `.env` 设置 `PULSEDNS_NYANPASS_INSTALLER_URL`、`PULSEDNS_NYANPASS_INSTALLER_SHA256`、`PULSEDNS_NYANPASS_BINARY_BASE_URL`、`PULSEDNS_NYANPASS_BINARY_RELEASE`、`PULSEDNS_NYANPASS_BINARY_AMD64_SHA256`、`PULSEDNS_NYANPASS_BINARY_AMD64V3_SHA256`、`PULSEDNS_NYANPASS_BINARY_ARM64_SHA256`，然后执行 `docker compose up -d`。主控只接受 `https://dl.nyafw.com/download/` 官方路径、UUIDv4 发布 ID 和小写 64 位摘要；配置错误时会停止生成新节点配置，而不是绕过校验。
+
+## 探针安装与菜单
+
 
 在 Web 控制台创建节点后，页面提供两种安装方式；关闭窗口或刷新页面后，可以在节点列表点击“安装命令”再次复制，无需删除重建节点：
 
@@ -223,9 +314,14 @@ Content-Type: application/json
 
 ## 本地开发
 
+本地开发与测试需要一个 MySQL 8 / MariaDB（测试默认连接本机 13306 端口，可用 `PULSEDNS_TEST_MYSQL_URL` 指定）：
+
 ```bash
-pnpm install
-pnpm dev
-pnpm lint
-pnpm build
+docker run -d --name pulsedns-mysql-test -e MYSQL_ROOT_PASSWORD=testroot -p 127.0.0.1:13306:3306 mysql:8.4
 ```
+
+```bash
+pnpm install && pnpm test && pnpm lint && pnpm build
+```
+
+每个测试文件都会创建独立的临时数据库，结束后自动删除。修改 `db/schema.ts` 后用 `pnpm db:generate` 生成迁移文件。
