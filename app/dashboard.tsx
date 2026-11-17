@@ -7,17 +7,27 @@ import { buildAgentUpgradeCommand } from '@/lib/install-command';
 
 type ViewId = 'overview' | 'nodes' | 'records' | 'domains' | 'nyanpass' | 'activity';
 
-const navigation: Array<{ id: ViewId; icon: string; label: string }> = [
-  { id: 'overview', icon: '◫', label: '总览' },
-  { id: 'nodes', icon: '⌁', label: '节点' },
-  { id: 'records', icon: '◎', label: 'DNS 记录' },
-  { id: 'domains', icon: '◇', label: '域名' },
-  { id: 'nyanpass', icon: '⇄', label: '添加Nyanpass实例' },
-  { id: 'activity', icon: '↻', label: '事件日志' },
+const navigation: Array<{ id: ViewId; label: string; group?: string }> = [
+  { id: 'overview', label: '控制面板' },
+  { id: 'nodes', label: '节点', group: '探针' },
+  { id: 'records', label: 'DNS 记录', group: 'DNS' },
+  { id: 'domains', label: '域名', group: 'DNS' },
+  { id: 'nyanpass', label: '添加Nyanpass实例', group: 'Nyanpass' },
+  { id: 'activity', label: '事件日志', group: '审计' },
 ];
+const navigationGroups = Array.from(new Set(navigation.map((item) => item.group).filter((group): group is string => Boolean(group))));
+
+const viewDescriptions: Record<ViewId, string> = {
+  overview: '查看探针节点、阿里云 DNS 记录和最近的变更。',
+  nodes: '查看公网地址、阿里云 DNS 映射和最近一次地址上报。原脚本只在地址首次出现或变化时上报。',
+  records: '每个探针上报地址后，主控会把 A 与 AAAA 记录同步到阿里云 DNS。',
+  domains: '先在这里添加阿里云账号里的主域名（例如 example.com），添加或修改节点时从下拉框中选择。',
+  nyanpass: '保存新的官方命令后，点击同步到机器；探针只会领取固定类型的 Nyanpass 安装任务，不接受任意 Shell。',
+  activity: '查看探针注册、IP 变化、DNS 同步和 Nyanpass 实例登记记录。',
+};
 
 const viewTitles: Record<ViewId, string> = {
-  overview: '网络控制台',
+  overview: '控制面板',
   nodes: '探针节点',
   records: 'DNS 记录',
   domains: '主域名',
@@ -62,6 +72,7 @@ function emptyNyanpassDraft(): NyanpassDraft {
 export default function Dashboard({ basePath, user, initialNodes, initialDomains, initialEvents, initialNyanpass }: { basePath: string; user: { name: string; email: string }; initialNodes: NodeRow[]; initialDomains: DomainRow[]; initialEvents: EventRow[]; initialNyanpass: NyanpassRow[] }) {
   const apiPath = (path: string) => `${basePath}${path}`;
   const [activeView, setActiveView] = useState<ViewId>('overview');
+  const [navOpen, setNavOpen] = useState(true);
   const [nodes, setNodes] = useState(initialNodes);
   const [domainList, setDomainList] = useState(initialDomains);
   const [domainSaving, setDomainSaving] = useState(false);
@@ -546,70 +557,74 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
   const hasModal = showCreate || showNyanpass || Boolean(editingNode) || Boolean(editingNyanpass) || Boolean(agentUpgrade);
 
   return (
-    <main className="app-shell">
-      <aside className="sidebar" inert={hasModal}>
-        <div className="brand"><span className="brand-mark">P</span><span>PulseDNS</span></div>
-        <nav aria-label="主导航">
-          {navigation.map((item) => <a
-            key={item.id}
-            href={`#${item.id}`}
-            className={`nav-item${activeView === item.id ? ' active' : ''}`}
-            aria-current={activeView === item.id ? 'page' : undefined}
-            onClick={() => setActiveView(item.id)}
-          ><span aria-hidden="true">{item.icon}</span>{item.label}</a>)}
-        </nav>
-        <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.8.3 · {nodes.length} 个探针</small></div>
-      </aside>
+    <main className={`app-shell${navOpen ? '' : ' nav-collapsed'}`}>
+      <header className="console-topbar" inert={hasModal}>
+        <div className="console-brand"><span className="brand-word">Pulse<b>DNS</b></span><span className="console-service">DDNS 控制台</span></div>
+        <div className="top-actions"><span className={`sync-state${refreshError ? ' error' : ''}`} title={refreshError || (lastSuccessfulRefresh ? `上次刷新：${new Date(lastSuccessfulRefresh).toLocaleTimeString()}` : '页面已由主控加载')}><i /> {refreshError ? '状态刷新失败' : '主控在线'}</span><span className="user-chip" title={user.email}>{user.name.slice(0, 1).toUpperCase()}</span><span className="user-name">{user.name}</span></div>
+      </header>
+      <nav className="console-breadcrumb" aria-label="当前位置" inert={hasModal}>
+        <button type="button" className="console-nav-toggle" aria-label={navOpen ? '收起导航' : '展开导航'} aria-expanded={navOpen} onClick={() => setNavOpen((open) => !open)}><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.5" /><path d="M6 3v10" stroke="currentColor" strokeWidth="1.5" /></svg></button>
+        <a href="#overview" onClick={() => setActiveView('overview')}>PulseDNS</a><span className="crumb-sep" aria-hidden="true">/</span><span aria-current="page">{viewTitles[activeView]}</span>
+      </nav>
 
-      <section className="workspace" inert={hasModal}>
-        <header className="topbar">
-          <div><p className="eyebrow">基础设施 / 动态域名</p><h1 aria-live="polite">{viewTitles[activeView]}</h1></div>
-          <div className="top-actions"><span className={`sync-state${refreshError ? ' error' : ''}`} title={refreshError || (lastSuccessfulRefresh ? `上次刷新：${new Date(lastSuccessfulRefresh).toLocaleTimeString()}` : '页面已由主控加载')}><i /> {refreshError ? '状态刷新失败' : '主控在线'}</span><span className="user-chip" title={user.email}>{user.name.slice(0, 1).toUpperCase()}</span><button className="primary-button" onClick={openCreateModal}>＋ 添加节点</button></div>
-        </header>
+      <div className="console-body">
+        <aside className="sidebar" inert={hasModal}>
+          <div className="sidebar-head"><span>PulseDNS</span><button type="button" className="sidebar-collapse" aria-label="收起导航" onClick={() => setNavOpen(false)}>‹</button></div>
+          <nav aria-label="主导航">
+            {navigation.filter((item) => !item.group).map((item) => <NavLink key={item.id} item={item} active={activeView === item.id} onSelect={setActiveView} />)}
+            {navigationGroups.map((group) => <div className="nav-group" key={group}>
+              <p className="nav-group-title">{group}</p>
+              {navigation.filter((item) => item.group === group).map((item) => <NavLink key={item.id} item={item} active={activeView === item.id} onSelect={setActiveView} />)}
+            </div>)}
+          </nav>
+          <div className="sidebar-foot"><span className="health-dot" /> 主控运行正常<small>v0.8.3 · {nodes.length} 个探针</small></div>
+        </aside>
 
-        <div className="content" data-view={activeView}>
-          {refreshError && <p className="transport-warning" role="alert"><strong>状态刷新中断：</strong>{refreshError}。当前状态可能已过期，系统会自动重试{lastSuccessfulRefresh ? `；上次成功刷新于 ${new Date(lastSuccessfulRefresh).toLocaleTimeString()}` : ''}。</p>}
-          {activeView === 'overview' && <>
-            <section className="hero-panel"><div><p className="eyebrow cyan">实时基础设施</p><h2>所有地址，都在正确的位置。</h2><p>探针持续监测公网 IPv4 与 IPv6，主控自动完成鉴权、DNS 同步和变更审计。</p></div><div className="pulse-orbit" aria-hidden="true"><span /><b /></div></section>
-            <section className="metrics" aria-label="系统指标">
-              <article><span className="metric-icon blue">⌁</span><div><small>已登记节点</small><strong>{nodes.length}</strong></div><mark>DDNS 探针</mark></article>
-              <article><span className="metric-icon violet">◎</span><div><small>托管记录</small><strong>{records}</strong></div><mark>阿里云 DNS</mark></article>
-              <article><span className="metric-icon green">↻</span><div><small>最近事件</small><strong>{events.length}</strong></div><mark>已审计</mark></article>
-              <article><span className="metric-icon amber">!</span><div><small>已有地址上报</small><strong>{reported} <em>/ {nodes.length}</em></strong></div><mark className={nodes.length - reported ? 'warning' : ''}>{!nodes.length ? '暂无节点' : nodes.length - reported ? '等待首次上报' : '均已上报'}</mark></article>
-            </section>
-            <section className="grid-layout">
+        <section className="workspace" inert={hasModal}>
+          <header className="page-header">
+            <div><h1 aria-live="polite">{viewTitles[activeView]}</h1><p>{viewDescriptions[activeView]}</p></div>
+            <div className="page-actions"><button className="primary-button" onClick={openCreateModal}>添加节点</button></div>
+          </header>
+
+          <div className="content" data-view={activeView}>
+            {refreshError && <p className="transport-warning" role="alert"><strong>状态刷新中断：</strong>{refreshError}。当前状态可能已过期，系统会自动重试{lastSuccessfulRefresh ? `；上次成功刷新于 ${new Date(lastSuccessfulRefresh).toLocaleTimeString()}` : ''}。</p>}
+            {activeView === 'overview' && <>
+              <section className="panel" aria-label="资源概况">
+                <div className="panel-heading"><h3>资源概况</h3></div>
+                <div className="summary-grid">
+                  <div className="summary-item"><span>已登记节点</span><strong>{nodes.length}</strong><small>DDNS 探针</small></div>
+                  <div className="summary-item"><span>托管记录</span><strong>{records}</strong><small>阿里云 DNS</small></div>
+                  <div className="summary-item"><span>最近事件</span><strong>{events.length}</strong><small>已审计</small></div>
+                  <div className="summary-item"><span>已有地址上报</span><strong>{reported} <em>/ {nodes.length}</em></strong><small className={nodes.length - reported ? 'warning' : ''}>{!nodes.length ? '暂无节点' : nodes.length - reported ? '等待首次上报' : '均已上报'}</small></div>
+                </div>
+              </section>
               <NodesPanel nodes={nodes} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} onUpgrade={showAgentUpgrade} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
               <ActivityPanel events={events} now={now} limit={5} />
-            </section>
-          </>}
+            </>}
 
-          {activeView === 'nodes' && <section className="view-page" aria-labelledby="nodes-view-title">
-            <ViewIntro eyebrow="探针管理" title="所有探针节点" id="nodes-view-title" description="查看公网地址、阿里云 DNS 映射和最近一次地址上报。原脚本只在地址首次出现或变化时上报。" />
-            <NodesPanel nodes={nodes} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} onUpgrade={showAgentUpgrade} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
-          </section>}
-
-          {activeView === 'records' && <section className="view-page" aria-labelledby="records-view-title">
-            <ViewIntro eyebrow="阿里云 DNS" title="动态 DNS 记录" id="records-view-title" description="每个探针上报地址后，主控会把 A 与 AAAA 记录同步到阿里云 DNS。" />
-            <DnsPanel nodes={nodes} onCreate={openCreateModal} onEdit={beginNodeEdit} notice={nodeEditNotice} />
-          </section>}
-
-          {activeView === 'domains' && <section className="view-page" aria-labelledby="domains-view-title">
-            <ViewIntro eyebrow="阿里云 DNS" title="主域名" id="domains-view-title" description="先在这里添加阿里云账号里的主域名（例如 example.com），添加或修改节点时从下拉框中选择。" />
-            <DomainsPanel domains={domainList} nodes={nodes} saving={domainSaving} error={domainError} onAdd={addDomain} onRemove={removeDomain} />
-          </section>}
-
-          {activeView === 'nyanpass' && <section className="view-page" aria-labelledby="nyanpass-view-title">
-            <ViewIntro eyebrow="Nyanpass · 受限远程同步" title="添加Nyanpass实例" id="nyanpass-view-title" description="保存新的官方命令后，点击同步到机器；探针只会领取固定类型的 Nyanpass 安装任务，不接受任意 Shell。" />
-            {insecureTransport && <p className="transport-warning" role="alert"><strong>当前是 HTTP：</strong>随机路径只能降低误访问，不能加密节点令牌或 Nyanpass Token。仅在可信网络并把面板端口限制到自己的来源 IP；需要链路保密时请改用 HTTPS。</p>}
-            <NyanpassPanel instances={nyanpass} nodes={nodes} hasNodes={Boolean(nodes.length)} syncingIds={syncingNyanpassIds} errors={nyanpassErrors} now={now} onCreate={openNyanpassModal} onEdit={beginNyanpassEdit} onRemove={removeNyanpassInstance} onSync={syncNyanpassInstance} onCancel={cancelNyanpassSync} onUpgrade={showAgentUpgrade} />
-          </section>}
-
-          {activeView === 'activity' && <section className="view-page" aria-labelledby="activity-view-title">
-            <ViewIntro eyebrow="变更记录" title="事件日志" id="activity-view-title" description="查看探针注册、IP 变化、DNS 同步和 Nyanpass 实例登记记录。" />
-            <ActivityPanel events={events} now={now} expanded />
-          </section>}
-        </div>
-      </section>
+            {activeView === 'nodes' && <section className="view-page" aria-label={viewTitles.nodes}>
+              <NodesPanel nodes={nodes} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} onUpgrade={showAgentUpgrade} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
+            </section>}
+  
+            {activeView === 'records' && <section className="view-page" aria-label={viewTitles.records}>
+              <DnsPanel nodes={nodes} onCreate={openCreateModal} onEdit={beginNodeEdit} notice={nodeEditNotice} />
+            </section>}
+  
+            {activeView === 'domains' && <section className="view-page" aria-label={viewTitles.domains}>
+              <DomainsPanel domains={domainList} nodes={nodes} saving={domainSaving} error={domainError} onAdd={addDomain} onRemove={removeDomain} />
+            </section>}
+  
+            {activeView === 'nyanpass' && <section className="view-page" aria-label={viewTitles.nyanpass}>
+              {insecureTransport && <p className="transport-warning" role="alert"><strong>当前是 HTTP：</strong>随机路径只能降低误访问，不能加密节点令牌或 Nyanpass Token。仅在可信网络并把面板端口限制到自己的来源 IP；需要链路保密时请改用 HTTPS。</p>}
+              <NyanpassPanel instances={nyanpass} nodes={nodes} hasNodes={Boolean(nodes.length)} syncingIds={syncingNyanpassIds} errors={nyanpassErrors} now={now} onCreate={openNyanpassModal} onEdit={beginNyanpassEdit} onRemove={removeNyanpassInstance} onSync={syncNyanpassInstance} onCancel={cancelNyanpassSync} onUpgrade={showAgentUpgrade} />
+            </section>}
+  
+            {activeView === 'activity' && <section className="view-page" aria-label={viewTitles.activity}>
+              <ActivityPanel events={events} now={now} expanded />
+            </section>}
+          </div>
+        </section>
+      </div>
 
       {showCreate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="create-title">
@@ -724,12 +739,8 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
   );
 }
 
-function ViewIntro({ eyebrow, title, id, description }: { eyebrow: string; title: string; id: string; description: string }) {
-  return <header className="view-intro">
-    <p className="eyebrow cyan">{eyebrow}</p>
-    <h2 id={id}>{title}</h2>
-    <p>{description}</p>
-  </header>;
+function NavLink({ item, active, onSelect }: { item: { id: ViewId; label: string }; active: boolean; onSelect: (id: ViewId) => void }) {
+  return <a href={`#${item.id}`} className={`nav-item${active ? ' active' : ''}`} aria-current={active ? 'page' : undefined} onClick={() => onSelect(item.id)}>{item.label}</a>;
 }
 
 function NodesPanel({ nodes, now, onCreate, onEdit, onRemove, onInstall, onUpgrade, loadingInstallationId, removingNodeId, deleteError, notice }: { nodes: NodeRow[]; now: number; onCreate: () => void; onEdit: (node: NodeRow) => void; onRemove: (node: NodeRow) => void; onInstall: (node: NodeRow) => void; onUpgrade: (node: NodeRow) => void; loadingInstallationId: string | null; removingNodeId: string | null; deleteError: string; notice: string }) {
