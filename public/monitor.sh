@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # PulseDNS DDNS monitor payload
-# 负责检测 IPv4/IPv6，并领取固定类型的 Nyanpass 安装任务；不会执行主控下发的 Shell 命令。
+# 负责检测 IPv4/IPv6，并领取固定类型的 Nyanpass 安装任务与探针升级任务；不会执行主控下发的 Shell 命令。
 set -euo pipefail
 
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.8.3"
+VERSION="0.9.0"
 CHECK_INTERVAL=10
 DNS_RECONCILE_INTERVAL=600
 REPORT_RETRY_MAX=300
@@ -18,6 +18,9 @@ CONFIG_FILE="/etc/ddns-monitor.conf"
 TASK_STATE_DIR="/var/lib/ddns-monitor/tasks"
 TASK_LOCK_FILE="/run/ddns-monitor-nyanpass.lock"
 PROVISION_OUTCOME_DIR="/var/lib/ddns-monitor/provision-outcomes"
+AGENT_UPGRADE_DIR="/var/lib/ddns-monitor/agent-upgrade"
+# 远程升级只接受本仓库固定 commit 的公共安装器，并且必须与主控给出的 SHA-256 一致。
+EXPECTED_PROBE_INSTALLER_URL_RE='^https://raw\.githubusercontent\.com/rosalgee4-lgtm/pulsedns-control/[0-9a-f]{40}/public/install\.sh$'
 NYANPASS_INSTALL_URL="https://dl.nyafw.com/download/nyanpass-install.sh"
 NYANPASS_INSTALL_SHA256="ece867743399c6a4c262ca31292b79d81a97b0a6efa98ef309f75fdd3e5ca624"
 NYANPASS_BINARY_BASE_URL="https://dl.nyafw.com/download/zf-nc20260412"
@@ -444,6 +447,66 @@ recover_local_task_state() {
     shopt -u nullglob
 }
 
+report_agent_upgrade_failure() {
+    local upgrade_id="$1" error_code="$2" body=""
+    body=$(jq -cn --arg upgradeId "$upgrade_id" --arg errorCode "$error_code" '{upgradeId:$upgradeId,outcome:"failed",errorCode:$errorCode}')
+    curl -sS --connect-timeout 5 --max-time 20 -X POST "${SERVER_URL}/api/v1/tasks" \
+        -H "Content-Type: application/json" -H "X-Secret-Token: $TOKEN" -H "X-Agent-Version: $VERSION" -d "$body" >/dev/null 2>&1 || true
+}
+
+# 探针升级任务：下载主控指定的固定版本公共安装器，校验 SHA-256 后在独立的 systemd 临时单元中
+# 执行 agent-upgrade。安装器会重启 ddns-monitor，所以不能作为本服务的子进程运行。
+# 安装器会等待 Nyanpass 任务结束，保留令牌与 DDNS 配置，不重新安装 Nyanpass。
+run_agent_upgrade_job() {
+    local response="$1" upgrade_id="" installer_url="" installer_sha256="" target_version="" installer="" unit=""
+    if ! printf '%s' "$response" | jq -e '
+        (.job.id | type == "string") and (.job.payload | type == "object") and
+        ((.job.payload | keys | sort) == (["installerSha256","installerUrl","version"])) and
+        all(.job.payload[]; type == "string")' >/dev/null 2>&1; then
+        log ERROR "主控返回了格式无效的探针升级任务，已忽略"
+        return 0
+    fi
+    upgrade_id=$(printf '%s' "$response" | jq -r '.job.id')
+    installer_url=$(printf '%s' "$response" | jq -r '.job.payload.installerUrl')
+    installer_sha256=$(printf '%s' "$response" | jq -r '.job.payload.installerSha256')
+    target_version=$(printf '%s' "$response" | jq -r '.job.payload.version')
+    if ! valid_task_uuid "$upgrade_id"; then
+        log ERROR "主控返回了不安全的升级任务标识，已拒绝"
+        return 0
+    fi
+    if [[ ! "$installer_url" =~ $EXPECTED_PROBE_INSTALLER_URL_RE || ! "$installer_sha256" =~ ^[0-9a-f]{64}$ || ! "$target_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        log ERROR "探针升级任务参数未通过校验，已拒绝"
+        report_agent_upgrade_failure "$upgrade_id" validation_failed
+        return 0
+    fi
+    umask 077
+    mkdir -p "$AGENT_UPGRADE_DIR"
+    chmod 0700 "$AGENT_UPGRADE_DIR"
+    installer="${AGENT_UPGRADE_DIR}/install.sh"
+    rm -f "$installer"
+    if ! curl --proto '=https' --proto-redir '=https' -fLSs --connect-timeout 10 --max-time 120 "$installer_url" -o "$installer"; then
+        rm -f "$installer"
+        log ERROR "探针升级：下载公共安装器失败"
+        report_agent_upgrade_failure "$upgrade_id" installer_download
+        return 0
+    fi
+    if [[ "$(sha256sum "$installer" | awk '{print $1}')" != "$installer_sha256" ]] \
+        || ! grep -Fq '# PulseDNS / 原 DDNS 脚本兼容安装器' "$installer" || ! bash -n "$installer"; then
+        rm -f "$installer"
+        log ERROR "探针升级：公共安装器未通过校验，已拒绝"
+        report_agent_upgrade_failure "$upgrade_id" installer_invalid
+        return 0
+    fi
+    chmod 0700 "$installer"
+    unit="pulsedns-agent-upgrade-${upgrade_id:0:8}"
+    if ! systemd-run --unit="$unit" --collect --quiet /bin/bash "$installer" agent-upgrade >/dev/null 2>&1; then
+        log ERROR "探针升级：无法启动独立的升级单元"
+        report_agent_upgrade_failure "$upgrade_id" launch_failed
+        return 0
+    fi
+    log INFO "开始把探针从 v${VERSION} 升级到 v${target_version}（systemd 单元 ${unit}，日志见 journalctl -u ${unit}）"
+}
+
 validate_nyanpass_payload() {
     local service_name="$1" role="$2" panel_url="$3" client_token="$4" optimize="$5" authority="" port=""
     valid_nyanpass_service_name "$service_name" || return 1
@@ -482,6 +545,10 @@ poll_nyanpass_job() {
         -H "X-Secret-Token: $TOKEN" -H "X-Agent-Version: $VERSION" 2>/dev/null || true)
     status=$(printf '%s' "$response" | jq -r '.status // empty' 2>/dev/null || true)
     [[ "$status" == "job" ]] || return 0
+    if printf '%s' "$response" | jq -e '.protocol == 1 and .job.action == "agent_upgrade_v1"' >/dev/null 2>&1; then
+        run_agent_upgrade_job "$response"
+        return 0
+    fi
     if ! printf '%s' "$response" | jq -e '
         .protocol == 1 and .job.action == "nyanpass_apply_v1" and
         (.job.id | type == "string") and (.job.revision | type == "number") and
@@ -643,7 +710,7 @@ run_nyanpass_task_loop() {
 run_loop() {
     load_config
     install_deps
-    log INFO "DDNS 监控启动，间隔 ${CHECK_INTERVAL}s，主控：$SERVER_URL，远程同步协议 v1"
+    log INFO "DDNS 监控 v${VERSION} 启动，间隔 ${CHECK_INTERVAL}s，主控：$SERVER_URL，远程同步协议 v1，支持远程升级"
     # Keep the task heartbeat independent from public-IP providers. A slow or
     # unreachable IPv4/IPv6 source must not make an otherwise healthy probe look
     # offline to the remote-sync queue.
