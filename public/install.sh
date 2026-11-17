@@ -9,7 +9,7 @@ set -euo pipefail
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-VERSION="0.8.3"
+VERSION="0.9.0"
 SERVER_URL="${SERVER_URL:-}"
 TOKEN="${TOKEN:-}"
 ROOT_PASSWORD="${ROOT_PASSWORD:-}"
@@ -55,8 +55,8 @@ BOOTSTRAP_LOG_FILE="/var/log/pulsedns-bootstrap.log"
 PROBE_INSTALLER_URL=""
 PROBE_INSTALLER_SHA256=""
 EXPECTED_PROBE_INSTALLER_URL_RE='^https://raw\.githubusercontent\.com/rosalgee4-lgtm/pulsedns-control/[0-9a-f]{40}/public/install\.sh$'
-MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/afe9f7bba526de572a8e92d8d491463221b3e56d/public/monitor.sh"
-MONITOR_SHA256="4b42f2b497d714271aaadd6dc1c49028fb66e5d4d7d4057ae499856c6288373f"
+MONITOR_DOWNLOAD_URL="https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/c6fbed4409b91655f506bfe05d811341bdb8a8d5/public/monitor.sh"
+MONITOR_SHA256="31f3847e38eb5bd63cd33b48d27e24806b1da0631efc9ee77cd61b6b6f931caa"
 
 NYANPASS_INSTALL_URL="${PULSEDNS_NYANPASS_INSTALLER_URL:-https://dl.nyafw.com/download/nyanpass-install.sh}"
 NYANPASS_INSTALL_SHA256="${PULSEDNS_NYANPASS_INSTALLER_SHA256:-ece867743399c6a4c262ca31292b79d81a97b0a6efa98ef309f75fdd3e5ca624}"
