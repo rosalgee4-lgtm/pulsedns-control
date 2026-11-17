@@ -262,3 +262,12 @@ td code + code { color:#14594b; background:#eaf8f5; }
 .share-badge { margin-left:6px; padding:0 6px; border-radius:999px; background:#e8f2fb; color:var(--link); font-size:11px; font-weight:700; line-height:18px; }
 .share-list { display:flex; flex-direction:column; gap:6px; margin:4px 0 12px; }
 .share-row { display:flex; align-items:center; justify-content:space-between; padding:6px 10px; border:1px solid var(--line-soft); border-radius:6px; }
+.grouped-table .machine-row td { background:#f4f6f9; border-top:1px solid var(--line-soft); }
+.grouped-table .machine-row .node-name { font-weight:700; }
+.grouped-table .instance-row td:first-child { padding-left:28px; }
+.machine-instances td { padding-top:0; background:#fbfcfd; }
+.instance-chips { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:12px; }
+.instance-chips-label { color:var(--muted); }
+.instance-chip { display:inline-flex; align-items:center; gap:6px; padding:2px 8px; border:1px solid var(--line-soft); border-radius:999px; background:#fff; }
+.instance-chip small { color:var(--muted); }
+.shared-dns-hint { margin:0; padding:10px 14px; border-bottom:1px solid #e1e4ea; }

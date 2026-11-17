@@ -118,6 +118,8 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
   const [nyanpass, setNyanpass] = useState(initialNyanpass);
   const [dnsRecords, setDnsRecords] = useState(initialDnsRecords);
   const [sharingNodeId, setSharingNodeId] = useState<string | null>(null);
+  // 从某台机器的「添加实例」打开时，弹窗里预先选好这台机器。
+  const [nyanpassPresetNodeId, setNyanpassPresetNodeId] = useState('');
   const sharingNode = nodes.find((node) => node.id === sharingNodeId) ?? null;
   const [showCreate, setShowCreate] = useState(false);
   const [showNyanpass, setShowNyanpass] = useState(false);
@@ -540,8 +542,9 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
     setCreated(null); setCreatedNyanpass(null); setNodeNyanpass([emptyNyanpassDraft()]);
     setError(''); setEditError(''); setCopyFeedback('idle'); setStartupCopyFeedback('idle'); setShowCreate(true);
   }
-  function openNyanpassModal() {
+  function openNyanpassModal(nodeId = '') {
     if (saving) return;
+    setNyanpassPresetNodeId(nodeId);
     installationRequest.current += 1;
     setLoadingInstallationId(null);
     setShowCreate(false); setEditingNode(null); setEditingNyanpass(null); setAgentUpgrade(null);
@@ -614,12 +617,12 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
                   <div className="summary-item"><span>已有地址上报</span><strong>{reported} <em>/ {nodes.length}</em></strong><small className={nodes.length - reported ? 'warning' : ''}>{!nodes.length ? '暂无节点' : nodes.length - reported ? '等待首次上报' : '均已上报'}</small></div>
                 </div>
               </section>
-              <NodesPanel nodes={nodes} user={user} onShare={(node) => setSharingNodeId(node.id)} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} onUpgrade={showAgentUpgrade} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
+              <NodesPanel nodes={nodes} user={user} instances={nyanpass} onCreateInstance={openNyanpassModal} onShare={(node) => setSharingNodeId(node.id)} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} onUpgrade={showAgentUpgrade} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
               <ActivityPanel events={events} now={now} limit={5} />
             </>}
 
             {activeView === 'nodes' && <section className="view-page" aria-label={viewTitles.nodes}>
-              <NodesPanel nodes={nodes} user={user} onShare={(node) => setSharingNodeId(node.id)} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} onUpgrade={showAgentUpgrade} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
+              <NodesPanel nodes={nodes} user={user} instances={nyanpass} onCreateInstance={openNyanpassModal} onShare={(node) => setSharingNodeId(node.id)} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} onUpgrade={showAgentUpgrade} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
             </section>}
   
             {activeView === 'records' && <section className="view-page" aria-label={viewTitles.records}>
@@ -705,7 +708,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="nyanpass-title">
           <button className="modal-close" onClick={closeNyanpassModal} aria-label="关闭" disabled={saving}>×</button>
           {!createdNyanpass ? <><p className="eyebrow cyan">多实例远程同步</p><h2 id="nyanpass-title">添加 Nyanpass 实例</h2><p className="modal-intro">直接粘贴官方完整命令。主控只加密保存其中的 Nyanpass Token，安装成功后立即清除；命令不会作为 Shell 下发。</p>
-            <form onSubmit={createNyanpassInstance} className="node-form"><label>所属探针节点<select name="nodeId" required defaultValue=""><option value="" disabled>选择节点</option>{nodes.map((node) => <option key={node.id} value={node.id} disabled={isBootstrapLockedStatus(node.nyanpassStatus)}>{node.name} · {node.id.slice(0, 6)}{isBootstrapLockedStatus(node.nyanpassStatus) ? ` · ${bootstrapStatusLabel(node.nyanpassStatus)}` : ''}</option>)}</select></label><label>实例 / 服务名称<input name="name" required placeholder="例如：tenant-a-out" /></label><label>Nyanpass 官方安装命令<textarea name="command" required rows={4} autoComplete="off" spellCheck={false} placeholder={'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t … -u https://…"'} /></label><p className="form-hint">独立 -o 表示出口，无 -o 表示入口。开机脚本完成预配安装前不能追加远程实例。</p>{error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '加密保存中…' : '保存实例'}</button></form></>
+            <form onSubmit={createNyanpassInstance} className="node-form"><label>所属探针节点<select name="nodeId" required defaultValue={nyanpassPresetNodeId} key={nyanpassPresetNodeId}><option value="" disabled>选择节点</option>{nodes.map((node) => <option key={node.id} value={node.id} disabled={isBootstrapLockedStatus(node.nyanpassStatus)}>{node.name} · {node.id.slice(0, 6)}{isBootstrapLockedStatus(node.nyanpassStatus) ? ` · ${bootstrapStatusLabel(node.nyanpassStatus)}` : ''}</option>)}</select></label><label>实例 / 服务名称<input name="name" required placeholder="例如：tenant-a-out" /></label><label>Nyanpass 官方安装命令<textarea name="command" required rows={4} autoComplete="off" spellCheck={false} placeholder={'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-o -t … -u https://…"'} /></label><p className="form-hint">独立 -o 表示出口，无 -o 表示入口。开机脚本完成预配安装前不能追加远程实例。</p>{error && <p className="form-error">{error}</p>}<button className="primary-button wide" disabled={saving}>{saving ? '加密保存中…' : '保存实例'}</button></form></>
           : <><p className="eyebrow cyan">实例已保存</p><h2 id="nyanpass-title">同步到 {createdNyanpass.instance.nodeName}</h2><p className="modal-intro">已识别为{nyanpassRoleLabel(createdNyanpass.instance.role)}。点击后任务进入队列，探针会自行领取、安装并回传结果。面板中的“成功”表示官方安装器执行成功。</p>{nyanpassErrors[createdNyanpass.instance.id] && <p className="form-error" role="alert">{nyanpassErrors[createdNyanpass.instance.id]}</p>}{createdNyanpass.instance.syncError && <p className="form-hint" role="status">{createdNyanpass.instance.syncError}</p>}<button type="button" className="primary-button wide" disabled={createdNyanpass.instance.status === 'running' || createdNyanpass.instance.status === 'success' || syncingNyanpassIds.has(createdNyanpass.instance.id)} onClick={() => createdNyanpass.instance.status === 'pending' ? cancelNyanpassSync(createdNyanpass.instance) : requiresFreshNyanpassCommand(createdNyanpass.instance) ? beginNyanpassEdit(createdNyanpass.instance) : syncNyanpassInstance(createdNyanpass.instance)}>{createdNyanpass.instance.status === 'pending' ? '取消尚未领取的排队' : createdNyanpass.instance.status === 'running' ? '机器正在安装，不能取消' : createdNyanpass.instance.status === 'success' ? '安装器执行成功' : requiresFreshNyanpassCommand(createdNyanpass.instance) ? '检查 VPS 后重新配置' : syncingNyanpassIds.has(createdNyanpass.instance.id) ? '正在处理…' : !supportsRemoteSync(createdNyanpassNode?.agentVersion) ? '先升级探针' : !createdNyanpassNodeReady ? '探针未在线' : createdNyanpass.instance.status === 'failed' ? '重试同步' : '同步到机器'}</button><button type="button" className="ghost-button wide" onClick={() => { setCreatedNyanpass(null); setError(''); setCopyFeedback('idle'); }} disabled={saving}>继续添加一个</button><button type="button" className="ghost-button wide" onClick={closeNyanpassModal} disabled={saving}>完成</button></>}
         </section>
       </div>}
@@ -772,7 +775,7 @@ function NavLink({ item, active, onSelect }: { item: { id: ViewId; label: string
   return <a href={`#${item.id}`} className={`nav-item${active ? ' active' : ''}`} aria-current={active ? 'page' : undefined} onClick={() => onSelect(item.id)}>{item.label}</a>;
 }
 
-function NodesPanel({ nodes, user, onShare, now, onCreate, onEdit, onRemove, onInstall, onUpgrade, loadingInstallationId, removingNodeId, deleteError, notice }: { nodes: NodeRow[]; user: SessionUser; onShare: (node: NodeRow) => void; now: number; onCreate: () => void; onEdit: (node: NodeRow) => void; onRemove: (node: NodeRow) => void; onInstall: (node: NodeRow) => void; onUpgrade: (node: NodeRow) => void; loadingInstallationId: string | null; removingNodeId: string | null; deleteError: string; notice: string }) {
+function NodesPanel({ nodes, user, instances, onCreateInstance, onShare, now, onCreate, onEdit, onRemove, onInstall, onUpgrade, loadingInstallationId, removingNodeId, deleteError, notice }: { nodes: NodeRow[]; user: SessionUser; instances: NyanpassRow[]; onCreateInstance: (nodeId: string) => void; onShare: (node: NodeRow) => void; now: number; onCreate: () => void; onEdit: (node: NodeRow) => void; onRemove: (node: NodeRow) => void; onInstall: (node: NodeRow) => void; onUpgrade: (node: NodeRow) => void; loadingInstallationId: string | null; removingNodeId: string | null; deleteError: string; notice: string }) {
   return <article className="panel nodes-panel">
     <div className="panel-heading"><div><h3>地址上报</h3><p>原探针仅在公网地址首次出现或变化时发送</p></div><button type="button" className="text-button" onClick={onCreate}>添加探针 →</button></div>
     {deleteError && <p className="panel-error" role="alert">{deleteError}</p>}
@@ -785,11 +788,12 @@ function NodesPanel({ nodes, user, onShare, now, onCreate, onEdit, onRemove, onI
         const sshChanged = ['failed', 'uncertain'].includes(node.nyanpassStatus) && node.provisionLastCompletedStep === 'ssh';
         const removing = removingNodeId === node.id;
         const statusLabel = bootstrapStalled ? 'User data 未执行' : bootstrapLocked ? bootstrapStatusLabel(node.nyanpassStatus) : hasReported ? '已上报' : '等待首次上报';
-        return <tr key={node.id}><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}{node.sharedWithMe && <b className="share-badge">共享</b>}</span>{node.sharedWith?.length ? <small>已分享给 {node.sharedWith.map((share) => share.username).join('、')}</small> : null}</td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported && !bootstrapLocked ? 'badge online' : 'badge warning'}>{statusLabel}</span>{bootstrapStalled && <small className="sync-error" role="alert">检查 User data、CRLF 和出站网络</small>}{node.provisionLastCompletedStep && bootstrapLocked && <small>最后完成：{provisionStepLabel(node.provisionLastCompletedStep)}</small>}{sshChanged && <small className="sync-error" role="alert">SSH 凭据已变更，请使用新密码核查</small>}</td><td>{node.sharedWithMe ? <span className="muted-value">共享机器 · 只读</span> : <div className="row-actions">
+        return [<tr key={node.id} className="machine-main-row"><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}{node.sharedWithMe && <b className="share-badge">共享</b>}</span>{node.sharedWith?.length ? <small>已分享给 {node.sharedWith.map((share) => share.username).join('、')}</small> : null}</td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported && !bootstrapLocked ? 'badge online' : 'badge warning'}>{statusLabel}</span>{bootstrapStalled && <small className="sync-error" role="alert">检查 User data、CRLF 和出站网络</small>}{node.provisionLastCompletedStep && bootstrapLocked && <small>最后完成：{provisionStepLabel(node.provisionLastCompletedStep)}</small>}{sshChanged && <small className="sync-error" role="alert">SSH 凭据已变更，请使用新密码核查</small>}</td><td>{node.sharedWithMe ? <button type="button" className="edit-link" disabled={bootstrapLocked} onClick={() => onCreateInstance(node.id)}>添加实例</button> : <div className="row-actions">
           <button type="button" className="edit-link" disabled={removing || loadingInstallationId !== null} onClick={() => onInstall(node)}>{loadingInstallationId === node.id ? '读取中…' : node.installationAvailable ? '安装命令' : '升级命令'}</button>
           {node.installationAvailable && node.nyanpassStatus === 'ready' && <button type="button" className="edit-link" disabled={removing} onClick={() => onUpgrade(node)}>升级命令</button>}
           {user.role === 'admin' && <button type="button" className="edit-link" disabled={removing} onClick={() => onShare(node)}>分享</button>}
-          <button type="button" className="edit-link" disabled={removing} onClick={() => onEdit(node)}>修改</button><button type="button" className="danger-link" disabled={removing || loadingInstallationId === node.id} onClick={() => onRemove(node)}>{removing ? '删除中…' : '删除节点'}</button></div>}</td></tr>;
+          <button type="button" className="edit-link" disabled={removing} onClick={() => onEdit(node)}>修改</button><button type="button" className="danger-link" disabled={removing || loadingInstallationId === node.id} onClick={() => onRemove(node)}>{removing ? '删除中…' : '删除节点'}</button></div>}</td></tr>,
+          <MachineInstancesRow key={`${node.id}-instances`} node={node} user={user} instances={instances.filter((instance) => instance.nodeId === node.id)} now={now} onCreateInstance={onCreateInstance} />];
       })}</tbody></table> : <EmptyState onCreate={onCreate} />}
     </div>
   </article>;
@@ -1082,7 +1086,7 @@ function DnsPanel({ nodes, onCreate, onEdit, notice }: { nodes: NodeRow[]; onCre
         <td>{node.recordV4 ? <><code>{fqdn(node.domainName, node.recordV4)}</code><small>{node.ipv4 ?? '等待 IPv4 上报'}</small></> : <span className="muted-value">未配置</span>}</td>
         <td>{node.recordV6 ? <><code>{fqdn(node.domainName, node.recordV6)}</code><small>{node.ipv6 ?? '等待 IPv6 上报'}</small></> : <span className="muted-value">未配置</span>}</td>
         <td><span className={node.syncEnabled ? 'badge online' : 'badge warning'}>{node.syncEnabled ? '自动同步' : '已暂停'}</span></td>
-        <td>{node.sharedWithMe ? <span className="muted-value">只读</span> : <button type="button" className="edit-link" onClick={() => onEdit(node)}>修改记录</button>}</td>
+        <td>{node.sharedWithMe ? null : <button type="button" className="edit-link" onClick={() => onEdit(node)}>修改记录</button>}</td>
       </tr>)}</tbody></table> : <EmptyState onCreate={onCreate} />}
     </div>
   </article>;
@@ -1122,30 +1126,60 @@ function ActivityPanel({ events, now, limit, expanded = false, loadMore }: { eve
   </article>;
 }
 
-function NyanpassPanel({ user, instances, nodes, hasNodes, syncingIds, errors, now, onCreate, onEdit, onRemove, onSync, onCancel, onUpgrade }: { user: SessionUser; instances: NyanpassRow[]; nodes: NodeRow[]; hasNodes: boolean; syncingIds: Set<string>; errors: Record<string, string>; now: number; onCreate: () => void; onEdit: (instance: NyanpassRow) => void; onRemove: (instance: NyanpassRow) => void; onSync: (instance: NyanpassRow) => void; onCancel: (instance: NyanpassRow) => void; onUpgrade: (node: NodeRow) => void }) {
+// 按机器分组：一台机器下面列出它的多个 Nyanpass 实例，每台机器有自己的「添加实例」。
+function NyanpassPanel({ user, instances, nodes, hasNodes, syncingIds, errors, now, onCreate, onEdit, onRemove, onSync, onCancel, onUpgrade }: { user: SessionUser; instances: NyanpassRow[]; nodes: NodeRow[]; hasNodes: boolean; syncingIds: Set<string>; errors: Record<string, string>; now: number; onCreate: (nodeId?: string) => void; onEdit: (instance: NyanpassRow) => void; onRemove: (instance: NyanpassRow) => void; onSync: (instance: NyanpassRow) => void; onCancel: (instance: NyanpassRow) => void; onUpgrade: (node: NodeRow) => void }) {
   const canCreate = nodes.some((node) => !isBootstrapLockedStatus(node.nyanpassStatus));
   // 按钮禁用时悬停说明原因（用外层 span，部分浏览器不显示禁用按钮自身的 title）。
   const createBlockedReason = canCreate ? undefined : hasNodes ? '请等待节点开机安装完成后再追加实例' : '请先创建探针节点，再添加 Nyanpass 实例';
   return <article className="panel nyanpass-panel">
-    <div className="panel-heading"><div><h3>实例与机器同步</h3><p>一个探针可安装多个实例；任务只包含经过校验的 Nyanpass 结构化参数</p></div><span className="button-reason" title={createBlockedReason}><button type="button" className="primary-button compact" onClick={onCreate} disabled={!canCreate}>＋ 添加实例</button></span></div>
+    <div className="panel-heading"><div><h3>实例与机器同步</h3><p>按机器分组：一台机器可安装多个实例；任务只包含经过校验的 Nyanpass 结构化参数</p></div><span className="button-reason" title={createBlockedReason}><button type="button" className="primary-button compact" onClick={() => onCreate()} disabled={!canCreate}>＋ 添加实例</button></span></div>
     <div className="table-wrap">
-      {instances.length ? <table><thead><tr><th>实例 / 所属节点</th><th>面板</th><th>角色</th><th>同步状态</th><th>操作</th></tr></thead><tbody>{instances.map((instance) => {
-        const node = nodes.find((item) => item.id === instance.nodeId);
-        const capable = supportsRemoteSync(node?.agentVersion);
-        const polling = Boolean(node && nodeCanQueueTasks(node, instances, now));
-        const provisioning = Boolean(node && isBootstrapLockedStatus(node.nyanpassStatus));
-        const busy = instance.status === 'running';
-        const syncing = syncingIds.has(instance.id);
-        const requiresCommand = requiresFreshNyanpassCommand(instance);
-        // 共享机器上每个人只能修改自己添加的实例；管理员可以修改全部。
-        const canModify = user.role === 'admin' || instance.ownerId === user.id;
-        const addedBy = instance.ownerId !== user.id && instance.ownerName ? ` · 由 ${instance.ownerName} 添加` : '';
-        const syncLabel = syncing ? '正在处理…' : provisioning ? (node ? bootstrapStatusLabel(node.nyanpassStatus) : '开机状态异常') : instance.status === 'pending' ? '取消排队' : instance.status === 'running' ? '机器正在安装…' : !capable ? '先升级探针' : requiresCommand ? '配置后同步' : !polling ? '探针未在线' : instance.status === 'failed' ? '重试同步' : '同步到机器';
-        const syncAction = instance.status === 'pending' ? () => onCancel(instance) : !capable && node ? () => onUpgrade(node) : requiresCommand ? () => onEdit(instance) : () => onSync(instance);
-        return <tr key={instance.id}><td><span className="node-name">{instance.name}</span><small>{instance.nodeName}{addedBy}{node?.agentVersion ? ` · 探针 ${node.agentVersion}${node.lastTaskPollAt ? ` · ${relativeTime(node.lastTaskPollAt, now)}轮询` : ' · 未见任务心跳'}` : ' · 旧探针'}</small></td><td><code>{displayHost(instance.panelUrl)}</code></td><td><b className={`role-badge ${instance.role}`}>{nyanpassRoleLabel(instance.role)}</b><small>{instance.role === 'outbound' ? '含独立 -o' : '不含 -o'}</small></td><td><NyanpassStatus instance={instance} now={now} />{(errors[instance.id] || instance.syncError) && <small className="sync-error" role="alert">{errors[instance.id] || instance.syncError}</small>}</td><td>{!canModify ? <span className="muted-value">只读</span> : <div className="row-actions nyanpass-actions"><button type="button" className="sync-link" disabled={provisioning || busy || syncing} aria-busy={busy || syncing} onClick={syncAction}>{syncLabel}</button><button type="button" className="edit-link" disabled={provisioning || instance.status === 'pending' || busy || syncing} onClick={() => onEdit(instance)}>修改</button><button type="button" className="danger-link" disabled={provisioning || instance.status === 'pending' || busy || syncing} onClick={() => onRemove(instance)}>移除登记</button></div>}</td></tr>;
-      })}</tbody></table> : <div className="empty-state compact-empty"><span>⇄</span><h4>还没有 Nyanpass 实例</h4><p>{hasNodes ? canCreate ? '添加第一个 Nyanpass 实例；同一节点可以继续添加多个。' : '请等待节点开机安装完成后再追加实例。' : '请先创建探针节点，再添加 Nyanpass 合租实例。'}</p><span className="button-reason" title={createBlockedReason}><button type="button" className="ghost-button" disabled={!canCreate} onClick={onCreate}>添加实例</button></span></div>}
+      {nodes.length ? <table className="grouped-table"><thead><tr><th>实例</th><th>面板</th><th>角色</th><th>同步状态</th><th>操作</th></tr></thead>{nodes.map((node) => {
+        const nodeInstances = instances.filter((instance) => instance.nodeId === node.id);
+        const locked = isBootstrapLockedStatus(node.nyanpassStatus);
+        return <tbody key={node.id}>
+          <tr className="machine-row"><td colSpan={4}><span className="node-name">{node.name}{node.sharedWithMe && <b className="share-badge">共享</b>}</span><small>{machineSummary(node)}</small></td><td><span className="button-reason" title={locked ? '请等待节点开机安装完成后再追加实例' : undefined}><button type="button" className="edit-link" disabled={locked} onClick={() => onCreate(node.id)}>＋ 添加实例</button></span></td></tr>
+          {nodeInstances.length ? nodeInstances.map((instance) => {
+            const capable = supportsRemoteSync(node.agentVersion);
+            const polling = nodeCanQueueTasks(node, instances, now);
+            const provisioning = locked;
+            const busy = instance.status === 'running';
+            const syncing = syncingIds.has(instance.id);
+            const requiresCommand = requiresFreshNyanpassCommand(instance);
+            // 共享机器上每个人只能修改自己添加的实例；管理员可以修改全部。
+            const canModify = user.role === 'admin' || instance.ownerId === user.id;
+            const details = [instance.ownerId !== user.id && instance.ownerName ? `由 ${instance.ownerName} 添加` : '', node.agentVersion ? `探针 ${node.agentVersion}${node.lastTaskPollAt ? ` · ${relativeTime(node.lastTaskPollAt, now)}轮询` : ' · 未见任务心跳'}` : '旧探针'].filter(Boolean).join(' · ');
+            const syncLabel = syncing ? '正在处理…' : provisioning ? bootstrapStatusLabel(node.nyanpassStatus) : instance.status === 'pending' ? '取消排队' : instance.status === 'running' ? '机器正在安装…' : !capable ? '先升级探针' : requiresCommand ? '配置后同步' : !polling ? '探针未在线' : instance.status === 'failed' ? '重试同步' : '同步到机器';
+            const syncAction = instance.status === 'pending' ? () => onCancel(instance) : !capable ? () => onUpgrade(node) : requiresCommand ? () => onEdit(instance) : () => onSync(instance);
+            return <tr key={instance.id} className="instance-row"><td><span className="node-name">{instance.name}</span><small>{details}</small></td><td><code>{displayHost(instance.panelUrl)}</code></td><td><b className={`role-badge ${instance.role}`}>{nyanpassRoleLabel(instance.role)}</b><small>{instance.role === 'outbound' ? '含独立 -o' : '不含 -o'}</small></td><td><NyanpassStatus instance={instance} now={now} />{(errors[instance.id] || instance.syncError) && <small className="sync-error" role="alert">{errors[instance.id] || instance.syncError}</small>}</td><td>{canModify && <div className="row-actions nyanpass-actions"><button type="button" className="sync-link" disabled={provisioning || busy || syncing} aria-busy={busy || syncing} onClick={syncAction}>{syncLabel}</button><button type="button" className="edit-link" disabled={provisioning || instance.status === 'pending' || busy || syncing} onClick={() => onEdit(instance)}>修改</button><button type="button" className="danger-link" disabled={provisioning || instance.status === 'pending' || busy || syncing} onClick={() => onRemove(instance)}>移除登记</button></div>}</td></tr>;
+          }) : <tr className="instance-row"><td colSpan={5}><span className="muted-value">这台机器还没有实例</span></td></tr>}
+        </tbody>;
+      })}</table> : <div className="empty-state compact-empty"><span>⇄</span><h4>还没有 Nyanpass 实例</h4><p>{hasNodes ? canCreate ? '添加第一个 Nyanpass 实例；同一节点可以继续添加多个。' : '请等待节点开机安装完成后再追加实例。' : '请先创建探针节点，再添加 Nyanpass 合租实例。'}</p><span className="button-reason" title={createBlockedReason}><button type="button" className="ghost-button" disabled={!canCreate} onClick={() => onCreate()}>添加实例</button></span></div>}
     </div>
   </article>;
+}
+
+// 探针节点页：每台机器下面一行，列出它的 Nyanpass 实例。
+function MachineInstancesRow({ node, user, instances, now, onCreateInstance }: { node: NodeRow; user: SessionUser; instances: NyanpassRow[]; now: number; onCreateInstance: (nodeId: string) => void }) {
+  const locked = isBootstrapLockedStatus(node.nyanpassStatus);
+  return <tr className="machine-instances"><td colSpan={5}><div className="instance-chips">
+    <span className="instance-chips-label">Nyanpass 实例</span>
+    {instances.length ? instances.map((instance) => <span className="instance-chip" key={instance.id}><b>{instance.name}</b><b className={`role-badge ${instance.role}`}>{nyanpassRoleLabel(instance.role)}</b><NyanpassStatus instance={instance} now={now} />{instance.ownerId !== user.id && instance.ownerName ? <small>由 {instance.ownerName} 添加</small> : null}</span>) : <span className="muted-value">还没有实例</span>}
+    <span className="button-reason" title={locked ? '请等待节点开机安装完成后再追加实例' : undefined}><button type="button" className="edit-link" disabled={locked} onClick={() => onCreateInstance(node.id)}>＋ 添加实例</button></span>
+  </div></td></tr>;
+}
+
+function machineRecords(node: NodeRow) {
+  return Array.from(new Set([node.recordV4, node.recordV6].filter((record): record is string => Boolean(record)).map((record) => fqdn(node.domainName, record))));
+}
+
+function machineSummary(node: NodeRow) {
+  const records = machineRecords(node);
+  return [
+    node.ipv4 ?? node.ipv6 ?? '等待地址上报',
+    records.length ? `解析 ${records.join('、')}` : '',
+    node.sharedWith?.length ? `已分享给 ${node.sharedWith.map((share) => share.username).join('、')}` : '',
+  ].filter(Boolean).join(' · ');
 }
 
 function NyanpassStatus({ instance, now }: { instance: NyanpassRow; now: number }) {
@@ -1380,6 +1414,7 @@ function SharedDnsPanel({ apiPath, user, nodes, records, domains, onRecordsChang
 
   return <article className="panel dns-panel">
     <div className="panel-heading"><div><h3>共享机器上的解析</h3><p>被分享的用户用自己的主域名把记录指向共享机器；机器换 IP 时自动同步</p></div></div>
+    {sharedNodes.some((node) => machineRecords(node).length) && <p className="form-hint shared-dns-hint">不添加自己的域名也可以，直接使用机器现有的解析：{sharedNodes.filter((node) => machineRecords(node).length).map((node) => `${node.name} → ${machineRecords(node).join('、')}`).join('；')}（换机后自动更新）</p>}
     {sharedNodes.length > 0 && <form className="node-form domain-form" onSubmit={add}>
       <label>共享机器<select name="nodeId" required>{sharedNodes.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}</select></label>
       <label>主域名<select name="domainName" required>{domains.length ? domains.map((domain) => <option key={domain.name} value={domain.name}>{domain.name}</option>) : <option value="">请先在「阿里云主域名」添加</option>}</select></label>
@@ -1398,7 +1433,7 @@ function SharedDnsPanel({ apiPath, user, nodes, records, domains, onRecordsChang
           <td>{record.recordV4 ? <><code>{fqdn(record.domainName, record.recordV4)}</code><small>{node?.ipv4 ?? '等待 IPv4 上报'}</small></> : <span className="muted-value">未配置</span>}</td>
           <td>{record.recordV6 ? <><code>{fqdn(record.domainName, record.recordV6)}</code><small>{node?.ipv6 ?? '等待 IPv6 上报'}</small></> : <span className="muted-value">未配置</span>}</td>
           <td>{record.ownerId === user.id ? '我' : record.ownerName}</td>
-          <td>{canRemove ? <button type="button" className="danger-link" disabled={saving} onClick={() => remove(record)}>移除</button> : <span className="muted-value">只读</span>}</td>
+          <td>{canRemove ? <button type="button" className="danger-link" disabled={saving} onClick={() => remove(record)}>移除</button> : null}</td>
         </tr>;
       })}</tbody></table> : <div className="empty-state compact-empty"><span>◇</span><h4>还没有解析</h4><p>选择共享机器和自己的主域名，填写主机记录后添加。</p></div>}
     </div>

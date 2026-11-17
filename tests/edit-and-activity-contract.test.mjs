@@ -145,7 +145,7 @@ test('live refresh updates full node report state and OPTIMIZE is always off', (
   assert.match(nyanpassRoute, /const optimize = false;/);
   assert.doesNotMatch(dashboard, /name="optimize"|OPTIMIZE=1/);
   assert.match(dashboard, /states\[instance\.status\] \?\? \{ label: '未知状态'/);
-  assert.match(dashboard, /provisioning \? \(node \? bootstrapStatusLabel\(node\.nyanpassStatus\)/);
+  assert.match(dashboard, /provisioning \? bootstrapStatusLabel\(node\.nyanpassStatus\)/);
   assert.match(dashboard, /fetchWithTimeout/);
   assert.match(dashboard, /authoritativeStateChanged/);
   assert.match(dashboard, /previous\.activeTaskId !== instance\.activeTaskId/);
