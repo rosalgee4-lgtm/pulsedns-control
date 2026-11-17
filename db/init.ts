@@ -84,8 +84,18 @@ const schemaStatements = [
   )`,
   `CREATE TABLE IF NOT EXISTS domains (
     name TEXT PRIMARY KEY NOT NULL,
+    account_id TEXT,
     created_at INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS aliyun_accounts (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    access_key_id TEXT NOT NULL,
+    secret_ciphertext TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`,
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_aliyun_accounts_name ON aliyun_accounts(name)',
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_token_hash ON nodes(token_hash)',
   'CREATE INDEX IF NOT EXISTS idx_nodes_last_seen_at ON nodes(last_seen_at)',
   'CREATE INDEX IF NOT EXISTS idx_events_node_created ON events(node_id, created_at)',
@@ -101,6 +111,7 @@ const taskIndexStatements = [
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_dns_v4_owner ON nodes(domain_name, record_v4) WHERE sync_enabled = 1 AND domain_name IS NOT NULL AND record_v4 IS NOT NULL',
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_dns_v6_owner ON nodes(domain_name, record_v6) WHERE sync_enabled = 1 AND domain_name IS NOT NULL AND record_v6 IS NOT NULL',
   'CREATE INDEX IF NOT EXISTS idx_nyanpass_active_task ON nyanpass_instances(active_task_id)',
+  'CREATE INDEX IF NOT EXISTS idx_domains_account ON domains(account_id)',
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_tasks_instance_revision ON agent_tasks(instance_id, revision)',
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_tasks_one_running_per_node ON agent_tasks(node_id) WHERE status = 'running'",
   'CREATE INDEX IF NOT EXISTS idx_agent_tasks_node_status_created ON agent_tasks(node_id, status, created_at)',
@@ -175,6 +186,8 @@ async function initializeSchema() {
     if (!nyanpassColumns.some((column) => column.name === 'active_task_id')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN active_task_id TEXT');
     if (!nyanpassColumns.some((column) => column.name === 'sync_error')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN sync_error TEXT');
     if (!nyanpassColumns.some((column) => column.name === 'bootstrap_generation')) db.exec('ALTER TABLE nyanpass_instances ADD COLUMN bootstrap_generation INTEGER');
+    const domainColumns = db.prepare('PRAGMA table_info(domains)').all() as Array<{ name: string }>;
+    if (!domainColumns.some((column) => column.name === 'account_id')) db.exec('ALTER TABLE domains ADD COLUMN account_id TEXT');
     db.exec(`UPDATE nodes SET provider = 'alidns' WHERE provider = 'cloudflare'; UPDATE nodes SET nyanpass_status = 'uncertain', provision_generation = CASE WHEN provision_generation < 1 THEN 1 ELSE provision_generation END WHERE nyanpass_status = 'provisioning' AND provision_attempt_id IS NULL; UPDATE nodes SET bootstrap_download_expires_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 1800000 WHERE bootstrap_download_token_hash IS NOT NULL AND bootstrap_download_expires_at IS NULL; UPDATE nyanpass_instances SET bootstrap_generation = 1 WHERE config_revision = 0 AND status IN ('bootstrap', 'uncertain') AND bootstrap_generation IS NULL; UPDATE nyanpass_instances SET status = 'legacy' WHERE status = '等待安装';`);
     db.exec(importNodeDomains);
     db.exec(`${dnsOwnershipCleanupStatements.join(';\n')};`);
@@ -217,6 +230,8 @@ async function initializeSchema() {
   if (!nyanpassColumns.results.some((column) => column.name === 'active_task_id')) await addD1Column(db, 'ALTER TABLE nyanpass_instances ADD COLUMN active_task_id TEXT');
   if (!nyanpassColumns.results.some((column) => column.name === 'sync_error')) await addD1Column(db, 'ALTER TABLE nyanpass_instances ADD COLUMN sync_error TEXT');
   if (!nyanpassColumns.results.some((column) => column.name === 'bootstrap_generation')) await addD1Column(db, 'ALTER TABLE nyanpass_instances ADD COLUMN bootstrap_generation INTEGER');
+  const domainColumns = await db.prepare('PRAGMA table_info(domains)').all<{ name: string }>();
+  if (!domainColumns.results.some((column) => column.name === 'account_id')) await addD1Column(db, 'ALTER TABLE domains ADD COLUMN account_id TEXT');
   await db.prepare("UPDATE nodes SET provider = 'alidns' WHERE provider = 'cloudflare'").run();
   await db.prepare("UPDATE nodes SET nyanpass_status = 'uncertain', provision_generation = CASE WHEN provision_generation < 1 THEN 1 ELSE provision_generation END WHERE nyanpass_status = 'provisioning' AND provision_attempt_id IS NULL").run();
   await db.prepare("UPDATE nodes SET bootstrap_download_expires_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 1800000 WHERE bootstrap_download_token_hash IS NOT NULL AND bootstrap_download_expires_at IS NULL").run();

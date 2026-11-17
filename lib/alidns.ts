@@ -1,3 +1,5 @@
+import { getDb } from '@/db';
+import { type AliDnsCredentials, domainCredentials } from '@/lib/aliyun-accounts';
 import { signAliyunRpcRequest } from '@/lib/aliyun-signature';
 
 type DnsType = 'A' | 'AAAA';
@@ -19,14 +21,14 @@ type AliDnsResponse = {
 const HOST = 'alidns.aliyuncs.com';
 const VERSION = '2015-01-09';
 
-type AliDnsCredentials = {
-  accessKeyId: string | undefined;
-  accessKeySecret: string | undefined;
-  securityToken: string | undefined;
-};
-
 export async function syncAliDnsRecord(domainName: string, rr: string, type: DnsType, value: string) {
-  const credentials = await aliDnsCredentials();
+  // 按主域名绑定的阿里云账号取 Key；未绑定的主域名使用安装时填写的默认 Key。
+  let credentials: AliDnsCredentials;
+  try {
+    credentials = await domainCredentials(await getDb(), domainName);
+  } catch (error) {
+    return { ok: false, error: (error instanceof Error ? error.message : '读取阿里云账号失败').slice(0, 180) } as const;
+  }
   if (!credentials.accessKeyId || !credentials.accessKeySecret) {
     return { ok: false, skipped: true, error: '未配置阿里云 AccessKey' } as const;
   }
@@ -124,18 +126,26 @@ async function callAliDns(credentials: AliDnsCredentials, action: string, parame
   return result;
 }
 
-async function aliDnsCredentials(): Promise<AliDnsCredentials> {
-  if (process.env.PULSEDNS_SELF_HOSTED === '1') {
-    return {
-      accessKeyId: process.env.ALIBABA_CLOUD_ACCESS_KEY_ID,
-      accessKeySecret: process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET,
-      securityToken: process.env.ALIBABA_CLOUD_SECURITY_TOKEN,
-    };
+// 保存账号时检查 Key 是否真实有效：签名或 Key 错误会被拒绝；Key 有效但 RAM 权限
+// 只限定到部分域名时，列出域名可能被拒，这种情况仍视为 Key 有效。
+export async function verifyAliyunKey(credentials: AliDnsCredentials) {
+  try {
+    await callAliDns(credentials, 'DescribeDomains', { PageNumber: '1', PageSize: '1' });
+    return { ok: true } as const;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '阿里云请求失败';
+    if (/^(Forbidden|NoPermission)/.test(message)) return { ok: true } as const;
+    return { ok: false, error: `阿里云 Key 校验失败：${message.slice(0, 160)}` } as const;
   }
-  const { env } = await import('cloudflare:workers');
-  return {
-    accessKeyId: env.ALIBABA_CLOUD_ACCESS_KEY_ID,
-    accessKeySecret: env.ALIBABA_CLOUD_ACCESS_KEY_SECRET,
-    securityToken: env.ALIBABA_CLOUD_SECURITY_TOKEN,
-  };
+}
+
+// 保存主域名时检查这个 Key 能否读取该域名的解析记录（与自动同步使用同一接口）。
+export async function verifyAliDnsDomain(credentials: AliDnsCredentials, domainName: string) {
+  try {
+    await callAliDns(credentials, 'DescribeDomainRecords', { DomainName: domainName, PageNumber: '1', PageSize: '1' });
+    return { ok: true } as const;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '阿里云请求失败';
+    return { ok: false, error: `该阿里云账号无法管理 ${domainName}：${message.slice(0, 160)}` } as const;
+  }
 }

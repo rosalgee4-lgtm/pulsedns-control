@@ -19,6 +19,13 @@ process.env.PULSEDNS_SELF_HOSTED = '1';
 process.env.PULSEDNS_DB_PATH = join(root, 'test.db');
 process.env.PULSEDNS_TASK_ENCRYPTION_KEY = 'a'.repeat(64);
 process.env.PULSEDNS_TEST_ADMIN = '1';
+process.env.ALIBABA_CLOUD_ACCESS_KEY_ID = 'DEFAULTKEY01';
+process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET = 'default-secret-01';
+// 保存主域名时会向阿里云校验；这里模拟阿里云接受所有请求。
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (input, init) => new URL(String(input)).host === 'alidns.aliyuncs.com'
+  ? Response.json({ RequestId: 'test', DomainRecords: { Record: [] }, Domains: { Domain: [] } })
+  : realFetch(input, init);
 const { GET: listDomains, POST: addDomain, DELETE: deleteDomain } = await import('../app/api/admin/domains/route.ts');
 const { POST: nodesPost, PATCH: nodesPatch } = await import('../app/api/admin/nodes/route.ts');
 const { getLocalSqlite } = await import('../db/index.ts');

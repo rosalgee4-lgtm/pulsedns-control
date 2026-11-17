@@ -38,11 +38,28 @@ export const nodes = sqliteTable('nodes', {
   uniqueIndex('idx_nodes_bootstrap_download_token_hash').on(table.bootstrapDownloadTokenHash),
 ]);
 
-// 阿里云主域名：在「域名」页面手动添加，添加节点时从中选择。
+// 阿里云账号：在「阿里云主域名」页面添加，AccessKey Secret 加密保存。
+// 安装面板时填写的全局 AccessKey 仍是默认账号，不存放在这张表里。
+export const aliyunAccounts = sqliteTable('aliyun_accounts', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  accessKeyId: text('access_key_id').notNull(),
+  secretCiphertext: text('secret_ciphertext').notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+}, (table) => [
+  uniqueIndex('idx_aliyun_accounts_name').on(table.name),
+]);
+
+// 阿里云主域名：在「阿里云主域名」页面手动添加，添加节点时从中选择。
+// accountId 为空表示使用安装时填写的默认 AccessKey。
 export const domains = sqliteTable('domains', {
   name: text('name').primaryKey(),
+  accountId: text('account_id'),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
-});
+}, (table) => [
+  index('idx_domains_account').on(table.accountId),
+]);
 
 export const events = sqliteTable('events', {
   id: integer('id').primaryKey({ autoIncrement: true }),

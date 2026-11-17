@@ -188,6 +188,11 @@ td code + code { color:#14594b; background:#eaf8f5; }
 .domain-form { flex-direction:row; align-items:flex-end; gap:10px; padding:12px 14px; border-bottom:1px solid #e1e4ea; }
 .domain-form label { flex:1; min-width:0; }
 .domain-form .primary-button { flex:none; }
+.table-select { min-width:180px; height:30px; padding:2px 8px; color:var(--ink); background:#fafafa; border:1px solid #949494; border-radius:4px; font-size:13px; }
+.table-select:focus { border-color:var(--link); box-shadow:0 0 0 1px var(--link); outline:none; }
+.account-rotate > td { background:#f9fafb; padding:0; }
+.account-rotate .domain-form { border-bottom:0; }
+.account-rotate-hint { margin:0; padding:0 14px 12px; }
 .form-hint { margin:-6px 0 0; color:var(--muted); font-size:12px; line-height:1.6; }
 .form-hint code { display:inline; padding:0 4px; color:var(--ink); background:#f2f3f3; border-radius:3px; font-size:inherit; line-height:inherit; }
 .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }

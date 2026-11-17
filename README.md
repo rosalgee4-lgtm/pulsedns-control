@@ -61,7 +61,11 @@ ALIBABA_CLOUD_ACCESS_KEY_SECRET
 ALIBABA_CLOUD_SECURITY_TOKEN   # 仅使用 STS 临时凭证时需要
 ```
 
-建议使用只允许目标域名执行 `alidns:DescribeDomainRecords`、`alidns:AddDomainRecord`、`alidns:UpdateDomainRecord` 的 RAM 身份。先在面板的「域名」页面添加主域名（例如 `example.com`；正在被节点使用的主域名不能删除，升级时会自动导入现有节点已填写的主域名），添加节点时从下拉框选择主域名并填写主机记录；根记录填写 `@`。同一主域名与主机记录的 A、AAAA 归属分别唯一，多个启用节点不能争用同类型记录；升级检测到历史冲突时会安全暂停较新的冲突节点并留下错误事件。临时同步失败会由探针周期性自愈，同一记录、类型和 IP 的重复失败一小时只记一次，自动事件路径把事件表控制在约 10,000 条。
+建议使用只允许目标域名执行 `alidns:DescribeDomainRecords`、`alidns:AddDomainRecord`、`alidns:UpdateDomainRecord` 的 RAM 身份。
+
+面板的「阿里云主域名」页面可以管理多个阿里云账号和多个主域名：先添加阿里云账号（名称 + AccessKey ID + Secret），再添加主域名并选择它属于哪个账号；安装面板时填写的 AccessKey 作为「默认」账号继续可用，升级前已有的主域名都使用默认账号。AccessKey Secret 用 `PULSEDNS_TASK_ENCRYPTION_KEY` 加密保存，页面和接口只显示打码后的 AccessKey ID。保存账号时会调用一次 `DescribeDomains` 校验 Key（只授权了部分域名的 RAM 身份被拒绝列出域名时仍视为有效）；保存主域名、修改主域名所属账号或更换账号 Key 时，会用对应 Key 调用一次 `DescribeDomainRecords` 读取该域名，读不到就不保存。正在被主域名使用的账号不能删除；默认账号需要重新运行面板安装脚本才能更换。
+
+先在「阿里云主域名」页面添加主域名（例如 `example.com`；正在被节点使用的主域名不能删除，升级时会自动导入现有节点已填写的主域名），添加节点时从下拉框选择主域名并填写主机记录；根记录填写 `@`。同一主域名与主机记录的 A、AAAA 归属分别唯一，多个启用节点不能争用同类型记录；升级检测到历史冲突时会安全暂停较新的冲突节点并留下错误事件。临时同步失败会由探针周期性自愈，同一记录、类型和 IP 的重复失败一小时只记一次，自动事件路径把事件表控制在约 10,000 条。
 
 ## 安装与菜单
 
