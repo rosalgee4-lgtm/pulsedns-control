@@ -11,7 +11,7 @@ const minutesAgo = (minutes) => new Date(Date.now() - minutes * 60_000);
 
 async function nodeWithTask(id, taskStatus, { pollMinutesAgo = 30, taskMinutesAgo = 10, leaseMinutesAgo = null } = {}) {
   await q('INSERT INTO nodes (id, owner_id, name, token_hash, nyanpass_status, last_task_poll_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [id, adminId, id, `hash-${id}`, 'ready', minutesAgo(pollMinutesAgo), new Date(), new Date()]);
-  await q("INSERT INTO nyanpass_instances (id, node_id, name, panel_url, status, config_revision, active_task_id, created_at, updated_at) VALUES (?, ?, 'awsin', 'https://ny', ?, 1, ?, ?, ?)", [`${id}-inst`, id, taskStatus === 'queued' ? 'pending' : 'running', `${id}-task`, new Date(), new Date()]);
+  await q("INSERT INTO nyanpass_instances (id, node_id, owner_id, name, panel_url, status, config_revision, active_task_id, created_at, updated_at) VALUES (?, ?, ?, 'awsin', 'https://ny', ?, 1, ?, ?, ?)", [`${id}-inst`, id, adminId, taskStatus === 'queued' ? 'pending' : 'running', `${id}-task`, new Date(), new Date()]);
   await q('INSERT INTO agent_tasks (id, node_id, instance_id, revision, status, lease_expires_at, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, ?)', [`${id}-task`, id, `${id}-inst`, taskStatus, leaseMinutesAgo === null ? null : minutesAgo(leaseMinutesAgo), minutesAgo(taskMinutesAgo), minutesAgo(taskMinutesAgo)]);
 }
 const state = async (id) => ({
@@ -29,7 +29,7 @@ test('a queue nobody claims for 5 minutes on an offline probe ends as failed', a
 test('the queue is kept while the probe is online or still busy with another task', async () => {
   await nodeWithTask('online', 'queued', { pollMinutesAgo: 1 });
   await nodeWithTask('busy', 'queued');
-  await q("INSERT INTO nyanpass_instances (id, node_id, name, panel_url, status, created_at, updated_at) VALUES ('busy-inst2', 'busy', 'awsout', 'https://ny', 'running', ?, ?)", [new Date(), new Date()]);
+  await q("INSERT INTO nyanpass_instances (id, node_id, owner_id, name, panel_url, status, created_at, updated_at) VALUES ('busy-inst2', 'busy', ?, 'awsout', 'https://ny', 'running', ?, ?)", [adminId, new Date(), new Date()]);
   await q("INSERT INTO agent_tasks (id, node_id, instance_id, revision, status, lease_expires_at, created_at, updated_at) VALUES ('busy-running', 'busy', 'busy-inst2', 1, 'running', ?, ?, ?)", [new Date(Date.now() + 600_000), new Date(), new Date()]);
   await expireAgentTasks(db, new Date());
   assert.equal((await state('online')).task.status, 'queued');

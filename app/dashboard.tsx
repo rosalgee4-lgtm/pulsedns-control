@@ -51,14 +51,18 @@ type NodeRow = {
   provisionLastCompletedStep: string | null;
   installationAvailable: boolean;
   ownerId: string; ownerName?: string;
+  // 机器分享：sharedWithMe 表示这台机器是分享给当前用户的；sharedWith 只有管理员能看到。
+  sharedWithMe?: boolean; sharedWith?: Array<{ userId: string; username: string }>;
 };
 type EventRow = { id: number; nodeId: string; nodeName: string; level: string; kind: string; message: string; createdAt: string };
+type DnsRecordRow = { id: string; nodeId: string; nodeName: string; ownerId: string; ownerName: string; domainName: string; recordV4: string | null; recordV6: string | null; createdAt: string };
 type NyanpassStatusValue = 'ready' | 'pending' | 'running' | 'success' | 'failed' | 'uncertain' | 'bootstrap' | 'legacy' | '等待安装';
 type NyanpassRow = {
   id: string; nodeId: string; nodeName: string; name: string; role: 'inbound' | 'outbound'; panelUrl: string;
   optimize: boolean;
   status: NyanpassStatusValue; lastReportedAt: string | null; syncError: string | null; activeTaskId: string | null; configRevision: number;
   hasCredential: boolean;
+  ownerId: string; ownerName?: string | null;
   taskStatus: string | null; taskCreatedAt: string | null; taskClaimedAt: string | null; taskLeaseExpiresAt: string | null;
 };
 type NyanpassDraft = { name: string; command: string };
@@ -77,7 +81,7 @@ function emptyNyanpassDraft(): NyanpassDraft {
   return { name: '', command: '' };
 }
 
-export default function Dashboard({ basePath, user, initialNodes, initialDomains, initialAliyun, initialEvents, initialNyanpass, initialAdmin }: { basePath: string; user: SessionUser; initialNodes: NodeRow[]; initialDomains: DomainRow[]; initialAliyun: AliyunAccountRow[]; initialEvents: EventRow[]; initialNyanpass: NyanpassRow[]; initialAdmin: AdminState | null }) {
+export default function Dashboard({ basePath, user, initialNodes, initialDomains, initialAliyun, initialEvents, initialNyanpass, initialDnsRecords, initialAdmin }: { basePath: string; user: SessionUser; initialNodes: NodeRow[]; initialDomains: DomainRow[]; initialAliyun: AliyunAccountRow[]; initialEvents: EventRow[]; initialNyanpass: NyanpassRow[]; initialDnsRecords: DnsRecordRow[]; initialAdmin: AdminState | null }) {
   const apiPath = (path: string) => `${basePath}${path}`;
   const [activeView, setActiveView] = useState<ViewId>('overview');
   const [navOpen, setNavOpen] = useState(true);
@@ -112,6 +116,9 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
     }
   };
   const [nyanpass, setNyanpass] = useState(initialNyanpass);
+  const [dnsRecords, setDnsRecords] = useState(initialDnsRecords);
+  const [sharingNodeId, setSharingNodeId] = useState<string | null>(null);
+  const sharingNode = nodes.find((node) => node.id === sharingNodeId) ?? null;
   const [showCreate, setShowCreate] = useState(false);
   const [showNyanpass, setShowNyanpass] = useState(false);
   const [editingNode, setEditingNode] = useState<NodeRow | null>(null);
@@ -172,7 +179,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
         const response = await fetch(`${basePath}/api/admin/nyanpass`, { cache: 'no-store', signal: activeController.signal });
         if (response.status === 401) { window.location.assign(`${basePath}/login`); return; }
         if (!response.ok) throw new Error(`管理接口返回 HTTP ${response.status}`);
-        const result = await response.json() as { instances?: NyanpassRow[]; nodes?: NodeRow[]; events?: EventRow[] };
+        const result = await response.json() as { instances?: NyanpassRow[]; nodes?: NodeRow[]; events?: EventRow[]; dnsRecords?: DnsRecordRow[] };
         if (!Array.isArray(result.instances) || !Array.isArray(result.nodes) || !Array.isArray(result.events)) throw new Error('管理接口返回内容不完整');
         if (stopped || sequence !== refreshSequence.current) return;
         const refreshedInstances = result.instances;
@@ -211,6 +218,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
           return next;
         });
         setEvents(result.events);
+        if (Array.isArray(result.dnsRecords)) setDnsRecords(result.dnsRecords);
       } catch (cause) {
         if (stopped || sequence !== refreshSequence.current || (cause instanceof DOMException && cause.name === 'AbortError')) return;
         setRefreshError(cause instanceof Error ? cause.message : '无法连接管理接口');
@@ -400,6 +408,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
       refreshSequence.current += 1;
       setNodes((current) => current.filter((item) => item.id !== node.id));
       setNyanpass((current) => current.filter((instance) => instance.nodeId !== node.id));
+      setDnsRecords((current) => current.filter((record) => record.nodeId !== node.id));
       setEvents((current) => current.filter((event) => event.nodeId !== node.id));
       setOlderEvents((current) => current && { ...current, events: current.events.filter((event) => event.nodeId !== node.id) });
     } catch {
@@ -561,7 +570,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
   const createdNyanpassNode = createdNyanpass ? nodes.find((node) => node.id === createdNyanpass.instance.nodeId) : null;
   const createdNyanpassNodeReady = Boolean(createdNyanpassNode && supportsRemoteSync(createdNyanpassNode.agentVersion) && nodeCanQueueTasks(createdNyanpassNode, nyanpass, now));
   const editingNyanpassRequiresCommand = Boolean(editingNyanpass && requiresFreshNyanpassCommand(editingNyanpass));
-  const hasModal = showCreate || showNyanpass || Boolean(editingNode) || Boolean(editingNyanpass) || Boolean(agentUpgrade);
+  const hasModal = showCreate || showNyanpass || Boolean(editingNode) || Boolean(editingNyanpass) || Boolean(agentUpgrade) || Boolean(sharingNode);
 
   return (
     <main className={`app-shell${navOpen ? '' : ' nav-collapsed'}`}>
@@ -605,16 +614,17 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
                   <div className="summary-item"><span>已有地址上报</span><strong>{reported} <em>/ {nodes.length}</em></strong><small className={nodes.length - reported ? 'warning' : ''}>{!nodes.length ? '暂无节点' : nodes.length - reported ? '等待首次上报' : '均已上报'}</small></div>
                 </div>
               </section>
-              <NodesPanel nodes={nodes} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} onUpgrade={showAgentUpgrade} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
+              <NodesPanel nodes={nodes} user={user} onShare={(node) => setSharingNodeId(node.id)} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} onUpgrade={showAgentUpgrade} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
               <ActivityPanel events={events} now={now} limit={5} />
             </>}
 
             {activeView === 'nodes' && <section className="view-page" aria-label={viewTitles.nodes}>
-              <NodesPanel nodes={nodes} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} onUpgrade={showAgentUpgrade} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
+              <NodesPanel nodes={nodes} user={user} onShare={(node) => setSharingNodeId(node.id)} now={now} onCreate={openCreateModal} onEdit={beginNodeEdit} onRemove={removeNode} onInstall={openNodeInstallation} onUpgrade={showAgentUpgrade} loadingInstallationId={loadingInstallationId} removingNodeId={removingNodeId} deleteError={nodeDeleteError} notice={nodeEditNotice} />
             </section>}
   
             {activeView === 'records' && <section className="view-page" aria-label={viewTitles.records}>
               <DnsPanel nodes={nodes} onCreate={openCreateModal} onEdit={beginNodeEdit} notice={nodeEditNotice} />
+              <SharedDnsPanel apiPath={apiPath} user={user} nodes={nodes} records={dnsRecords} domains={domainsOwnedBy(user.id)} onRecordsChange={setDnsRecords} onEvents={(added) => setEvents((current) => [...added, ...current].slice(0, 100))} />
             </section>}
   
             {activeView === 'domains' && <section className="view-page" aria-label={viewTitles.domains}>
@@ -623,7 +633,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
   
             {activeView === 'nyanpass' && <section className="view-page" aria-label={viewTitles.nyanpass}>
               {insecureTransport && <p className="transport-warning" role="alert"><strong>当前是 HTTP：</strong>这是本机演示模式（PULSEDNS_ALLOW_HTTP=1），链路没有加密。正式部署请按 README 用宝塔反向代理开启 HTTPS，未经 HTTPS 的登录会被拒绝。</p>}
-              <NyanpassPanel instances={nyanpass} nodes={nodes} hasNodes={Boolean(nodes.length)} syncingIds={syncingNyanpassIds} errors={nyanpassErrors} now={now} onCreate={openNyanpassModal} onEdit={beginNyanpassEdit} onRemove={removeNyanpassInstance} onSync={syncNyanpassInstance} onCancel={cancelNyanpassSync} onUpgrade={showAgentUpgrade} />
+              <NyanpassPanel user={user} instances={nyanpass} nodes={nodes} hasNodes={Boolean(nodes.length)} syncingIds={syncingNyanpassIds} errors={nyanpassErrors} now={now} onCreate={openNyanpassModal} onEdit={beginNyanpassEdit} onRemove={removeNyanpassInstance} onSync={syncNyanpassInstance} onCancel={cancelNyanpassSync} onUpgrade={showAgentUpgrade} />
             </section>}
   
             {activeView === 'settings' && <section className="view-page" aria-label={viewTitles.settings}>
@@ -746,6 +756,14 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
           <button type="button" className="ghost-button wide" onClick={() => { if (!agentUpgradeReady) setCreatedNyanpass(null); setAgentUpgrade(null); }} disabled={saving}>关闭</button>
         </section>
       </div>}
+
+      {sharingNode && adminState && <ShareModal apiPath={apiPath} node={sharingNode} users={adminState.users} multiUserEnabled={adminState.multiUserEnabled} onClose={() => setSharingNodeId(null)}
+        onShared={(share) => setNodes((current) => current.map((node) => node.id === share.nodeId ? { ...node, sharedWith: [...(node.sharedWith ?? []), { userId: share.userId, username: share.username }] } : node))}
+        onUnshared={(nodeId, userId) => {
+          setNodes((current) => current.map((node) => node.id === nodeId ? { ...node, sharedWith: (node.sharedWith ?? []).filter((share) => share.userId !== userId) } : node));
+          setNyanpass((current) => current.filter((instance) => !(instance.nodeId === nodeId && instance.ownerId === userId)));
+          setDnsRecords((current) => current.filter((record) => !(record.nodeId === nodeId && record.ownerId === userId)));
+        }} />}
     </main>
   );
 }
@@ -754,7 +772,7 @@ function NavLink({ item, active, onSelect }: { item: { id: ViewId; label: string
   return <a href={`#${item.id}`} className={`nav-item${active ? ' active' : ''}`} aria-current={active ? 'page' : undefined} onClick={() => onSelect(item.id)}>{item.label}</a>;
 }
 
-function NodesPanel({ nodes, now, onCreate, onEdit, onRemove, onInstall, onUpgrade, loadingInstallationId, removingNodeId, deleteError, notice }: { nodes: NodeRow[]; now: number; onCreate: () => void; onEdit: (node: NodeRow) => void; onRemove: (node: NodeRow) => void; onInstall: (node: NodeRow) => void; onUpgrade: (node: NodeRow) => void; loadingInstallationId: string | null; removingNodeId: string | null; deleteError: string; notice: string }) {
+function NodesPanel({ nodes, user, onShare, now, onCreate, onEdit, onRemove, onInstall, onUpgrade, loadingInstallationId, removingNodeId, deleteError, notice }: { nodes: NodeRow[]; user: SessionUser; onShare: (node: NodeRow) => void; now: number; onCreate: () => void; onEdit: (node: NodeRow) => void; onRemove: (node: NodeRow) => void; onInstall: (node: NodeRow) => void; onUpgrade: (node: NodeRow) => void; loadingInstallationId: string | null; removingNodeId: string | null; deleteError: string; notice: string }) {
   return <article className="panel nodes-panel">
     <div className="panel-heading"><div><h3>地址上报</h3><p>原探针仅在公网地址首次出现或变化时发送</p></div><button type="button" className="text-button" onClick={onCreate}>添加探针 →</button></div>
     {deleteError && <p className="panel-error" role="alert">{deleteError}</p>}
@@ -767,10 +785,11 @@ function NodesPanel({ nodes, now, onCreate, onEdit, onRemove, onInstall, onUpgra
         const sshChanged = ['failed', 'uncertain'].includes(node.nyanpassStatus) && node.provisionLastCompletedStep === 'ssh';
         const removing = removingNodeId === node.id;
         const statusLabel = bootstrapStalled ? 'User data 未执行' : bootstrapLocked ? bootstrapStatusLabel(node.nyanpassStatus) : hasReported ? '已上报' : '等待首次上报';
-        return <tr key={node.id}><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}</span></td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported && !bootstrapLocked ? 'badge online' : 'badge warning'}>{statusLabel}</span>{bootstrapStalled && <small className="sync-error" role="alert">检查 User data、CRLF 和出站网络</small>}{node.provisionLastCompletedStep && bootstrapLocked && <small>最后完成：{provisionStepLabel(node.provisionLastCompletedStep)}</small>}{sshChanged && <small className="sync-error" role="alert">SSH 凭据已变更，请使用新密码核查</small>}</td><td><div className="row-actions">
+        return <tr key={node.id}><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}{node.sharedWithMe && <b className="share-badge">共享</b>}</span>{node.sharedWith?.length ? <small>已分享给 {node.sharedWith.map((share) => share.username).join('、')}</small> : null}</td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported && !bootstrapLocked ? 'badge online' : 'badge warning'}>{statusLabel}</span>{bootstrapStalled && <small className="sync-error" role="alert">检查 User data、CRLF 和出站网络</small>}{node.provisionLastCompletedStep && bootstrapLocked && <small>最后完成：{provisionStepLabel(node.provisionLastCompletedStep)}</small>}{sshChanged && <small className="sync-error" role="alert">SSH 凭据已变更，请使用新密码核查</small>}</td><td>{node.sharedWithMe ? <span className="muted-value">共享机器 · 只读</span> : <div className="row-actions">
           <button type="button" className="edit-link" disabled={removing || loadingInstallationId !== null} onClick={() => onInstall(node)}>{loadingInstallationId === node.id ? '读取中…' : node.installationAvailable ? '安装命令' : '升级命令'}</button>
           {node.installationAvailable && node.nyanpassStatus === 'ready' && <button type="button" className="edit-link" disabled={removing} onClick={() => onUpgrade(node)}>升级命令</button>}
-          <button type="button" className="edit-link" disabled={removing} onClick={() => onEdit(node)}>修改</button><button type="button" className="danger-link" disabled={removing || loadingInstallationId === node.id} onClick={() => onRemove(node)}>{removing ? '删除中…' : '删除节点'}</button></div></td></tr>;
+          {user.role === 'admin' && <button type="button" className="edit-link" disabled={removing} onClick={() => onShare(node)}>分享</button>}
+          <button type="button" className="edit-link" disabled={removing} onClick={() => onEdit(node)}>修改</button><button type="button" className="danger-link" disabled={removing || loadingInstallationId === node.id} onClick={() => onRemove(node)}>{removing ? '删除中…' : '删除节点'}</button></div>}</td></tr>;
       })}</tbody></table> : <EmptyState onCreate={onCreate} />}
     </div>
   </article>;
@@ -1063,7 +1082,7 @@ function DnsPanel({ nodes, onCreate, onEdit, notice }: { nodes: NodeRow[]; onCre
         <td>{node.recordV4 ? <><code>{fqdn(node.domainName, node.recordV4)}</code><small>{node.ipv4 ?? '等待 IPv4 上报'}</small></> : <span className="muted-value">未配置</span>}</td>
         <td>{node.recordV6 ? <><code>{fqdn(node.domainName, node.recordV6)}</code><small>{node.ipv6 ?? '等待 IPv6 上报'}</small></> : <span className="muted-value">未配置</span>}</td>
         <td><span className={node.syncEnabled ? 'badge online' : 'badge warning'}>{node.syncEnabled ? '自动同步' : '已暂停'}</span></td>
-        <td><button type="button" className="edit-link" onClick={() => onEdit(node)}>修改记录</button></td>
+        <td>{node.sharedWithMe ? <span className="muted-value">只读</span> : <button type="button" className="edit-link" onClick={() => onEdit(node)}>修改记录</button>}</td>
       </tr>)}</tbody></table> : <EmptyState onCreate={onCreate} />}
     </div>
   </article>;
@@ -1103,7 +1122,7 @@ function ActivityPanel({ events, now, limit, expanded = false, loadMore }: { eve
   </article>;
 }
 
-function NyanpassPanel({ instances, nodes, hasNodes, syncingIds, errors, now, onCreate, onEdit, onRemove, onSync, onCancel, onUpgrade }: { instances: NyanpassRow[]; nodes: NodeRow[]; hasNodes: boolean; syncingIds: Set<string>; errors: Record<string, string>; now: number; onCreate: () => void; onEdit: (instance: NyanpassRow) => void; onRemove: (instance: NyanpassRow) => void; onSync: (instance: NyanpassRow) => void; onCancel: (instance: NyanpassRow) => void; onUpgrade: (node: NodeRow) => void }) {
+function NyanpassPanel({ user, instances, nodes, hasNodes, syncingIds, errors, now, onCreate, onEdit, onRemove, onSync, onCancel, onUpgrade }: { user: SessionUser; instances: NyanpassRow[]; nodes: NodeRow[]; hasNodes: boolean; syncingIds: Set<string>; errors: Record<string, string>; now: number; onCreate: () => void; onEdit: (instance: NyanpassRow) => void; onRemove: (instance: NyanpassRow) => void; onSync: (instance: NyanpassRow) => void; onCancel: (instance: NyanpassRow) => void; onUpgrade: (node: NodeRow) => void }) {
   const canCreate = nodes.some((node) => !isBootstrapLockedStatus(node.nyanpassStatus));
   // 按钮禁用时悬停说明原因（用外层 span，部分浏览器不显示禁用按钮自身的 title）。
   const createBlockedReason = canCreate ? undefined : hasNodes ? '请等待节点开机安装完成后再追加实例' : '请先创建探针节点，再添加 Nyanpass 实例';
@@ -1118,9 +1137,12 @@ function NyanpassPanel({ instances, nodes, hasNodes, syncingIds, errors, now, on
         const busy = instance.status === 'running';
         const syncing = syncingIds.has(instance.id);
         const requiresCommand = requiresFreshNyanpassCommand(instance);
+        // 共享机器上每个人只能修改自己添加的实例；管理员可以修改全部。
+        const canModify = user.role === 'admin' || instance.ownerId === user.id;
+        const addedBy = instance.ownerId !== user.id && instance.ownerName ? ` · 由 ${instance.ownerName} 添加` : '';
         const syncLabel = syncing ? '正在处理…' : provisioning ? (node ? bootstrapStatusLabel(node.nyanpassStatus) : '开机状态异常') : instance.status === 'pending' ? '取消排队' : instance.status === 'running' ? '机器正在安装…' : !capable ? '先升级探针' : requiresCommand ? '配置后同步' : !polling ? '探针未在线' : instance.status === 'failed' ? '重试同步' : '同步到机器';
         const syncAction = instance.status === 'pending' ? () => onCancel(instance) : !capable && node ? () => onUpgrade(node) : requiresCommand ? () => onEdit(instance) : () => onSync(instance);
-        return <tr key={instance.id}><td><span className="node-name">{instance.name}</span><small>{instance.nodeName}{node?.agentVersion ? ` · 探针 ${node.agentVersion}${node.lastTaskPollAt ? ` · ${relativeTime(node.lastTaskPollAt, now)}轮询` : ' · 未见任务心跳'}` : ' · 旧探针'}</small></td><td><code>{displayHost(instance.panelUrl)}</code></td><td><b className={`role-badge ${instance.role}`}>{nyanpassRoleLabel(instance.role)}</b><small>{instance.role === 'outbound' ? '含独立 -o' : '不含 -o'}</small></td><td><NyanpassStatus instance={instance} now={now} />{(errors[instance.id] || instance.syncError) && <small className="sync-error" role="alert">{errors[instance.id] || instance.syncError}</small>}</td><td><div className="row-actions nyanpass-actions"><button type="button" className="sync-link" disabled={provisioning || busy || syncing} aria-busy={busy || syncing} onClick={syncAction}>{syncLabel}</button><button type="button" className="edit-link" disabled={provisioning || instance.status === 'pending' || busy || syncing} onClick={() => onEdit(instance)}>修改</button><button type="button" className="danger-link" disabled={provisioning || instance.status === 'pending' || busy || syncing} onClick={() => onRemove(instance)}>移除登记</button></div></td></tr>;
+        return <tr key={instance.id}><td><span className="node-name">{instance.name}</span><small>{instance.nodeName}{addedBy}{node?.agentVersion ? ` · 探针 ${node.agentVersion}${node.lastTaskPollAt ? ` · ${relativeTime(node.lastTaskPollAt, now)}轮询` : ' · 未见任务心跳'}` : ' · 旧探针'}</small></td><td><code>{displayHost(instance.panelUrl)}</code></td><td><b className={`role-badge ${instance.role}`}>{nyanpassRoleLabel(instance.role)}</b><small>{instance.role === 'outbound' ? '含独立 -o' : '不含 -o'}</small></td><td><NyanpassStatus instance={instance} now={now} />{(errors[instance.id] || instance.syncError) && <small className="sync-error" role="alert">{errors[instance.id] || instance.syncError}</small>}</td><td>{!canModify ? <span className="muted-value">只读</span> : <div className="row-actions nyanpass-actions"><button type="button" className="sync-link" disabled={provisioning || busy || syncing} aria-busy={busy || syncing} onClick={syncAction}>{syncLabel}</button><button type="button" className="edit-link" disabled={provisioning || instance.status === 'pending' || busy || syncing} onClick={() => onEdit(instance)}>修改</button><button type="button" className="danger-link" disabled={provisioning || instance.status === 'pending' || busy || syncing} onClick={() => onRemove(instance)}>移除登记</button></div>}</td></tr>;
       })}</tbody></table> : <div className="empty-state compact-empty"><span>⇄</span><h4>还没有 Nyanpass 实例</h4><p>{hasNodes ? canCreate ? '添加第一个 Nyanpass 实例；同一节点可以继续添加多个。' : '请等待节点开机安装完成后再追加实例。' : '请先创建探针节点，再添加 Nyanpass 合租实例。'}</p><span className="button-reason" title={createBlockedReason}><button type="button" className="ghost-button" disabled={!canCreate} onClick={onCreate}>添加实例</button></span></div>}
     </div>
   </article>;
@@ -1217,6 +1239,10 @@ function eventKindLabel(kind: string) {
   const labels: Record<string, string> = {
     node_created: '节点创建',
     node_updated: '节点修改',
+    node_shared: '机器分享',
+    node_unshared: '取消分享',
+    dns_record_added: '添加解析',
+    dns_record_removed: '移除解析',
     ip_changed: 'IP 变化',
     dns_synced: 'DNS 同步',
     dns_failed: 'DNS 失败',
@@ -1244,6 +1270,139 @@ function relativeTime(value: string | null, now: number) {
   if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
   return `${Math.floor(seconds / 86400)} 天前`;
+}
+
+// 机器分享（仅管理员）：把机器分享给普通用户，或取消分享。
+function ShareModal({ apiPath, node, users, multiUserEnabled, onClose, onShared, onUnshared }: { apiPath: (path: string) => string; node: NodeRow; users: AdminUserRow[]; multiUserEnabled: boolean; onClose: () => void; onShared: (share: { nodeId: string; userId: string; username: string }) => void; onUnshared: (nodeId: string, userId: string) => void }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const shares = node.sharedWith ?? [];
+  const candidates = users.filter((candidate) => candidate.role === 'user' && candidate.id !== node.ownerId && !shares.some((share) => share.userId === candidate.id));
+
+  async function send(method: string, path: string, body?: unknown) {
+    const response = await fetchWithTimeout(apiPath(path), { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+    const result = await response.json().catch(() => ({ error: '主控返回了无效响应' })) as Record<string, unknown> & { error?: string };
+    return { ok: response.ok, result };
+  }
+
+  async function share(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const userId = String(new FormData(event.currentTarget).get('userId') ?? '');
+    if (!userId) return;
+    setSaving(true); setError('');
+    try {
+      const { ok, result } = await send('POST', '/api/admin/node-shares', { nodeId: node.id, userId });
+      if (!ok) { setError(result.error ?? '分享失败'); return; }
+      onShared(result.share as { nodeId: string; userId: string; username: string });
+    } catch {
+      setError('无法确认是否已分享，请刷新页面核对。');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function unshare(target: { userId: string; username: string }) {
+    if (!window.confirm(`取消 ${target.username} 对 ${node.name} 的分享？\n\n会一并移除 ${target.username} 在这台机器上的 Nyanpass 实例登记和解析：实例不再随换机重装，解析停止自动同步。当前机器上已安装的服务不会被卸载，阿里云上已有的记录也不会被删除。`)) return;
+    setSaving(true); setError('');
+    try {
+      const { ok, result } = await send('DELETE', `/api/admin/node-shares?nodeId=${encodeURIComponent(node.id)}&userId=${encodeURIComponent(target.userId)}`);
+      if (!ok) { setError(result.error ?? '取消分享失败'); return; }
+      onUnshared(node.id, target.userId);
+    } catch {
+      setError('无法确认是否已取消分享，请刷新页面核对。');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) onClose(); }}>
+    <section className="modal" role="dialog" aria-modal="true" aria-labelledby="share-title">
+      <button className="modal-close" onClick={onClose} aria-label="关闭" disabled={saving}>×</button>
+      <p className="eyebrow cyan">机器分享</p><h2 id="share-title">分享 {node.name}</h2>
+      <p className="modal-intro">被分享的用户可以在这台机器上添加自己的解析和 Nyanpass 实例，并能只读查看机器状态、其他人的实例与解析和全部事件；看不到 root 密码、安装命令和开机脚本，也不能修改或删除机器。机器换 IP 时，他们的解析会自动同步，实例也会随开机脚本一起重装。</p>
+      {!multiUserEnabled && <p className="transport-warning" role="status">多用户模式当前关闭，被分享的用户暂时无法登录；可在「设置」中打开。</p>}
+      <div className="share-list">
+        {shares.length ? shares.map((target) => <div className="share-row" key={target.userId}><span>{target.username}</span><button type="button" className="danger-link" disabled={saving} onClick={() => unshare(target)}>取消分享</button></div>) : <p className="muted-value">还没有分享给任何用户。</p>}
+      </div>
+      <form className="node-form domain-form" onSubmit={share}>
+        <label>分享给<select name="userId" required defaultValue="" key={candidates.map((candidate) => candidate.id).join()}>{candidates.length ? <><option value="" disabled>选择用户</option>{candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.username}</option>)}</> : <option value="">没有可分享的用户，请先在「设置」中添加</option>}</select></label>
+        <button className="primary-button" disabled={saving || !candidates.length}>{saving ? '处理中…' : '分享'}</button>
+      </form>
+      {error && <p className="form-error" role="alert">{error}</p>}
+    </section>
+  </div>;
+}
+
+// 共享机器上的解析：被分享的用户用自己的主域名把记录指向共享机器，机器换 IP 时自动同步。
+function SharedDnsPanel({ apiPath, user, nodes, records, domains, onRecordsChange, onEvents }: { apiPath: (path: string) => string; user: SessionUser; nodes: NodeRow[]; records: DnsRecordRow[]; domains: DomainRow[]; onRecordsChange: (update: (current: DnsRecordRow[]) => DnsRecordRow[]) => void; onEvents: (events: EventRow[]) => void }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const sharedNodes = nodes.filter((node) => node.sharedWithMe);
+  if (!sharedNodes.length && !records.length) return null;
+
+  async function add(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    setSaving(true); setError(''); setNotice('');
+    try {
+      const response = await fetchWithTimeout(apiPath('/api/admin/node-dns'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nodeId: data.get('nodeId'), domainName: data.get('domainName'), recordV4: data.get('recordV4'), recordV6: data.get('recordV6') }) });
+      const result = await response.json().catch(() => ({ error: '主控返回了无效响应' })) as { error?: string; record?: DnsRecordRow; events?: EventRow[]; warnings?: string[] };
+      if (!response.ok || !result.record) { setError(result.error ?? '添加解析失败'); return; }
+      const record = result.record;
+      onRecordsChange((current) => [...current, record]);
+      onEvents(result.events ?? []);
+      setNotice(result.warnings?.length ? result.warnings.join('；') : '解析已添加；机器已有地址时已立即同步');
+      form.reset();
+    } catch {
+      setError('无法确认解析是否已添加，请刷新页面核对。');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function remove(record: DnsRecordRow) {
+    if (!window.confirm(`移除 ${record.nodeName} 上的解析 ${[record.recordV4, record.recordV6].filter(Boolean).map((rr) => fqdn(record.domainName, rr as string)).join('、')}？\n\n面板将停止同步这条解析，阿里云上已有的记录不会自动删除。`)) return;
+    setSaving(true); setError(''); setNotice('');
+    try {
+      const response = await fetchWithTimeout(apiPath(`/api/admin/node-dns?id=${encodeURIComponent(record.id)}`), { method: 'DELETE' });
+      const result = await response.json().catch(() => ({ error: '主控返回了无效响应' })) as { error?: string; warnings?: string[] };
+      if (!response.ok) { setError(result.error ?? '移除解析失败'); return; }
+      onRecordsChange((current) => current.filter((item) => item.id !== record.id));
+      setNotice(result.warnings?.join('；') ?? '');
+    } catch {
+      setError('无法确认解析是否已移除，请刷新页面核对。');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <article className="panel dns-panel">
+    <div className="panel-heading"><div><h3>共享机器上的解析</h3><p>被分享的用户用自己的主域名把记录指向共享机器；机器换 IP 时自动同步</p></div></div>
+    {sharedNodes.length > 0 && <form className="node-form domain-form" onSubmit={add}>
+      <label>共享机器<select name="nodeId" required>{sharedNodes.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}</select></label>
+      <label>主域名<select name="domainName" required>{domains.length ? domains.map((domain) => <option key={domain.name} value={domain.name}>{domain.name}</option>) : <option value="">请先在「阿里云主域名」添加</option>}</select></label>
+      <label>IPv4 主机记录<input name="recordV4" placeholder="例如：hk 或 @" autoComplete="off" spellCheck={false} /></label>
+      <label>IPv6 主机记录<input name="recordV6" placeholder="可留空" autoComplete="off" spellCheck={false} /></label>
+      <button className="primary-button" disabled={saving || !domains.length}>{saving ? '同步中…' : '添加解析'}</button>
+    </form>}
+    {error && <p className="panel-error" role="alert">{error}</p>}
+    {notice && <p className="panel-notice" role="status">{notice}</p>}
+    <div className="table-wrap">
+      {records.length ? <table><thead><tr><th>机器</th><th>A 记录</th><th>AAAA 记录</th><th>添加者</th><th>操作</th></tr></thead><tbody>{records.map((record) => {
+        const node = nodes.find((item) => item.id === record.nodeId);
+        const canRemove = user.role === 'admin' || record.ownerId === user.id;
+        return <tr key={record.id}>
+          <td><span className="node-name">{record.nodeName}</span></td>
+          <td>{record.recordV4 ? <><code>{fqdn(record.domainName, record.recordV4)}</code><small>{node?.ipv4 ?? '等待 IPv4 上报'}</small></> : <span className="muted-value">未配置</span>}</td>
+          <td>{record.recordV6 ? <><code>{fqdn(record.domainName, record.recordV6)}</code><small>{node?.ipv6 ?? '等待 IPv6 上报'}</small></> : <span className="muted-value">未配置</span>}</td>
+          <td>{record.ownerId === user.id ? '我' : record.ownerName}</td>
+          <td>{canRemove ? <button type="button" className="danger-link" disabled={saving} onClick={() => remove(record)}>移除</button> : <span className="muted-value">只读</span>}</td>
+        </tr>;
+      })}</tbody></table> : <div className="empty-state compact-empty"><span>◇</span><h4>还没有解析</h4><p>选择共享机器和自己的主域名，填写主机记录后添加。</p></div>}
+    </div>
+  </article>;
 }
 
 function EmptyState({ onCreate }: { onCreate: () => void }) {

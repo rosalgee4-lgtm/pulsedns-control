@@ -1,10 +1,10 @@
 import { and, eq, exists, gt, isNull } from 'drizzle-orm';
 import { runInTransaction } from '@/db';
 import { ensureSchema } from '@/db/init';
-import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
+import { agentTasks, events, nodes, nyanpassInstances, users } from '@/db/schema';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
 import { requireApiUser } from '@/lib/auth';
-import { canAccessNode } from '@/lib/ownership';
+import { modifiableInstanceNode } from '@/lib/ownership';
 import { cleanText } from '@/lib/validation';
 import { expireProvisionAttempts, isBootstrapLocked } from '@/lib/provision-lifecycle';
 
@@ -20,8 +20,8 @@ export async function POST(request: Request) {
   const id = cleanText(body?.id, 64);
   if (!id) return Response.json({ error: '缺少实例 ID' }, { status: 400, headers: noStoreHeaders });
 
-  const [located] = await db.select({ nodeId: nyanpassInstances.nodeId }).from(nyanpassInstances).where(eq(nyanpassInstances.id, id)).limit(1);
-  if (!located || !await canAccessNode(db, user, located.nodeId)) return Response.json({ error: '实例不存在' }, { status: 404, headers: noStoreHeaders });
+  const located = await modifiableInstanceNode(db, user, id);
+  if (!located) return Response.json({ error: '实例不存在或不是你添加的' }, { status: 404, headers: noStoreHeaders });
   const operationId = await acquireNodeOperationLock(db, located.nodeId);
   if (operationId === undefined) return Response.json({ error: '所属节点不存在' }, { status: 404, headers: noStoreHeaders });
   if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试同步' }, { status: 409, headers: noStoreHeaders });
@@ -31,6 +31,8 @@ export async function POST(request: Request) {
     id: nyanpassInstances.id,
     nodeId: nyanpassInstances.nodeId,
     nodeName: nodes.name,
+    ownerId: nyanpassInstances.ownerId,
+    ownerName: users.username,
     name: nyanpassInstances.name,
     role: nyanpassInstances.role,
     panelUrl: nyanpassInstances.panelUrl,
@@ -43,7 +45,7 @@ export async function POST(request: Request) {
     agentVersion: nodes.agentVersion,
     lastTaskPollAt: nodes.lastTaskPollAt,
     nodeProvisionStatus: nodes.nyanpassStatus,
-  }).from(nyanpassInstances).leftJoin(nodes, eq(nyanpassInstances.nodeId, nodes.id)).where(eq(nyanpassInstances.id, id)).limit(1);
+  }).from(nyanpassInstances).leftJoin(nodes, eq(nyanpassInstances.nodeId, nodes.id)).leftJoin(users, eq(nyanpassInstances.ownerId, users.id)).where(eq(nyanpassInstances.id, id)).limit(1);
   if (!instance) return Response.json({ error: '实例不存在' }, { status: 404, headers: noStoreHeaders });
   if (!instance.nodeName) return Response.json({ error: '所属节点不存在' }, { status: 404, headers: noStoreHeaders });
   if (isBootstrapLocked(instance.nodeProvisionStatus ?? '')) {
@@ -201,8 +203,8 @@ export async function DELETE(request: Request) {
   const { db, user } = auth;
   const id = cleanText(new URL(request.url).searchParams.get('id'), 64);
   if (!id) return Response.json({ error: '缺少实例 ID' }, { status: 400, headers: noStoreHeaders });
-  const [located] = await db.select({ nodeId: nyanpassInstances.nodeId }).from(nyanpassInstances).where(eq(nyanpassInstances.id, id)).limit(1);
-  if (!located || !await canAccessNode(db, user, located.nodeId)) return Response.json({ error: '实例不存在' }, { status: 404, headers: noStoreHeaders });
+  const located = await modifiableInstanceNode(db, user, id);
+  if (!located) return Response.json({ error: '实例不存在或不是你添加的' }, { status: 404, headers: noStoreHeaders });
   const operationId = await acquireNodeOperationLock(db, located.nodeId);
   if (operationId === undefined) return Response.json({ error: '所属节点不存在' }, { status: 404, headers: noStoreHeaders });
   if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试取消' }, { status: 409, headers: noStoreHeaders });
@@ -275,6 +277,8 @@ function instanceResponse(instance: {
   id: string;
   nodeId: string;
   nodeName: string | null;
+  ownerId: string;
+  ownerName: string | null;
   name: string;
   role: 'inbound' | 'outbound';
   panelUrl: string;
@@ -294,6 +298,8 @@ function instanceResponse(instance: {
     id: instance.id,
     nodeId: instance.nodeId,
     nodeName: instance.nodeName ?? '已删除节点',
+    ownerId: instance.ownerId,
+    ownerName: instance.ownerName,
     name: instance.name,
     role: instance.role,
     panelUrl: instance.panelUrl,

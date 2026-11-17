@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { bigint, boolean, datetime, index, int, mediumtext, mysqlTable, text, uniqueIndex, varchar } from 'drizzle-orm/mysql-core';
+import { bigint, boolean, datetime, index, int, mediumtext, mysqlTable, primaryKey, text, uniqueIndex, varchar } from 'drizzle-orm/mysql-core';
 
 // 时间统一按 UTC 毫秒精度保存。
 const timestamp = (name: string) => datetime(name, { mode: 'date', fsp: 3 });
@@ -124,6 +124,8 @@ export const events = mysqlTable('events', {
 export const nyanpassInstances = mysqlTable('nyanpass_instances', {
   id: varchar('id', { length: 36 }).primaryKey(),
   nodeId: varchar('node_id', { length: 36 }).notNull().references(() => nodes.id, { onDelete: 'cascade' }),
+  // 添加这个实例的用户：共享机器上每个人只能修改自己添加的实例（管理员可以修改全部）。
+  ownerId: varchar('owner_id', { length: 36 }).notNull().references(() => users.id),
   name: varchar('name', { length: 64 }).notNull(),
   role: varchar('role', { length: 10, enum: ['inbound', 'outbound'] }).notNull().default('outbound'),
   panelUrl: varchar('panel_url', { length: 255 }).notNull(),
@@ -143,6 +145,37 @@ export const nyanpassInstances = mysqlTable('nyanpass_instances', {
   uniqueIndex('idx_nyanpass_node_ws_port').on(table.nodeId, table.wsPort),
   index('idx_nyanpass_node_status').on(table.nodeId, table.status),
   index('idx_nyanpass_active_task').on(table.activeTaskId),
+  index('idx_nyanpass_owner').on(table.ownerId),
+]);
+
+// 机器分享：管理员把一台机器分享给普通用户，对方可以在上面添加自己的解析和 Nyanpass 实例。
+export const nodeShares = mysqlTable('node_shares', {
+  nodeId: varchar('node_id', { length: 36 }).notNull().references(() => nodes.id, { onDelete: 'cascade' }),
+  userId: varchar('user_id', { length: 36 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at').notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.nodeId, table.userId] }),
+  index('idx_node_shares_user').on(table.userId),
+]);
+
+// 被分享的用户在共享机器上添加的解析：用他自己的主域名与阿里云账号，机器换 IP 时一起自动同步。
+// 同一主域名 + 主机记录的 A / AAAA 在本表内唯一（生成列 + 唯一索引）；与节点自身记录的冲突在接口中检查。
+export const nodeDnsRecords = mysqlTable('node_dns_records', {
+  id: varchar('id', { length: 36 }).primaryKey(),
+  nodeId: varchar('node_id', { length: 36 }).notNull().references(() => nodes.id, { onDelete: 'cascade' }),
+  ownerId: varchar('owner_id', { length: 36 }).notNull().references(() => users.id),
+  domainName: varchar('domain_name', { length: 253 }).notNull(),
+  recordV4: varchar('record_v4', { length: 253 }),
+  recordV6: varchar('record_v6', { length: 253 }),
+  createdAt: timestamp('created_at').notNull(),
+  dnsV4Key: varchar('dns_v4_key', { length: 510 }).generatedAlwaysAs(sql`(case when \`record_v4\` is not null then concat(\`domain_name\`, '|', \`record_v4\`) end)`, { mode: 'stored' }),
+  dnsV6Key: varchar('dns_v6_key', { length: 510 }).generatedAlwaysAs(sql`(case when \`record_v6\` is not null then concat(\`domain_name\`, '|', \`record_v6\`) end)`, { mode: 'stored' }),
+}, (table) => [
+  uniqueIndex('idx_node_dns_records_v4').on(table.dnsV4Key),
+  uniqueIndex('idx_node_dns_records_v6').on(table.dnsV6Key),
+  index('idx_node_dns_records_node').on(table.nodeId),
+  index('idx_node_dns_records_owner').on(table.ownerId),
+  index('idx_node_dns_records_domain').on(table.domainName),
 ]);
 
 export const agentTasks = mysqlTable('agent_tasks', {

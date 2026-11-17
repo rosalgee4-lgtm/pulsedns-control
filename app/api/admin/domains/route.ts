@@ -1,7 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { affectedRows, isDuplicateKeyError, type AppDb } from '@/db';
 import { ensureSchema } from '@/db/init';
-import { aliyunAccounts, domains, nodes } from '@/db/schema';
+import { aliyunAccounts, domains, nodeDnsRecords, nodes } from '@/db/schema';
 import { verifyAliDnsDomain } from '@/lib/alidns';
 import { accountCredentials } from '@/lib/aliyun-accounts';
 import { requireApiUser, type CurrentUser } from '@/lib/auth';
@@ -67,6 +67,8 @@ export async function DELETE(request: Request) {
   if (!await visibleDomain(db, user, name)) return Response.json({ error: '主域名不存在' }, { status: 404 });
   const [used] = await db.select({ name: nodes.name }).from(nodes).where(eq(nodes.domainName, name)).limit(1);
   if (used) return Response.json({ error: `主域名 ${name} 正在被节点 ${used.name} 使用，请先修改或删除该节点` }, { status: 409 });
+  const [sharedUse] = await db.select({ name: nodes.name }).from(nodeDnsRecords).innerJoin(nodes, eq(nodeDnsRecords.nodeId, nodes.id)).where(eq(nodeDnsRecords.domainName, name)).limit(1);
+  if (sharedUse) return Response.json({ error: `主域名 ${name} 正在被共享机器 ${sharedUse.name} 上的解析使用，请先移除该解析` }, { status: 409 });
   const deleted = await db.delete(domains).where(eq(domains.name, name));
   if (!affectedRows(deleted)) return Response.json({ error: '主域名不存在' }, { status: 404 });
   return Response.json({ status: 'ok' });

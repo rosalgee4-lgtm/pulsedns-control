@@ -47,7 +47,7 @@ test('node editing is authenticated, constrained, audited, and refreshes current
 test('Nyanpass editing keeps the node fixed and encrypts a newly supplied official command for explicit sync', () => {
   const patch = handler(nyanpassRoute, 'PATCH', 'DELETE');
   assert.match(patch, /requireApiUser\(request\)[\s\S]*if \('response' in auth\) return auth\.response/);
-  assert.match(patch, /canAccessNode\(db, user, located\.nodeId\)/);
+  assert.match(patch, /modifiableInstanceNode\(db, user, id\)/);
   assert.match(patch, /if \(!id\).*status: 400/);
   assert.match(patch, /if \(!current\).*status: 404/);
   assert.match(patch, /parseOfficialNyanpassCommand\(body\?\.command\)/);
@@ -132,7 +132,7 @@ test('Nyanpass machine service names are immutable so an old VPS service is neve
 test('browser node DTO excludes credential hashes and internal operation identities', () => {
   assert.match(page, /initialNodes=\{await listNodes\(db, user\)\}/);
   assert.match(nyanpassRoute, /nodes: await listNodes\(db, user\)/);
-  assert.match(dashboardData, /\.\.\.nodeResponse\(node\), ownerName/);
+  assert.match(dashboardData, /\.\.\.nodeResponse\(node\),\s*ownerName/);
   assert.doesNotMatch(nodeResponse, /\.\.\.node|tokenHash|provisionAttemptId|dnsOperationId/);
   assert.doesNotMatch(dashboard, /tokenHash/);
 });

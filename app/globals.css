@@ -259,3 +259,6 @@ td code + code { color:#14594b; background:#eaf8f5; }
 @media (max-width: 640px) { .setting-row { flex-direction:column; align-items:flex-start; } }
 .load-more { display:flex; flex-direction:column; align-items:center; gap:6px; padding:12px 0 4px; }
 .load-more p { margin:0; color:var(--muted); font-size:12px; }
+.share-badge { margin-left:6px; padding:0 6px; border-radius:999px; background:#e8f2fb; color:var(--link); font-size:11px; font-weight:700; line-height:18px; }
+.share-list { display:flex; flex-direction:column; gap:6px; margin:4px 0 12px; }
+.share-row { display:flex; align-items:center; justify-content:space-between; padding:6px 10px; border:1px solid var(--line-soft); border-radius:6px; }

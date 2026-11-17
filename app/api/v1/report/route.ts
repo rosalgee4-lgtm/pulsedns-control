@@ -7,6 +7,7 @@ import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-o
 import { bearerToken, sha256 } from '@/lib/security';
 import { cleanText, validIPv4, validIPv6 } from '@/lib/validation';
 import { pruneEventsAfterInsert } from '@/lib/event-retention';
+import { sharedDnsTargets } from '@/lib/shared-dns';
 
 type AddressType = 'A' | 'AAAA';
 type ReportBody = {
@@ -63,6 +64,27 @@ export async function POST(request: Request) {
       const record = report.type === 'A' ? snapshot.recordV4 : snapshot.recordV6;
       const hasDnsMapping = Boolean(snapshot.syncEnabled && snapshot.domainName && record);
 
+      // 机器分享后，被分享用户的解析与节点自己的记录一起按上报的地址同步。
+      const sharedTargets = await sharedDnsTargets(db, node.id, report.type);
+      for (const target of sharedTargets) {
+        const result = await syncAliDnsRecord(target.domainName, target.record, report.type, report.ip);
+        if (!result.ok) {
+          failures.push(`${report.type} ${target.label}: ${result.error}`);
+          await logDnsFailure(db, { nodeId: node.id, type: report.type, ip: report.ip, recordLabel: target.label, error: result.error, now });
+          continue;
+        }
+        if (previous !== report.ip || !('unchanged' in result)) {
+          await insertReportEvent(db, {
+            nodeId: node.id,
+            kind: 'dns_synced',
+            message: previous === report.ip ? `${report.type} 记录 ${target.label} 已重新校准` : `${report.type} 记录 ${target.label} 已同步`,
+            ipType: report.type,
+            ip: report.ip,
+            createdAt: now,
+          });
+        }
+      }
+
       if (previous === report.ip && !hasDnsMapping) continue;
 
       if (hasDnsMapping && snapshot.domainName && record) {
@@ -99,6 +121,7 @@ export async function POST(request: Request) {
       }
 
       await updateReportedIp(db, node.id, report, now);
+      if (sharedTargets.length) continue;
       await insertReportEvent(db, {
         nodeId: node.id,
         kind: 'ip_changed',

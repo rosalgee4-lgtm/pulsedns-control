@@ -1,10 +1,10 @@
 import { and, eq, isNull } from 'drizzle-orm';
 import { affectedRows, runInTransaction } from '@/db';
 import { ensureSchema } from '@/db/init';
-import { events, nodes, nyanpassInstances } from '@/db/schema';
+import { events, nodes, nyanpassInstances, users } from '@/db/schema';
 import { requireApiUser } from '@/lib/auth';
-import { instanceResponse, listEvents, listInstances, listNodes } from '@/lib/dashboard-data';
-import { canAccessNode } from '@/lib/ownership';
+import { instanceResponse, listDnsRecords, listEvents, listInstances, listNodes } from '@/lib/dashboard-data';
+import { canUseNode, modifiableInstanceNode } from '@/lib/ownership';
 import { expireAgentTasks } from '@/lib/agent-task-lifecycle';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
 import { parseOfficialNyanpassCommand, validNyanpassServiceName } from '@/lib/nyanpass-command';
@@ -28,6 +28,7 @@ export async function GET(request: Request) {
     instances: await listInstances(db, user),
     nodes: await listNodes(db, user),
     events: await listEvents(db, user),
+    dnsRecords: await listDnsRecords(db, user),
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -47,7 +48,7 @@ export async function POST(request: Request) {
   if (!validNyanpassServiceName(name)) return Response.json({ error: '实例名须为 1-48 位字母、数字、点、下划线或短横线，不能使用系统保留名称或单元后缀' }, { status: 400 });
   if (!parsedCommand.ok) return Response.json({ error: parsedCommand.error }, { status: 400 });
 
-  if (!await canAccessNode(db, user, nodeId)) return Response.json({ error: '所属节点不存在' }, { status: 404 });
+  if (!await canUseNode(db, user, nodeId)) return Response.json({ error: '所属节点不存在' }, { status: 404 });
   const operationId = await acquireNodeOperationLock(db, nodeId);
   if (operationId === undefined) return Response.json({ error: '所属节点不存在' }, { status: 404 });
   if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试' }, { status: 409 });
@@ -75,6 +76,7 @@ export async function POST(request: Request) {
       db.insert(nyanpassInstances).values({
         id,
         nodeId,
+        ownerId: user.id,
         name,
         role: parsedCommand.role,
         panelUrl: parsedCommand.panelUrl,
@@ -89,7 +91,7 @@ export async function POST(request: Request) {
     ]);
 
     return Response.json({
-      instance: instanceResponse({ id, nodeId, nodeName: node.name, name, role: parsedCommand.role, panelUrl: parsedCommand.panelUrl, optimize, status: 'ready', hasCredential: true, lastReportedAt: null, syncError: null, activeTaskId: null, configRevision: revision, taskStatus: null, taskCreatedAt: null, taskClaimedAt: null, taskLeaseExpiresAt: null }),
+      instance: instanceResponse({ id, nodeId, nodeName: node.name, ownerId: user.id, ownerName: user.username, name, role: parsedCommand.role, panelUrl: parsedCommand.panelUrl, optimize, status: 'ready', hasCredential: true, lastReportedAt: null, syncError: null, activeTaskId: null, configRevision: revision, taskStatus: null, taskCreatedAt: null, taskClaimedAt: null, taskLeaseExpiresAt: null }),
     }, { status: 201, headers: { 'Cache-Control': 'no-store' } });
   } finally {
     await releaseNodeOperationLock(db, nodeId, operationId);
@@ -111,8 +113,8 @@ export async function PATCH(request: Request) {
   if (!id) return Response.json({ error: '缺少实例 ID' }, { status: 400 });
   if (!validNyanpassServiceName(name)) return Response.json({ error: '实例名须为 1-48 位字母、数字、点、下划线或短横线，不能使用系统保留名称或单元后缀' }, { status: 400 });
 
-  const [located] = await db.select({ nodeId: nyanpassInstances.nodeId }).from(nyanpassInstances).where(eq(nyanpassInstances.id, id)).limit(1);
-  if (!located || !await canAccessNode(db, user, located.nodeId)) return Response.json({ error: '实例不存在' }, { status: 404 });
+  const located = await modifiableInstanceNode(db, user, id);
+  if (!located) return Response.json({ error: '实例不存在或不是你添加的' }, { status: 404 });
   const operationId = await acquireNodeOperationLock(db, located.nodeId);
   if (operationId === undefined) return Response.json({ error: '所属节点不存在' }, { status: 404 });
   if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试' }, { status: 409 });
@@ -177,9 +179,10 @@ export async function PATCH(request: Request) {
   const roleLabel = role === 'outbound' ? '出口' : '入口';
   const updatedEvent = { nodeId: current.nodeId, level: 'info', kind: 'nyanpass_updated', message: `${user.username} 更新了${roleLabel}实例 ${current.name} 的同步配置`, createdAt: now };
   const [{ id: updatedEventId }] = await db.insert(events).values(updatedEvent).$returningId();
+  const [instanceOwner] = await db.select({ username: users.username }).from(users).where(eq(users.id, current.ownerId)).limit(1);
 
   return Response.json({
-    instance: instanceResponse({ id, nodeId: current.nodeId, nodeName: node.name, name: current.name, role, panelUrl, optimize: hasCommand ? optimize : current.optimize, status, hasCredential: Boolean(credentialCiphertext), lastReportedAt: current.lastReportedAt, syncError, activeTaskId, configRevision: revision, taskStatus: null, taskCreatedAt: null, taskClaimedAt: null, taskLeaseExpiresAt: null }),
+    instance: instanceResponse({ id, nodeId: current.nodeId, nodeName: node.name, ownerId: current.ownerId, ownerName: instanceOwner?.username ?? null, name: current.name, role, panelUrl, optimize: hasCommand ? optimize : current.optimize, status, hasCredential: Boolean(credentialCiphertext), lastReportedAt: current.lastReportedAt, syncError, activeTaskId, configRevision: revision, taskStatus: null, taskCreatedAt: null, taskClaimedAt: null, taskLeaseExpiresAt: null }),
     event: { ...updatedEvent, id: updatedEventId, nodeName: node.name },
   }, { headers: { 'Cache-Control': 'no-store' } });
   } finally {
@@ -195,8 +198,8 @@ export async function DELETE(request: Request) {
   const searchParams = new URL(request.url).searchParams;
   const id = searchParams.get('id');
   if (!id) return Response.json({ error: '缺少实例 ID' }, { status: 400 });
-  const [located] = await db.select({ nodeId: nyanpassInstances.nodeId }).from(nyanpassInstances).where(eq(nyanpassInstances.id, id)).limit(1);
-  if (!located || !await canAccessNode(db, user, located.nodeId)) return Response.json({ error: '实例不存在' }, { status: 404 });
+  const located = await modifiableInstanceNode(db, user, id);
+  if (!located) return Response.json({ error: '实例不存在或不是你添加的' }, { status: 404 });
   const operationId = await acquireNodeOperationLock(db, located.nodeId);
   if (operationId === undefined) return Response.json({ error: '所属节点不存在' }, { status: 404 });
   if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试' }, { status: 409 });

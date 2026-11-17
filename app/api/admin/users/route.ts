@@ -1,7 +1,7 @@
 import { asc, count, eq } from 'drizzle-orm';
 import { affectedRows, isDuplicateKeyError } from '@/db';
 import { ensureSchema } from '@/db/init';
-import { aliyunAccounts, domains, nodes, sessions, users } from '@/db/schema';
+import { aliyunAccounts, domains, nodeDnsRecords, nodes, nyanpassInstances, sessions, users } from '@/db/schema';
 import { requireApiUser } from '@/lib/auth';
 import { hashPassword, validPassword, validUsername } from '@/lib/passwords';
 
@@ -60,7 +60,7 @@ export async function DELETE(request: Request) {
   const id = new URL(request.url).searchParams.get('id') ?? '';
   const [target] = await auth.db.select({ role: users.role }).from(users).where(eq(users.id, id)).limit(1);
   if (!target || target.role !== 'user') return Response.json({ error: '用户不存在' }, { status: 404 });
-  for (const [table, label] of [[nodes, '节点'], [domains, '主域名'], [aliyunAccounts, '阿里云账号']] as const) {
+  for (const [table, label] of [[nodes, '节点'], [domains, '主域名'], [aliyunAccounts, '阿里云账号'], [nyanpassInstances, 'Nyanpass 实例'], [nodeDnsRecords, '共享机器上的解析']] as const) {
     const [owned] = await auth.db.select({ total: count() }).from(table).where(eq(table.ownerId, id));
     if (owned.total > 0) return Response.json({ error: `该用户还有 ${owned.total} 个${label}，请先删除后再删除用户` }, { status: 409 });
   }

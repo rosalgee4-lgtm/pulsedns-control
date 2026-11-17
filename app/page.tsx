@@ -5,7 +5,7 @@ import { ensureSchema } from '@/db/init';
 import { nodes, users } from '@/db/schema';
 import { listAccounts } from '@/lib/aliyun-accounts';
 import { basePath, requirePageUser } from '@/lib/auth';
-import { listEvents, listInstances, listNodes } from '@/lib/dashboard-data';
+import { listDnsRecords, listEvents, listInstances, listNodes } from '@/lib/dashboard-data';
 import { listDomains } from '@/lib/domains';
 import { pruneEvents } from '@/lib/event-retention';
 import { expireProvisionAttempts } from '@/lib/provision-lifecycle';
@@ -39,6 +39,7 @@ export default async function Home() {
     initialAliyun={await listAccounts(db, user)}
     initialEvents={await listEvents(db, user)}
     initialNyanpass={await listInstances(db, user)}
+    initialDnsRecords={await listDnsRecords(db, user)}
     initialAdmin={admin}
   />;
 }

@@ -24,7 +24,7 @@ test('each enabled DNS record has at most one owning node', async () => {
 });
 
 test('a node runs at most one agent task at a time, and tasks follow node deletion', async () => {
-  await q("INSERT INTO nyanpass_instances (id, node_id, name, panel_url, created_at, updated_at) VALUES ('inst-1', 'owner-f', 'awsin', 'https://ny', ?, ?), ('inst-2', 'owner-f', 'awsout', 'https://ny', ?, ?)", [now, now, now, now]);
+  await q("INSERT INTO nyanpass_instances (id, node_id, owner_id, name, panel_url, created_at, updated_at) VALUES ('inst-1', 'owner-f', ?, 'awsin', 'https://ny', ?, ?), ('inst-2', 'owner-f', ?, 'awsout', 'https://ny', ?, ?)", [adminId, now, now, adminId, now, now]);
   const task = (id, instance, status) => q('INSERT INTO agent_tasks (id, node_id, instance_id, revision, status, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?)', [id, 'owner-f', instance, status, now, now]);
   await task('task-1', 'inst-1', 'running');
   await assert.rejects(task('task-2', 'inst-2', 'running'), /idx_agent_tasks_one_running_per_node/);
