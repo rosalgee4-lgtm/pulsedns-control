@@ -81,7 +81,9 @@ test('bootstrap completion is authenticated, durable, and gates remote tasks', (
   assert.match(provisionRoute, /provisionAttemptId/);
   assert.match(provisionRoute, /provisionLeaseExpiresAt/);
   assert.match(provisionRoute, /bootstrapGeneration/);
-  assert.match(provisionRoute, /eq\(nyanpassInstances\.configRevision, 0\)/);
+  // 换机重装覆盖重装列表中的全部实例（bootstrapGeneration 标记），包括后来同步成功的实例。
+  assert.doesNotMatch(provisionRoute, /eq\(nyanpassInstances\.configRevision, 0\)/);
+  assert.match(provisionRoute, /eq\(nyanpassInstances\.bootstrapGeneration, (numericGeneration|generation)\)/);
   assert.match(provisionRoute, /isNull\(nyanpassInstances\.activeTaskId\)/);
   assert.match(taskRoute, /isBootstrapLocked\(provisionState\.status\)/);
   assert.match(provisionRoute, /nyanpass_bootstrap_succeeded/);

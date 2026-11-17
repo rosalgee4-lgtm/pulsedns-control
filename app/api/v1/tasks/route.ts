@@ -5,6 +5,7 @@ import { agentTasks, events, nodes, nyanpassInstances } from '@/db/schema';
 import { expireAgentTasks } from '@/lib/agent-task-lifecycle';
 import { decryptNyanpassCredential } from '@/lib/nyanpass-credential';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
+import { reinstallArgs, upsertReinstallInstance } from '@/lib/reinstall-plan';
 import { trustedNyanpassRelease } from '@/lib/nyanpass-release';
 import { bearerToken, newAgentToken, sha256 } from '@/lib/security';
 import { cleanText } from '@/lib/validation';
@@ -202,6 +203,9 @@ export async function POST(request: Request) {
   const [instance] = await db.select({
     id: nyanpassInstances.id,
     name: nyanpassInstances.name,
+    role: nyanpassInstances.role,
+    panelUrl: nyanpassInstances.panelUrl,
+    credentialCiphertext: nyanpassInstances.credentialCiphertext,
     activeTaskId: nyanpassInstances.activeTaskId,
     configRevision: nyanpassInstances.configRevision,
   }).from(nyanpassInstances).where(eq(nyanpassInstances.id, task.instanceId)).limit(1);
@@ -292,6 +296,18 @@ export async function POST(request: Request) {
     return errorResponse('任务状态已经变化', 409);
   }
 
+  // 安装成功的实例写入节点的换机重装计划，Spot 替换后的新机器会一起安装。
+  let reinstallNote = '';
+  if (instanceMatches && normalizedOutcome === 'succeeded' && instance?.credentialCiphertext) {
+    try {
+      const clientToken = await decryptNyanpassCredential(instance.credentialCiphertext, { nodeId: node.id, instanceId: task.instanceId, revision: task.revision });
+      const added = await upsertReinstallInstance(db, node.id, task.instanceId, instance.name, reinstallArgs(instance.role, clientToken, instance.panelUrl));
+      reinstallNote = added ? '；已加入换机重装列表' : '';
+    } catch {
+      reinstallNote = '；未能加入换机重装列表，请检查主控加密密钥';
+    }
+  }
+
   const late = task.status === 'uncertain' || Boolean(task.leaseExpiresAt && task.leaseExpiresAt <= now);
   const eventKind = normalizedOutcome === 'succeeded'
     ? 'nyanpass_sync_succeeded'
@@ -303,7 +319,7 @@ export async function POST(request: Request) {
     nodeId: node.id,
     level: eventLevel,
     kind: eventKind,
-    message: `${targetLabel}${late ? '的晚到回执' : ''}：${resultLabel}${instanceMatches ? '' : '；当前配置未被覆盖'}`,
+    message: `${targetLabel}${late ? '的晚到回执' : ''}：${resultLabel}${instanceMatches ? '' : '；当前配置未被覆盖'}${reinstallNote}`,
     createdAt: now,
   });
   return okResponse();

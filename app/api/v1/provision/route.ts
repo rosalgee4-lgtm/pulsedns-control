@@ -88,11 +88,11 @@ export async function POST(request: Request) {
         }),
       ]);
       if (transitioned.length) {
-        // 重新安装首次预配的实例：恢复为 bootstrap，由本次最终回执决定结果。
+        // 重新安装换机重装列表中的全部实例（创建时预配的 + 后来同步成功的）：
+        // 恢复为 bootstrap，由本次最终回执决定结果。
         await db.update(nyanpassInstances).set({ status: 'bootstrap', syncError: null, updatedAt: now }).where(and(
           eq(nyanpassInstances.nodeId, node.id),
           eq(nyanpassInstances.bootstrapGeneration, numericGeneration),
-          eq(nyanpassInstances.configRevision, 0),
           isNull(nyanpassInstances.activeTaskId),
           inArray(nyanpassInstances.status, ['success', 'uncertain']),
         ));
@@ -149,7 +149,6 @@ async function finishProvision(
     ? db.update(nyanpassInstances).set({ status: 'success', syncError: null, lastReportedAt: now, updatedAt: now }).where(and(
       eq(nyanpassInstances.nodeId, node.id),
       eq(nyanpassInstances.bootstrapGeneration, generation),
-      eq(nyanpassInstances.configRevision, 0),
       isNull(nyanpassInstances.activeTaskId),
       inArray(nyanpassInstances.status, ['bootstrap', 'uncertain']),
     ))
@@ -160,7 +159,6 @@ async function finishProvision(
     }).where(and(
       eq(nyanpassInstances.nodeId, node.id),
       eq(nyanpassInstances.bootstrapGeneration, generation),
-      eq(nyanpassInstances.configRevision, 0),
       isNull(nyanpassInstances.activeTaskId),
       inArray(nyanpassInstances.status, ['bootstrap', 'uncertain']),
     ));

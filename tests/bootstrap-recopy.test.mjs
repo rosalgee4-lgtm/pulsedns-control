@@ -22,7 +22,7 @@ process.env.PULSEDNS_TEST_ADMIN = '1';
 const { POST } = await import('../app/api/admin/nodes/route.ts');
 const { GET } = await import('../app/api/v1/bootstrap/[nodeId]/[token]/route.ts');
 const { POST: provision } = await import('../app/api/v1/provision/route.ts');
-const { POST: addInstance } = await import('../app/api/admin/nyanpass/route.ts');
+const { POST: addInstance, DELETE: removeInstance } = await import('../app/api/admin/nyanpass/route.ts');
 const { POST: queue, DELETE: cancel } = await import('../app/api/admin/nyanpass/sync/route.ts');
 const { GET: poll, POST: acknowledge } = await import('../app/api/v1/tasks/route.ts');
 const { getLocalSqlite } = await import('../db/index.ts');
@@ -225,6 +225,57 @@ test('spot replacement: a new machine reinstalls a ready node with the same user
   assert.equal(after.nyanpass_status, 'ready');
   assert.equal(after.token_hash, before.token_hash);
   assert.equal(after.bootstrap_download_token_hash, before.bootstrap_download_token_hash);
+});
+
+test('instances added later are reinstalled after a spot replacement, and removed ones are not', async () => {
+  const { node, installUrl } = await createNode();
+  const sqlite = await getLocalSqlite();
+  const payloadOf = async () => decryptBootstrapPayload((await stored(node.id)).bootstrap_payload_ciphertext, { nodeId: node.id, generation: 1 });
+  const agentToken = (await payloadOf()).agentToken;
+  const agentRequest = (url, body) => new Request(url, {
+    method: body ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json', 'X-Secret-Token': agentToken, 'X-Agent-Version': '0.8.3' },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  async function send(phase, attemptId, outcome) {
+    const response = await provision(agentRequest('https://master.example.test/api/v1/provision', { protocol: 1, phase, generation: 1, attemptId, ...(outcome ? { outcome } : {}) }));
+    return (await response.json()).disposition;
+  }
+  const machineA = 'aaaaaaaa-5555-4ccc-8ddd-eeeeeeeeeeee';
+  const machineB = 'bbbbbbbb-6666-4ddd-8eee-ffffffffffff';
+  assert.equal(await send('start', machineA), 'accepted');
+  assert.equal(await send('finish', machineA, 'succeeded'), 'accepted');
+  sqlite.prepare('UPDATE nodes SET agent_version = ?, last_task_poll_at = ? WHERE id = ?').run('0.8.3', Date.now(), node.id);
+
+  // 节点运行中追加一个入口实例并同步成功。
+  const saved = await addInstance(request({ nodeId: node.id, name: 'awsin2',
+    command: 'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "-t 2f3b9c5c-271d-455e-b0a3-bb01e60c2163 -u https://ny.example.test"' }));
+  assert.equal(saved.status, 201, await saved.clone().text());
+  const { instance } = await saved.json();
+  assert.equal((await queue(request({ id: instance.id }))).status, 200);
+  const job = (await (await poll(agentRequest('https://master.example.test/api/v1/tasks'))).json()).job;
+  assert.equal((await acknowledge(agentRequest('https://master.example.test/api/v1/tasks', { jobId: job.id, leaseToken: job.leaseToken, outcome: 'succeeded' }))).status, 200);
+
+  const planned = await payloadOf();
+  assert.deepEqual(planned.instances.map((item) => [item.name, item.args]), [
+    ['test-out', '-o -t abcdefgh-1234 -u https://ny.example.test'],
+    ['awsin2', '-t 2f3b9c5c-271d-455e-b0a3-bb01e60c2163 -u https://ny.example.test'],
+  ]);
+  const row = sqlite.prepare('SELECT status, bootstrap_generation AS generation, credential_ciphertext AS credential FROM nyanpass_instances WHERE id = ?').get(instance.id);
+  assert.deepEqual([row.status, row.generation, row.credential], ['success', 1, null]);
+  const config = await (await download(installUrl)).text();
+  assert.ok(config.includes('\0awsin2\0'), 'new machines download the added instance');
+  assert.ok(config.includes('\0-t 2f3b9c5c-271d-455e-b0a3-bb01e60c2163 -u https://ny.example.test\0'));
+
+  // Spot 替换：新机器重新安装时，后加的实例也进入安装中并随最终回执完成。
+  assert.equal(await send('start', machineB), 'accepted');
+  const statuses = () => Object.fromEntries(sqlite.prepare('SELECT name, status FROM nyanpass_instances WHERE node_id = ?').all(node.id).map((item) => [item.name, item.status]));
+  assert.deepEqual(statuses(), { 'test-out': 'bootstrap', awsin2: 'bootstrap' });
+  assert.equal(await send('finish', machineB, 'succeeded'), 'accepted');
+  assert.deepEqual(statuses(), { 'test-out': 'success', awsin2: 'success' });
+
+  // 移除登记后，后续换机不再安装它。
+  assert.equal((await removeInstance(new Request(`https://master.example.test/api/admin/nyanpass?id=${instance.id}`, { method: 'DELETE' }))).status, 200);
+  assert.deepEqual((await payloadOf()).instances.map((item) => item.name), ['test-out']);
 });
 
 test('node and instance creation reject service names that could replace managed or system units', async () => {

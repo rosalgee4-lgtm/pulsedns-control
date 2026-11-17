@@ -8,6 +8,7 @@ import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-o
 import { nodeResponse } from '@/lib/node-response';
 import { parseOfficialNyanpassCommand, validNyanpassServiceName } from '@/lib/nyanpass-command';
 import { encryptNyanpassCredential } from '@/lib/nyanpass-credential';
+import { removeReinstallInstance } from '@/lib/reinstall-plan';
 import { expireProvisionAttempts, isBootstrapLocked } from '@/lib/provision-lifecycle';
 import { cleanText } from '@/lib/validation';
 import { pruneEvents } from '@/lib/event-retention';
@@ -234,7 +235,7 @@ export async function DELETE(request: Request) {
   if (operationId === undefined) return Response.json({ error: '所属节点不存在' }, { status: 404 });
   if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试' }, { status: 409 });
   try {
-  const [current] = await db.select({ nodeId: nyanpassInstances.nodeId, status: nyanpassInstances.status, configRevision: nyanpassInstances.configRevision, activeTaskId: nyanpassInstances.activeTaskId }).from(nyanpassInstances).where(eq(nyanpassInstances.id, id)).limit(1);
+  const [current] = await db.select({ nodeId: nyanpassInstances.nodeId, name: nyanpassInstances.name, status: nyanpassInstances.status, configRevision: nyanpassInstances.configRevision, activeTaskId: nyanpassInstances.activeTaskId }).from(nyanpassInstances).where(eq(nyanpassInstances.id, id)).limit(1);
   if (!current) return Response.json({ error: '实例不存在' }, { status: 404 });
   await expireProvisionAttempts(db, new Date(), current.nodeId);
   const [node] = await db.select({ nyanpassStatus: nodes.nyanpassStatus }).from(nodes).where(eq(nodes.id, current.nodeId)).limit(1);
@@ -251,6 +252,8 @@ export async function DELETE(request: Request) {
     activeTaskCondition,
   )).returning({ id: nyanpassInstances.id });
   if (!deleted.length) return Response.json({ error: '实例状态同时发生了变化，请刷新后重试' }, { status: 409 });
+  // 移除登记后，Spot 换机重装的新机器不再安装这个实例（不会卸载当前机器上的服务）。
+  await removeReinstallInstance(db, current.nodeId, current.name).catch(() => false);
   return Response.json({ status: 'ok' });
   } finally {
     await releaseNodeOperationLock(db, located.nodeId, operationId);
