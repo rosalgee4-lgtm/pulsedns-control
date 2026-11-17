@@ -199,6 +199,38 @@ proxy_set_header X-Forwarded-Proto $scheme;
 
 宝塔默认的配置通常缺少 `X-Forwarded-Proto`。缺少这一行时面板会认为访问不是 HTTPS，并拒绝登录。防爆破以 `X-Forwarded-For` 最后一跳（由宝塔追加）识别来源 IP，客户端无法伪造。
 
+### 5.1 （可选）套 Cloudflare 零信任
+
+可以在面板前面再加一层 Cloudflare Zero Trust（Access）登录，但要对探针接口放行，否则节点装不上、也无法上报。安装脚本本身从 GitHub 下载，不经过面板；节点只回连面板的 `/<随机入口路径>/api/v1/` 下 `bootstrap`、`provision`、`tasks`、`report` 四个接口。
+
+1. 域名在 Cloudflare 开启代理（橙色云朵），「SSL/TLS」模式选 **Full (strict)**。不要用 Flexible：它用 HTTP 回源，面板会认为访问不是 HTTPS 并拒绝登录。
+2. Zero Trust →「Access」→「Applications」→ 添加两个 Self-hosted 应用：
+
+| 应用 | 域名 | 路径 | 策略 |
+| --- | --- | --- | --- |
+| 面板 | `panel.example.com` | 留空 | Allow，按你的登录方式填写，例如指定邮箱 |
+| 探针接口 | `panel.example.com` | `<随机入口路径>/api/v1`，例如 `0123456789abcdef0123456789abcdef/api/v1` | Action 选 **Bypass**，Include 选 **Everyone** |
+
+   路径更具体的应用优先生效，所以这段路径（含子路径）直接放行，其余页面仍需先通过零信任。放行是安全的：这些接口本身就要求节点令牌，没有令牌会被拒绝。
+
+3. 在宝塔站点「配置文件」的 `server` 中还原访客真实 IP。否则面板看到的来源都是 Cloudflare 节点，防爆破会把很多访客算成同一来源，可能一起被锁定 15 分钟。`set_real_ip_from` 要写上 <https://www.cloudflare.com/ips/> 公布的全部 IPv4、IPv6 段，下面只列出前两段作示例：
+
+```nginx
+set_real_ip_from 173.245.48.0/20;
+set_real_ip_from 103.21.244.0/22;
+real_ip_header CF-Connecting-IP;
+```
+
+   第 5 步的四行 `proxy_set_header` 不需要改。Cloudflare 的 IP 段偶尔会更新，届时同步修改。
+
+4. 验证：用无痕窗口打开面板，应先跳转到 Cloudflare 登录页；在任意节点执行下面的命令，返回 `401`（面板提示「无效的探针凭据」）说明放行生效，若返回 Cloudflare 登录页的 HTML 则说明 Bypass 没有生效。
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://panel.example.com/<随机入口路径>/api/v1/report
+```
+
+如果改用 Cloudflare Tunnel（cloudflared）代替宝塔反代，Access 的两个应用照样配置；真实 IP 的还原方式不同，不适用第 3 步。
+
 ### 6. 首次登录
 
 打开 `https://panel.example.com/<随机入口路径>/`，例如 `https://panel.example.com/0123456789abcdef0123456789abcdef/`。直接访问域名根路径会返回 404，这是正常的。
@@ -243,6 +275,8 @@ cd pulsedns-control && docker compose up -d --build
 | 日志里 `ECONNREFUSED` 或 `Access denied for user` | 数据库地址或用户来源不对：同一台服务器要用 `host.docker.internal`，并确认用户是 `'pulsedns'@'172.%'` |
 | 日志里提示缺少 `PULSEDNS_TASK_ENCRYPTION_KEY` 或管理员 | `.env` 没填全，补上后执行 `docker compose up -d` |
 | 打开域名显示 404 | 需要带上随机入口路径访问；路径必须与构建时 `.env` 中的 `PULSEDNS_BASE_PATH` 一致，修改路径后要重新 `docker compose up -d --build` |
+| 套 Cloudflare 后提示「请通过 HTTPS 访问面板后再登录」 | Cloudflare「SSL/TLS」模式是 Flexible，改成 Full (strict) |
+| 套零信任后节点一直等待安装或不上报 | 探针接口没有放行，按第 5.1 步为 `<随机入口路径>/api/v1` 添加 Bypass 应用 |
 | 登录提示「登录失败次数过多」 | 防爆破锁定，等 15 分钟；或在数据库执行 `DELETE FROM login_attempts;` 立即解除 |
 | 忘记管理员密码 | 见下方命令 |
 
