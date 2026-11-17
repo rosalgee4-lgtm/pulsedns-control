@@ -30,8 +30,16 @@ export const PROBE_INSTALLER_SHA256 = 'c39616fbeec961dfa259bfc5503faa3f4b8025a0d
 export const MAX_CLOUD_LAUNCHER_BYTES = 15 * 1024;
 export const MAX_BOOTSTRAP_RESPONSE_BYTES = 64 * 1024;
 
-export function buildNodeConnectCommand(installUrl: string, bbrProfile: BbrProfile) {
-  return buildVerifiedInstallerCommand(`probe ${shellArg(installUrl)} ${shellArg(bbrProfile)}`);
+// 一键安装命令：下载固定 commit 的公共安装器到 /root/<节点名>_<BBR 配置>_install.sh，
+// 校验 SHA-256 通过后才 chmod 并执行；文件保留在 /root，之后可以手动再次运行。
+export function nodeInstallerPath(nodeName: string, bbrProfile: BbrProfile) {
+  const safeName = nodeName.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64) || 'node';
+  return `/root/${safeName}_${bbrProfile}_install.sh`;
+}
+
+export function buildNodeConnectCommand(installUrl: string, bbrProfile: BbrProfile, nodeName: string) {
+  const path = nodeInstallerPath(nodeName, bbrProfile);
+  return `wget -O ${shellArg(path)} ${shellArg(PROBE_INSTALLER_URL)} && echo ${shellArg(`${PROBE_INSTALLER_SHA256}  ${path}`)} | sha256sum -c - && chmod +x ${shellArg(path)} && bash ${shellArg(path)} probe ${shellArg(installUrl)} ${shellArg(bbrProfile)}`;
 }
 
 export function buildAgentUpgradeCommand() {

@@ -269,12 +269,12 @@ DELETE FROM sessions;
 在 Web 控制台创建节点后，页面提供两种安装方式；关闭窗口或刷新页面后，可以在节点列表点击“安装命令”再次复制，无需删除重建节点：
 
 1. **开机脚本 · User data**：默认选中，复制完整 POSIX `/bin/sh` 启动脚本到云服务器的 User data。
-2. **下载并运行 · 一键命令**：复制一整行到目标 VPS 的 root Bash，自动下载固定版本公共脚本、校验 SHA-256，然后运行 `probe 节点参数`，不是单独的下载地址。
+2. **下载并运行 · 一键命令**：复制一整行到目标 VPS 的 root Bash，用 `wget` 把固定版本公共脚本下载到 `/root/<节点名>_<BBR 配置>_install.sh`（节点名中字母、数字、`-_.` 以外的字符替换为 `_`），校验 SHA-256 通过后才 `chmod +x` 并运行 `probe 节点参数`；校验失败不会执行。脚本文件保留在 `/root`，之后可以手动再运行一次。目标机需要 `wget` 与 `sha256sum`。
 
 界面生成的命令包含真实节点参数和当前发布摘要；下面只演示结构，不要直接执行占位符：
 
 ```bash
-( set -eu; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT; curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 -fLSs 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/661ef2da011e57ccf6d91518738a7fb07cfd8853/public/install.sh' -o "$tmp"; printf '%s  %s\n' 'c39616fbeec961dfa259bfc5503faa3f4b8025a0d94d0d3d0127ec2c0d63a87d' "$tmp" | sha256sum -c -; bash "$tmp" probe '<节点参数>' 'c6in' )
+wget -O '/root/aws-jp_c6in_install.sh' 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/661ef2da011e57ccf6d91518738a7fb07cfd8853/public/install.sh' && echo 'c39616fbeec961dfa259bfc5503faa3f4b8025a0d94d0d3d0127ec2c0d63a87d  /root/aws-jp_c6in_install.sh' | sha256sum -c - && chmod +x '/root/aws-jp_c6in_install.sh' && bash '/root/aws-jp_c6in_install.sh' probe '<节点参数>' 'c6in'
 ```
 
 公共安装器会把接口返回的配置数据校验后以 `0600` 缓存为 `/root/pulsedns_<节点ID>_bootstrap.config`，并把通过 SHA-256 校验的同一固定安装器以 `0700` 缓存为 `/root/pulsedns_<节点ID>_installer.sh`；接口不会生成或返回另一份 Shell 脚本。开机启动器显式设置 `PATH`，首次执行即把自身原子复制到 `/var/lib/cloud/scripts/per-boot/`，并使用独立的 `_entrypoint.sh` 缓存，避免与安装器缓存互相覆盖。如果本次开机未完成，下次开机会再次调用；当前代次完成并成功恢复 `ddns-monitor` 后，敏感缓存与 per-boot 副本会被删除，仅清理包含本节点参数的 cloud-init 本地 user-data，不清理无关启动内容。

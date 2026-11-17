@@ -97,7 +97,7 @@ export async function POST(request: Request) {
   }
   const [tokenHash, bootstrapDownloadTokenHash] = await Promise.all([sha256(token), sha256(downloadToken)]);
   const installUrl = `${origin}/api/v1/bootstrap/${id}/${downloadToken}`;
-  const connectCommand = buildNodeConnectCommand(installUrl, bbrProfile);
+  const connectCommand = buildNodeConnectCommand(installUrl, bbrProfile, name);
   const startupScript = buildNodeStartupLauncher(id, installUrl, provisionGeneration, bbrProfile);
   if (new TextEncoder().encode(startupScript).byteLength > MAX_CLOUD_LAUNCHER_BYTES) {
     return Response.json({ error: '开机启动器超过 AWS user-data 的 15 KiB 安全上限' }, { status: 500 });
@@ -168,7 +168,7 @@ async function installationCommands(request: Request, db: AppDb, user: CurrentUs
     }
     return Response.json({
       node: { id, name: node.name, region: node.region },
-      installUrl, connectCommand: buildNodeConnectCommand(installUrl, bbrProfile), startupScript,
+      installUrl, connectCommand: buildNodeConnectCommand(installUrl, bbrProfile, node.name), startupScript,
       expiresAt: null,
     }, { headers });
   } catch {

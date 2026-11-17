@@ -50,13 +50,13 @@ test('BBR profile is chosen per node, defaults to c6in, and OPTIMIZE is always o
   assert.equal((await createNode({ name: 'bad-bbr', recordV4: '', bbrProfile: 'c7' })).status, 400);
 
   const defaulted = await (await createNode({ name: 'default-bbr', recordV4: '' })).json();
-  assert.match(defaulted.connectCommand, /probe '[^']+' 'c6in' \)$/);
+  assert.match(defaulted.connectCommand, /^wget -O '\/root\/default-bbr_c6in_install\.sh' .* probe '[^']+' 'c6in'$/);
   assert.match(defaulted.startupScript, /^bbr_profile='c6in'$/m);
 
   const response = await createNode({ name: 'c5in-node', recordV4: '', bbrProfile: 'c5in' });
   assert.equal(response.status, 201);
   const c5in = await response.json();
-  assert.match(c5in.connectCommand, /probe '[^']+' 'c5in' \)$/);
+  assert.match(c5in.connectCommand, /^wget -O '\/root\/c5in-node_c5in_install\.sh' .* probe '[^']+' 'c5in'$/);
   assert.match(c5in.startupScript, /^bbr_profile='c5in'$/m);
   assert.ok(c5in.instances.every((instance) => instance.optimize === false));
 

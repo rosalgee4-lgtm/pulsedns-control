@@ -39,7 +39,7 @@ test('node creation returns both a download-run command and a boot-resilient lau
   assert.match(post, /const installUrl = `\$\{origin\}\/api\/v1\/bootstrap\/\$\{id\}\/\$\{downloadToken\}`/);
   assert.match(post, /const bootstrapConfig = buildNodeBootstrapConfig\(\{/);
   assert.match(post, /TextEncoder\(\)\.encode\(bootstrapConfig\)\.byteLength > MAX_BOOTSTRAP_RESPONSE_BYTES/);
-  assert.match(post, /const connectCommand = buildNodeConnectCommand\(installUrl, bbrProfile\)/);
+  assert.match(post, /const connectCommand = buildNodeConnectCommand\(installUrl, bbrProfile, name\)/);
   assert.match(post, /const startupScript = buildNodeStartupLauncher\(id, installUrl, provisionGeneration, bbrProfile\)/);
   assert.match(post, /if \(!isBbrProfile\(bbrProfile\)\)/);
   assert.match(post, /encryptBootstrapPayload\([\s\S]*bbrProfile,[\s\S]*instances/);

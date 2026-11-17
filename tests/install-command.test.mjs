@@ -9,6 +9,7 @@ import {
   buildNodeBootstrapConfig,
   buildNodeConnectCommand,
   buildAgentUpgradeCommand,
+  nodeInstallerPath,
   PROBE_INSTALLER_SHA256,
   PROBE_INSTALLER_URL,
   shellArg,
@@ -44,27 +45,70 @@ function buildConfig(overrides = {}) {
   });
 }
 
-test('one-click command downloads a pinned script, checks it, then executes with the node parameter', () => {
+test('one-click command saves the pinned script to /root, checks it, then executes with the node parameter', () => {
   const installUrl = `${origin}/api/v1/bootstrap/${nodeId}/pbs_${'a'.repeat(64)}`;
-  const connectCommand = buildNodeConnectCommand(installUrl, 'c5in');
-  assert.ok(connectCommand.includes(`probe '${installUrl}' 'c5in'`));
-  assert.ok(connectCommand.includes(PROBE_INSTALLER_URL));
-  assert.ok(connectCommand.includes(PROBE_INSTALLER_SHA256));
-  assert.match(connectCommand, /set -eu; tmp="\$\(mktemp\)"/);
-  assert.match(connectCommand, /curl[^;]+-o "\$tmp";[\s\S]*sha256sum -c -; bash "\$tmp" probe/);
-  assert.ok(connectCommand.includes(`probe '${installUrl}'`));
-  assert.doesNotMatch(connectCommand, /bash <\(/);
+  const connectCommand = buildNodeConnectCommand(installUrl, 'c5in', 'aws-jp');
+  assert.equal(connectCommand, `wget -O '/root/aws-jp_c5in_install.sh' '${PROBE_INSTALLER_URL}' && echo '${PROBE_INSTALLER_SHA256}  /root/aws-jp_c5in_install.sh' | sha256sum -c - && chmod +x '/root/aws-jp_c5in_install.sh' && bash '/root/aws-jp_c5in_install.sh' probe '${installUrl}' 'c5in'`);
   assert.equal(connectCommand.includes('\n'), false);
   assert.doesNotMatch(connectCommand, /rootPassword|nyanpass|--server|--token/);
   const result = spawnSync(process.env.BASH_EXE || 'bash', ['-n'], { input: connectCommand, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
 });
 
-test('download-and-run commands fail visibly and never execute an unverified download', () => {
+test('installer file name uses the node name and BBR profile with unsafe characters replaced', () => {
+  assert.equal(nodeInstallerPath('awsmy1', 'c6in'), '/root/awsmy1_c6in_install.sh');
+  assert.equal(nodeInstallerPath("a b/c'$(x)", 'c5in'), '/root/a_b_c___x__c5in_install.sh');
+  assert.equal(nodeInstallerPath('东京节点', 'c6in'), '/root/_____c6in_install.sh');
+  assert.equal(nodeInstallerPath('', 'c6in'), '/root/node_c6in_install.sh');
+  assert.equal(nodeInstallerPath('x'.repeat(100), 'c6in'), `/root/${'x'.repeat(64)}_c6in_install.sh`);
+  const command = buildNodeConnectCommand('https://panel.example.test/p', 'c6in', "a'b; rm -rf /");
+  assert.ok(command.startsWith("wget -O '/root/a_b__rm_-rf___c6in_install.sh' "));
+});
+
+test('one-click command fails visibly and never executes an unverified download', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulsedns-command-'));
+  const calls = join(root, 'calls');
+  const nodeParameter = "https://panel.example.test/node/a'b";
+  const command = buildNodeConnectCommand(nodeParameter, 'c6in', 'aws-jp');
+  try {
+    writeFileSync(join(root, 'wget'), `#!/bin/sh
+if [ "$SCENARIO" = wget-failure ]; then echo download-failed >&2; exit 8; fi
+printf 'wget %s\\n' "$@" >> "$MOCK_CALLS"
+`, { mode: 0o700 });
+    writeFileSync(join(root, 'sha256sum'), `#!/bin/sh
+printf 'sha256sum %s\\n' "$(cat)" >> "$MOCK_CALLS"
+if [ "$SCENARIO" = checksum-failure ]; then echo checksum-FAILED >&2; exit 1; fi
+`, { mode: 0o700 });
+    writeFileSync(join(root, 'chmod'), '#!/bin/sh\nprintf "chmod %s\\n" "$*" >> "$MOCK_CALLS"\n', { mode: 0o700 });
+    writeFileSync(join(root, 'bash'), '#!/bin/sh\nprintf "bash %s\\n" "$@" >> "$MOCK_CALLS"\n', { mode: 0o700 });
+    for (const scenario of ['wget-failure', 'checksum-failure', 'success']) {
+      rmSync(calls, { force: true });
+      const result = spawnSync('/bin/sh', ['-c', command], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${root}:${process.env.PATH}`, MOCK_CALLS: calls, SCENARIO: scenario },
+      });
+      const log = existsSync(calls) ? readFileSync(calls, 'utf8') : '';
+      if (scenario === 'success') {
+        assert.equal(result.status, 0, result.stderr);
+        assert.match(log, /^wget -O\nwget \/root\/aws-jp_c6in_install\.sh\nwget https:\/\/raw\.githubusercontent\.com\//);
+        assert.ok(log.includes(`sha256sum ${PROBE_INSTALLER_SHA256}  /root/aws-jp_c6in_install.sh\n`));
+        assert.ok(log.includes('chmod +x /root/aws-jp_c6in_install.sh\n'));
+        assert.ok(log.endsWith(`bash /root/aws-jp_c6in_install.sh\nbash probe\nbash ${nodeParameter}\nbash c6in\n`));
+      } else {
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /download-failed|checksum-FAILED/);
+        assert.doesNotMatch(log, /^(chmod|bash) /m, 'unverified script must never be made executable or run');
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('agent upgrade command still verifies a temporary download before running it', () => {
   const root = mkdtempSync(join(tmpdir(), 'pulsedns-command-'));
   const downloadPath = join(root, 'download.sh');
   const calls = join(root, 'calls');
-  const nodeParameter = "https://panel.example.test/node/a'b";
   try {
     writeFileSync(join(root, 'mktemp'), '#!/bin/sh\nprintf "%s\\n" "$MOCK_DOWNLOAD"\n', { mode: 0o700 });
     writeFileSync(join(root, 'curl'), `#!/bin/sh
@@ -76,25 +120,20 @@ cat >/dev/null
 if [ "$SCENARIO" = checksum-failure ]; then echo checksum-FAILED >&2; exit 1; fi
 `, { mode: 0o700 });
     writeFileSync(join(root, 'bash'), '#!/bin/sh\nprintf "%s\\n" "$@" > "$MOCK_CALLS"\n', { mode: 0o700 });
-    for (const [command, args] of [
-      [buildNodeConnectCommand(nodeParameter, 'c6in'), ['probe', nodeParameter, 'c6in']],
-      [buildAgentUpgradeCommand(), ['agent-upgrade']],
-    ]) {
-      for (const scenario of ['curl-failure', 'checksum-failure', 'success']) {
-        rmSync(calls, { force: true });
-        const result = spawnSync(process.env.BASH_EXE || '/bin/bash', ['-c', command], {
-          encoding: 'utf8',
-          env: { ...process.env, PATH: `${root}:${process.env.PATH}`, MOCK_DOWNLOAD: downloadPath, MOCK_CALLS: calls, SCENARIO: scenario },
-        });
-        assert.equal(existsSync(downloadPath), false, 'temporary download must be removed');
-        if (scenario === 'success') {
-          assert.equal(result.status, 0, result.stderr);
-          assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'), [downloadPath, ...args]);
-        } else {
-          assert.notEqual(result.status, 0);
-          assert.match(result.stderr, /download-failed|checksum-FAILED/);
-          assert.equal(existsSync(calls), false, 'unverified script must never execute');
-        }
+    for (const scenario of ['curl-failure', 'checksum-failure', 'success']) {
+      rmSync(calls, { force: true });
+      const result = spawnSync(process.env.BASH_EXE || '/bin/bash', ['-c', buildAgentUpgradeCommand()], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${root}:${process.env.PATH}`, MOCK_DOWNLOAD: downloadPath, MOCK_CALLS: calls, SCENARIO: scenario },
+      });
+      assert.equal(existsSync(downloadPath), false, 'temporary download must be removed');
+      if (scenario === 'success') {
+        assert.equal(result.status, 0, result.stderr);
+        assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'), [downloadPath, 'agent-upgrade']);
+      } else {
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /download-failed|checksum-FAILED/);
+        assert.equal(existsSync(calls), false, 'unverified script must never execute');
       }
     }
   } finally {
