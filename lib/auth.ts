@@ -33,13 +33,14 @@ export function httpAllowed() {
   return process.env.PULSEDNS_ALLOW_HTTP === '1';
 }
 
+// 防爆破用的来源 IP。优先取 X-Forwarded-For 最右侧一跳：它由最近的反向代理
+// （宝塔 $proxy_add_x_forwarded_for）追加，客户端无法伪造；代理没有追加时才用 X-Real-IP。
 export function clientIp(requestHeaders: Headers) {
   if (!trustProxy()) return 'direct';
-  const realIp = requestHeaders.get('x-real-ip')?.trim();
-  if (realIp) return realIp.slice(0, 64);
-  // 取最右侧一跳：由最近的可信代理追加，客户端无法伪造。
   const forwarded = requestHeaders.get('x-forwarded-for')?.split(',').map((part) => part.trim()).filter(Boolean);
-  return forwarded?.length ? forwarded[forwarded.length - 1].slice(0, 64) : 'direct';
+  if (forwarded?.length) return forwarded[forwarded.length - 1].slice(0, 64);
+  const realIp = requestHeaders.get('x-real-ip')?.trim();
+  return realIp ? realIp.slice(0, 64) : 'direct';
 }
 
 export function newSessionToken() {

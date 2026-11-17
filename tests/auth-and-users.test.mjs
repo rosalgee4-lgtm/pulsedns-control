@@ -13,7 +13,8 @@ const nodesRoute = await import('../app/api/admin/nodes/route.ts');
 const nyanpassRoute = await import('../app/api/admin/nyanpass/route.ts');
 
 const url = 'https://panel.test/api/x';
-const attempt = (username, password, ip = '198.51.100.1', extra = {}) => login(api(url, 'POST', { username, password }, null, { 'X-Real-IP': ip, 'X-Forwarded-Proto': 'https', ...extra }));
+// 模拟宝塔反向代理：把真实来源 IP 追加到 X-Forwarded-For 末尾（$proxy_add_x_forwarded_for）。
+const attempt = (username, password, ip = '198.51.100.1', extra = {}, forged = '') => login(api(url, 'POST', { username, password }, null, { 'X-Forwarded-For': forged ? `${forged}, ${ip}` : ip, 'X-Real-IP': forged || ip, 'X-Forwarded-Proto': 'https', ...extra }));
 const setMultiUser = (enabled) => settingsRoute.PATCH(api(url, 'PATCH', { multiUserEnabled: enabled }, adminCookie));
 const ny = (flags) => `bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "${flags}"`;
 const createNode = (cookie, name) => nodesRoute.POST(api(url, 'POST', { name, rootPassword: 'test-password-123', nyanpass: [{ name: 'awsin', command: ny('-t aaaaaaaa-1111 -u https://ny.example.test') }] }, cookie));
@@ -37,7 +38,7 @@ test('login sets a strict HttpOnly session cookie and requires HTTPS', async () 
 
   delete process.env.PULSEDNS_ALLOW_HTTP;
   try {
-    const plain = await login(api('http://panel.test/api/auth/login', 'POST', { username: ADMIN.username, password: ADMIN.password }, null, { 'X-Real-IP': '198.51.100.9' }));
+    const plain = await login(api('http://panel.test/api/auth/login', 'POST', { username: ADMIN.username, password: ADMIN.password }, null, { 'X-Forwarded-For': '198.51.100.9' }));
     assert.equal(plain.status, 400, 'plain HTTP login is refused');
     assert.match((await plain.json()).error, /HTTPS/);
   } finally {
@@ -56,6 +57,9 @@ test('brute force: 5 failures for the same IP and user lock it for 15 minutes, o
   assert.match((await locked.json()).error, /15 分钟后再试/);
   assert.equal(locked.headers.get('retry-after'), '900');
   assert.equal((await attempt(ADMIN.username, ADMIN.password, '203.0.113.6')).status, 200, 'another IP can still log in');
+
+  // 客户端伪造的 X-Forwarded-For 前段和 X-Real-IP 不能绕过锁定：以代理追加的最后一跳为准。
+  assert.equal((await attempt(ADMIN.username, ADMIN.password, '203.0.113.5', {}, '10.9.8.7')).status, 429);
 
   await database.query("UPDATE login_attempts SET locked_until = ? WHERE scope LIKE 'pair:203.0.113.5|%'", [new Date(Date.now() - 1000)]);
   assert.equal((await attempt(ADMIN.username, ADMIN.password, '203.0.113.5')).status, 200, 'the lock expires');

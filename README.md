@@ -101,61 +101,94 @@ AccessKey ID 与 Secret 用 `PULSEDNS_TASK_ENCRYPTION_KEY` 派生的 AES-GCM 密
 - **HTTPS**：面板容器只提供 HTTP，并且只绑定本机 `127.0.0.1`，由宝塔反向代理对外提供 HTTPS。未经 HTTPS 的登录会被拒绝。
 - **加密存储**：阿里云 AccessKey、root 密码、开机配置和 Nyanpass Token 都用 `PULSEDNS_TASK_ENCRYPTION_KEY` 加密后存入数据库。这个密钥一旦使用就不能更换或丢失，请和数据库备份分开保管。
 
-## 部署 Web 主控面板（Docker + 外置数据库）
+## 部署 Web 主控面板（Docker + 外置数据库 + 宝塔 HTTPS）
 
-面板以 Docker 容器运行，数据保存在你自己的 MySQL 8.0+ 或 MariaDB 10.6+（已在 MySQL 8.4 与 MariaDB 11.4 上测试）。启动时自动建表和升级表结构。
+面板以 Docker 容器运行，数据保存在你自己的 MySQL 8.0+ 或 MariaDB 10.6+（已在 MySQL 8.4、MariaDB 10.11 与 11.4 上测试），启动时自动建表和升级表结构。容器只在本机 `127.0.0.1:3100` 提供 HTTP，对外的 HTTPS 由宝塔反向代理负责。
 
-### 1. 准备数据库
+整体结构：
 
-在数据库服务器上创建独立的库和用户，只授予这个库的权限：
+```text
+浏览器 / 探针 ──HTTPS──> 宝塔 Nginx（证书、强制 HTTPS）──HTTP──> 127.0.0.1:3100 PulseDNS 容器 ──> MySQL / MariaDB
+```
+
+### 0. 准备
+
+- 一台装好宝塔面板的 Linux 服务器（x86_64 或 arm64），至少 2 GB 内存（构建镜像时需要）。
+- 一个解析到这台服务器的域名，例如 `panel.example.com`。
+- Docker 与 Docker Compose：在宝塔「软件商店」安装「Docker 管理器」，或用 Docker 官方安装脚本。执行 `docker compose version` 能看到版本号即可。
+- `git` 与 `openssl`（宝塔服务器一般已自带）。
+- 安全组 / 防火墙只需放行 80 和 443；**不要**放行 3100 和 3306。
+
+### 1. 创建数据库
+
+**数据库和面板在同一台服务器**（例如宝塔安装的 MySQL）：容器通过 `host.docker.internal` 访问宿主机，数据库用户需要允许 Docker 网段登录。在宝塔「数据库」→「root 密码」旁的「管理」(phpMyAdmin) 或命令行执行：
 
 ```sql
 CREATE DATABASE pulsedns CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER 'pulsedns'@'%' IDENTIFIED BY '请替换为强密码';
-GRANT ALL PRIVILEGES ON pulsedns.* TO 'pulsedns'@'%';
+CREATE USER 'pulsedns'@'172.%' IDENTIFIED BY '请替换为强密码';
+GRANT ALL PRIVILEGES ON pulsedns.* TO 'pulsedns'@'172.%';
 ```
 
-如果数据库在另一台服务器上，请只对面板服务器的 IP 开放 3306 端口，并尽量走内网。
+`172.%` 只覆盖 Docker 默认网段，外网仍然连不上；3306 端口不要在防火墙放行。宝塔安装的 MySQL 默认监听所有网卡，容器可以直接连上。如果你改过 `bind-address=127.0.0.1`，需要改回 `0.0.0.0` 并重启 MySQL。
 
-### 2. 获取固定版本的源码并配置
+**数据库在另一台服务器或云数据库**：把上面的 `172.%` 换成面板服务器的 IP，并只对这个 IP 放行 3306，尽量走内网。
+
+### 2. 获取固定版本的源码
 
 ```bash
 git clone https://github.com/rosalgee4-lgtm/pulsedns-control.git
 ```
 
 ```bash
-git -C pulsedns-control checkout --detach 9e93fad3d239f31664e3f11f9bcfa12cd90a2155
+git -C pulsedns-control checkout --detach __PANEL_SOURCE_COMMIT__
 ```
+
+镜像按这个固定 commit 的源码在本机构建，基础镜像按摘要固定，依赖按 `pnpm-lock.yaml` 锁定，不会拉取其他版本的代码。
+
+### 3. 填写配置
 
 ```bash
 cd pulsedns-control && cp .env.example .env && chmod 600 .env
 ```
 
-编辑 `.env`，逐项填写：
+先生成两个随机值，复制备用：
 
-| 变量 | 说明 |
+```bash
+printf 'PULSEDNS_BASE_PATH=/%s\nPULSEDNS_TASK_ENCRYPTION_KEY=%s\n' "$(openssl rand -hex 16)" "$(openssl rand -hex 32)"
+```
+
+然后编辑 `.env`（可以用宝塔「文件」打开），逐项填写：
+
+| 变量 | 填什么 |
 | --- | --- |
-| `PULSEDNS_DATABASE_URL` | `mysql://用户:密码@主机:3306/pulsedns`；密码里的特殊字符要做 URL 编码 |
-| `PULSEDNS_PUBLIC_URL` | 宝塔里绑定的 HTTPS 地址，例如 `https://panel.example.com`，安装命令和开机脚本都用它 |
-| `PULSEDNS_BASE_PATH` | 随机入口路径，用 `printf '/%s\n' "$(openssl rand -hex 16)"` 生成 |
-| `PULSEDNS_TASK_ENCRYPTION_KEY` | 加密密钥，用 `openssl rand -hex 32` 生成，之后不能更换 |
-| `PULSEDNS_INITIAL_ADMIN_USER` / `PULSEDNS_INITIAL_ADMIN_PASSWORD` | 首次启动创建的管理员，密码 12-128 位 |
+| `PULSEDNS_DATABASE_URL` | 同一台服务器：`mysql://pulsedns:数据库密码@host.docker.internal:3306/pulsedns`；另一台服务器把 `host.docker.internal` 换成它的 IP。密码里有 `@ : / ? #` 等字符时要做 URL 编码 |
+| `PULSEDNS_PUBLIC_URL` | `https://panel.example.com`，不要带随机路径。安装命令和开机脚本都用这个地址 |
+| `PULSEDNS_BASE_PATH` | 上一步生成的 `/` + 32 位十六进制 |
+| `PULSEDNS_TASK_ENCRYPTION_KEY` | 上一步生成的 64 位十六进制。**一旦使用就不能更换或丢失**，请另外抄一份保存 |
+| `PULSEDNS_INITIAL_ADMIN_USER` | 管理员用户名，默认 `admin` |
+| `PULSEDNS_INITIAL_ADMIN_PASSWORD` | 管理员初始密码，12-128 位 |
 | `PULSEDNS_PANEL_PORT` | 面板在本机监听的端口，默认 `3100`，只绑定 `127.0.0.1` |
 
-### 3. 启动
+### 4. 构建并启动
 
 ```bash
 docker compose up -d --build
 ```
 
-镜像在本机按上面固定的 commit 构建，基础镜像按摘要固定；容器以非 root 用户、只读根文件系统运行，并去掉全部 Linux capabilities。查看日志：`docker compose logs -f pulsedns`。
+第一次构建需要下载依赖，通常几分钟。之后查看日志，出现 `Production server running` 就是启动成功：
 
-### 4. 在宝塔中开启 HTTPS 反向代理
+```bash
+docker compose logs --tail 30 pulsedns
+```
 
-1. 「网站」→「添加站点」，域名填 `panel.example.com`（需先解析到这台服务器）。
-2. 站点设置 →「SSL」→ 申请 Let's Encrypt 证书，并打开「强制 HTTPS」。
-3. 站点设置 →「反向代理」→ 添加反向代理，目标 URL 填 `http://127.0.0.1:3100`，发送域名填 `$host`。
-4. 编辑反向代理的配置文件，确认包含下面几行（宝塔默认缺少 `X-Forwarded-Proto`，缺少时面板会因为“未经 HTTPS”拒绝登录）：
+容器以非 root 用户、只读根文件系统运行，并去掉了全部 Linux capabilities。数据库表在第一次有人访问面板时自动创建，同时用 `.env` 里的账号创建管理员（数据库只保存密码哈希）。
+
+### 5. 在宝塔中配置 HTTPS 反向代理
+
+1. 「网站」→「添加站点」，域名填 `panel.example.com`，PHP 版本选「纯静态」。
+2. 站点设置 →「SSL」→「Let's Encrypt」申请证书，开启「强制 HTTPS」。
+3. 站点设置 →「反向代理」→「添加反向代理」：目标 URL 填 `http://127.0.0.1:3100`，发送域名填 `$host`。
+4. 点反向代理的「配置文件」，确认 `location` 里有下面四行，缺少就补上，然后保存：
 
 ```nginx
 proxy_set_header Host $host;
@@ -164,11 +197,22 @@ proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 proxy_set_header X-Forwarded-Proto $scheme;
 ```
 
-防爆破按 `X-Real-IP` 识别来源。容器端口只绑定本机，外部无法绕过宝塔直接访问，所以面板信任这些代理头。完成后打开 `https://panel.example.com/<随机入口路径>/` 登录；直接访问域名根路径不能进入面板。
+宝塔默认的配置通常缺少 `X-Forwarded-Proto`。缺少这一行时面板会认为访问不是 HTTPS，并拒绝登录。防爆破以 `X-Forwarded-For` 最后一跳（由宝塔追加）识别来源 IP，客户端无法伪造。
 
-### 5. 升级
+### 6. 首次登录
 
-把 `NEW_COMMIT` 设为最新 README「获取固定版本的源码」一步中的 commit，然后执行：
+打开 `https://panel.example.com/<随机入口路径>/`，例如 `https://panel.example.com/0123456789abcdef0123456789abcdef/`。直接访问域名根路径会返回 404，这是正常的。
+
+用 `.env` 里的管理员账号登录后：
+
+1. 「设置」→「修改密码」改成新密码。之后可以把 `.env` 里的 `PULSEDNS_INITIAL_ADMIN_USER` / `PULSEDNS_INITIAL_ADMIN_PASSWORD` 两行删掉，它们只在数据库里没有任何账号时使用。
+2. 「阿里云主域名」→ 添加阿里云账号（建议用下文「RAM 子账号需要的权限」中的最小权限），再添加主域名。
+3. 「节点」→「添加节点」，把生成的开机脚本写入 AWS 启动模板。
+4. 需要合租时，在「设置 → 管理员设置」打开多用户模式并添加用户。
+
+### 7. 升级
+
+把 `NEW_COMMIT` 设为最新 README 第 2 步中的 commit，然后执行：
 
 ```bash
 git -C pulsedns-control fetch origin
@@ -180,6 +224,39 @@ git -C pulsedns-control checkout --detach "$NEW_COMMIT"
 
 ```bash
 cd pulsedns-control && docker compose up -d --build
+```
+
+升级会自动迁移数据库表结构；`.env`、数据库数据和已写入 AWS 的开机脚本都不受影响。
+
+### 8. 备份
+
+需要备份两样东西，并且分开保管：
+
+- **数据库**：例如每天在宝塔「计划任务」里备份 `pulsedns` 库，或执行 `mysqldump --single-transaction pulsedns > pulsedns.sql`。
+- **`.env` 里的 `PULSEDNS_TASK_ENCRYPTION_KEY`**：没有它，数据库里的阿里云 Key、root 密码和开机配置都无法解密。
+
+### 9. 常见问题
+
+| 现象 | 原因与处理 |
+| --- | --- |
+| 登录提示「请通过 HTTPS 访问面板后再登录」 | 宝塔反代缺少 `proxy_set_header X-Forwarded-Proto $scheme;`，按第 5 步补上 |
+| 日志里 `ECONNREFUSED` 或 `Access denied for user` | 数据库地址或用户来源不对：同一台服务器要用 `host.docker.internal`，并确认用户是 `'pulsedns'@'172.%'` |
+| 日志里提示缺少 `PULSEDNS_TASK_ENCRYPTION_KEY` 或管理员 | `.env` 没填全，补上后执行 `docker compose up -d` |
+| 打开域名显示 404 | 需要带上随机入口路径访问；路径必须与构建时 `.env` 中的 `PULSEDNS_BASE_PATH` 一致，修改路径后要重新 `docker compose up -d --build` |
+| 登录提示「登录失败次数过多」 | 防爆破锁定，等 15 分钟；或在数据库执行 `DELETE FROM login_attempts;` 立即解除 |
+| 忘记管理员密码 | 见下方命令 |
+
+忘记管理员密码时，先在面板目录生成新密码的哈希（把 `新的强密码` 换成你的密码）：
+
+```bash
+docker compose exec pulsedns node -e 'const c=require("node:crypto");const s=c.randomBytes(16);const k=c.scryptSync(process.argv[1].normalize("NFKC"),s,64,{N:16384,r:8,p:1,maxmem:67108864});console.log(`scrypt$16384$8$1$${s.toString("base64url")}$${k.toString("base64url")}`)' '新的强密码'
+```
+
+再在数据库执行（把输出的整行哈希填进去），并让已登录的会话全部失效：
+
+```sql
+UPDATE users SET password_hash = '上一步输出的哈希' WHERE role = 'admin';
+DELETE FROM sessions;
 ```
 
 ### Nyanpass 可信发布清单

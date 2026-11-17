@@ -13,6 +13,9 @@ services:
       PULSEDNS_TRUST_PROXY: "1"
     ports:
       - "127.0.0.1:${PULSEDNS_PANEL_PORT:-3100}:3100"
+    # 数据库装在同一台服务器（例如宝塔的 MySQL）时，在 .env 里用 host.docker.internal 作为主机名。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     read_only: true
     tmpfs:
       - /tmp
