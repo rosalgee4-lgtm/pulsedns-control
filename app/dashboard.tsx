@@ -143,6 +143,8 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
   const [nyanpassErrors, setNyanpassErrors] = useState<Record<string, string>>({});
   const [agentUpgrade, setAgentUpgrade] = useState<{ nodeId: string; nodeName: string; command: string } | null>(null);
   const [remoteUpgradeError, setRemoteUpgradeError] = useState('');
+  const [restoringNode, setRestoringNode] = useState<NodeRow | null>(null);
+  const [restoreError, setRestoreError] = useState('');
   const [copyFeedback, setCopyFeedback] = useState<'idle' | 'copying' | 'success' | 'error'>('idle');
   const [startupCopyFeedback, setStartupCopyFeedback] = useState<'idle' | 'copying' | 'success' | 'error'>('idle');
   const [now, setNow] = useState(0);
@@ -486,7 +488,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
   }
 
   async function openNodeInstallation(node: NodeRow) {
-    if (!node.installationAvailable) { showAgentUpgrade(node); return; }
+    if (!node.installationAvailable) { setRestoreError(''); setRestoringNode(node); return; }
     const requestId = ++installationRequest.current;
     setLoadingInstallationId(node.id);
     setNodeDeleteError('');
@@ -507,6 +509,37 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
       if (requestId === installationRequest.current) setNodeDeleteError('安装命令读取失败，请重试');
     } finally {
       if (requestId === installationRequest.current) setLoadingInstallationId(null);
+    }
+  }
+
+  async function restoreInstallation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!restoringNode) return;
+    const form = new FormData(event.currentTarget);
+    setSaving(true);
+    setRestoreError('');
+    try {
+      const response = await fetchWithTimeout(apiPath('/api/admin/nodes'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'restoreInstallation', id: restoringNode.id, agentToken: form.get('agentToken'), rootPassword: form.get('rootPassword'), bbrProfile: form.get('bbrProfile'),
+          instances: nyanpass.filter((instance) => instance.nodeId === restoringNode.id).map((instance) => ({ id: instance.id, command: form.get(`command-${instance.id}`) ?? '' })),
+        }),
+      });
+      const result = await response.json() as InstallationCommands & { error?: string };
+      if (!response.ok) { setRestoreError(result.error ?? '补存安装命令失败'); return; }
+      const nodeId = restoringNode.id;
+      setNodes((current) => current.map((node) => node.id === nodeId ? { ...node, installationAvailable: true } : node));
+      setRestoringNode(null);
+      setCreated(result);
+      setInstallationTab('startup');
+      setCopyFeedback('idle');
+      setStartupCopyFeedback('idle');
+      setShowCreate(true);
+    } catch {
+      setRestoreError('补存安装命令失败，请重试');
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -791,6 +824,25 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
         </section>
       </div>}
 
+      {restoringNode && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setRestoringNode(null); }}>
+        <section className="modal" role="dialog" aria-modal="true" aria-labelledby="restore-install-title">
+          <button className="modal-close" onClick={() => setRestoringNode(null)} aria-label="关闭" disabled={saving}>×</button>
+          <p className="eyebrow cyan">安装命令</p><h2 id="restore-install-title">补存 {restoringNode.name} 的安装命令</h2>
+          <p className="modal-intro">这个节点由旧版本创建，首次安装后面板没有保留安装凭据。补存一次后，安装命令和开机脚本会长期固定，以后复制多少次都一样。机器上正在运行的探针沿用原令牌，不受影响，也不用重装。</p>
+          <form onSubmit={restoreInstallation} className="node-form">
+            <label>探针令牌<input name="agentToken" required autoComplete="off" spellCheck={false} placeholder="pd_…" /></label>
+            <p className="form-hint">在这台机器上执行 <code>grep '^TOKEN=' /etc/ddns-monitor.conf</code>，复制 TOKEN= 后面的内容。</p>
+            <label>root 密码<input name="rootPassword" type="password" required minLength={8} maxLength={128} autoComplete="new-password" /></label>
+            <p className="form-hint">Spot 换机后新机器会用这个密码设置 SSH root 登录。</p>
+            <label>BBR 优化<select name="bbrProfile" defaultValue="c6in"><option value="c6in">使用 c6in BBR 优化（10MB 缓冲）</option><option value="c5in">使用 c5in BBR 优化（50MB 缓冲）</option></select></label>
+            {nyanpass.filter((instance) => instance.nodeId === restoringNode.id).map((instance) => <label key={instance.id}>{instance.name}（{instance.role === 'outbound' ? '出口' : '入口'}）的 Nyanpass 官方安装命令<textarea name={`command-${instance.id}`} rows={3} autoComplete="off" spellCheck={false} placeholder={instance.hasCredential ? '面板仍保存着这个实例的同步凭据，可以留空' : 'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "…"'} /></label>)}
+            <p className="form-hint">从 Nyanpass 面板复制每个实例的对接命令粘贴进来，Spot 换机后新机器会自动重装这些实例。留空的实例不会加入换机重装，至少需要一个。</p>
+            {restoreError && <p className="form-error" role="alert">{restoreError}</p>}
+            <button className="primary-button wide" disabled={saving}>{saving ? '加密保存中…' : '补存并显示安装命令'}</button>
+          </form>
+        </section>
+      </div>}
+
       {sharingNode && adminState && <ShareModal apiPath={apiPath} node={sharingNode} users={adminState.users} multiUserEnabled={adminState.multiUserEnabled} onClose={() => setSharingNodeId(null)}
         onShared={(share) => setNodes((current) => current.map((node) => node.id === share.nodeId ? { ...node, sharedWith: [...(node.sharedWith ?? []), { userId: share.userId, username: share.username }] } : node))}
         onUnshared={(nodeId, userId) => {
@@ -820,8 +872,8 @@ function NodesPanel({ nodes, user, instances, onCreateInstance, onShare, now, on
         const removing = removingNodeId === node.id;
         const statusLabel = bootstrapStalled ? 'User data 未执行' : bootstrapLocked ? bootstrapStatusLabel(node.nyanpassStatus) : hasReported ? '已上报' : '等待首次上报';
         return [<tr key={node.id} className="machine-main-row"><td><span className="node-name"><i className={hasReported ? '' : 'warn'} />{node.name}{node.sharedWithMe && <b className="share-badge">共享</b>}</span>{node.sharedWith?.length ? <small>已分享给 {node.sharedWith.map((share) => share.username).join('、')}</small> : null}</td><td><code>{node.ipv4 ?? '等待 IPv4 上报'}{node.recordV4 ? ` → ${fqdn(node.domainName, node.recordV4)}` : ''}</code><code>{node.ipv6 ?? '等待 IPv6 上报'}{node.recordV6 ? ` → ${fqdn(node.domainName, node.recordV6)}` : ''}</code></td><td>{relativeTime(node.lastSeenAt, now)}</td><td><span className={hasReported && !bootstrapLocked ? 'badge online' : 'badge warning'}>{statusLabel}</span>{bootstrapStalled && <small className="sync-error" role="alert">检查 User data、CRLF 和出站网络</small>}{node.provisionLastCompletedStep && bootstrapLocked && <small>最后完成：{provisionStepLabel(node.provisionLastCompletedStep)}</small>}{sshChanged && <small className="sync-error" role="alert">SSH 凭据已变更，请使用新密码核查</small>}{node.agentUpgradeStatus && <small>探针升级中 → v{node.agentUpgradeTargetVersion}</small>}</td><td>{node.sharedWithMe ? <button type="button" className="edit-link" disabled={bootstrapLocked} onClick={() => onCreateInstance(node.id)}>添加实例</button> : <div className="row-actions">
-          <button type="button" className="edit-link" disabled={removing || loadingInstallationId !== null} onClick={() => onInstall(node)}>{loadingInstallationId === node.id ? '读取中…' : node.installationAvailable ? '安装命令' : '升级命令'}</button>
-          {node.installationAvailable && node.nyanpassStatus === 'ready' && <button type="button" className="edit-link" disabled={removing} onClick={() => onUpgrade(node)}>升级命令</button>}
+          <button type="button" className="edit-link" disabled={removing || loadingInstallationId !== null} onClick={() => onInstall(node)}>{loadingInstallationId === node.id ? '读取中…' : '安装命令'}</button>
+          {(!node.installationAvailable || node.nyanpassStatus === 'ready') && <button type="button" className="edit-link" disabled={removing} onClick={() => onUpgrade(node)}>升级命令</button>}
           {user.role === 'admin' && <button type="button" className="edit-link" disabled={removing} onClick={() => onShare(node)}>分享</button>}
           <button type="button" className="edit-link" disabled={removing} onClick={() => onEdit(node)}>修改</button><button type="button" className="danger-link" disabled={removing || loadingInstallationId === node.id} onClick={() => onRemove(node)}>{removing ? '删除中…' : '删除节点'}</button></div>}</td></tr>,
           <MachineInstancesRow key={`${node.id}-instances`} node={node} user={user} instances={instances.filter((instance) => instance.nodeId === node.id)} now={now} onCreateInstance={onCreateInstance} />];
@@ -1305,6 +1357,7 @@ function eventKindLabel(kind: string) {
     node_created: '节点创建',
     node_updated: '节点修改',
     node_shared: '机器分享',
+    node_installation_restored: '补存安装命令',
     agent_upgrade_requested: '请求升级探针',
     agent_upgrade_started: '探针开始升级',
     agent_upgrade_succeeded: '探针升级成功',

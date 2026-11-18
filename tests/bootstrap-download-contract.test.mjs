@@ -153,7 +153,9 @@ test('node commands remain accessible and present startup and download-run as eq
   assert.match(dashboard, /公共安装脚本 \+ 节点专属参数/);
   assert.match(dashboard, /role="tablist" aria-label="安装方式"/);
   assert.match(dashboard, /action: 'installation', id: node.id/);
-  assert.match(dashboard, /node.installationAvailable \? '安装命令' : '升级命令'/);
+  // 旧版本节点也显示「安装命令」，点开后先补存一次凭据。
+  assert.match(dashboard, /if \(!node.installationAvailable\) \{ setRestoreError\(''\); setRestoringNode\(node\); return; \}/);
+  assert.match(dashboard, /action: 'restoreInstallation', id: restoringNode.id/);
   assert.doesNotMatch(dashboard, /<details className="advanced-install">/);
 });
 

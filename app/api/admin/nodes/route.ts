@@ -7,7 +7,7 @@ import { canAccessNode, domainUsableBy } from '@/lib/ownership';
 import { syncAliDnsRecord } from '@/lib/alidns';
 import { buildNodeBootstrapConfig, buildNodeConnectCommand, DEFAULT_BBR_PROFILE, isBbrProfile, MAX_BOOTSTRAP_RESPONSE_BYTES, MAX_CLOUD_LAUNCHER_BYTES, PROBE_AGENT_VERSION } from '@/lib/install-command';
 import { settleAgentUpgrades, supportsRemoteUpgrade, upgradeAvailable } from '@/lib/agent-upgrade';
-import { parseOfficialNyanpassCommand, validNyanpassServiceName } from '@/lib/nyanpass-command';
+import { parseNyanpassArgs, parseOfficialNyanpassCommand, validNyanpassServiceName } from '@/lib/nyanpass-command';
 import { publicOrigin } from '@/lib/public-origin';
 import { newAgentToken, newBootstrapDownloadToken, sha256 } from '@/lib/security';
 import { cleanText, normalizeDnsRr, normalizeDomainName, validDnsRr, validDomainName } from '@/lib/validation';
@@ -18,6 +18,8 @@ import { decryptBootstrapPayload, encryptBootstrapPayload } from '@/lib/bootstra
 import { buildNodeStartupLauncher } from '@/lib/startup-launcher';
 import { trustedNyanpassRelease } from '@/lib/nyanpass-release';
 import { dnsOwnershipConflictMessage, findDnsOwnershipConflict, isDnsOwnershipConstraintError } from '@/lib/dns-ownership';
+import { decryptNyanpassCredential } from '@/lib/nyanpass-credential';
+import { reinstallArgs } from '@/lib/reinstall-plan';
 
 export async function POST(request: Request) {
   await ensureSchema();
@@ -28,6 +30,7 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   if (body?.action === 'installation') return installationCommands(request, db, user, body);
   if (body?.action === 'agentUpgrade') return requestAgentUpgrade(db, user, body);
+  if (body?.action === 'restoreInstallation') return restoreInstallation(request, db, user, body);
   const name = cleanText(body?.name, 60);
   const region = 'unknown';
   const bbrProfile = body?.bbrProfile === undefined || body?.bbrProfile === '' ? DEFAULT_BBR_PROFILE : body.bbrProfile;
@@ -210,6 +213,101 @@ async function installationCommands(request: Request, db: AppDb, user: CurrentUs
   } finally {
     await releaseNodeOperationLock(db, id, operationId);
   }
+}
+
+// 旧版本节点首次安装后擦除了开机凭据。这里沿用机器上正在使用的探针令牌补存一次，
+// 之后安装命令和开机脚本就和新节点一样长期固定；机器上的探针不受影响。
+async function restoreInstallation(request: Request, db: AppDb, user: CurrentUser, body: Record<string, unknown>) {
+  const id = cleanText(body.id, 64);
+  const agentToken = typeof body.agentToken === 'string' ? body.agentToken.trim() : '';
+  const rootPassword = typeof body.rootPassword === 'string' ? body.rootPassword : '';
+  const bbrProfile = body.bbrProfile === undefined || body.bbrProfile === '' ? DEFAULT_BBR_PROFILE : body.bbrProfile;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) return Response.json({ error: '节点 ID 无效' }, { status: 400 });
+  if (!isBbrProfile(bbrProfile)) return Response.json({ error: 'BBR 优化只能选择 c5in 或 c6in' }, { status: 400 });
+  if (!/^pd_[a-f0-9]{64}$/.test(agentToken)) return Response.json({ error: '探针令牌格式无效：应为 pd_ 开头加 64 位十六进制字符' }, { status: 400 });
+  if (rootPassword.length < 8 || rootPassword.length > 128 || /[\x00-\x1f\x7f]/.test(rootPassword)) {
+    return Response.json({ error: 'root 密码必须为 8-128 个字符，且不能包含控制字符' }, { status: 400 });
+  }
+  if (!await canAccessNode(db, user, id)) return Response.json({ error: '节点不存在' }, { status: 404 });
+  const operationId = await acquireNodeOperationLock(db, id);
+  if (operationId === undefined) return Response.json({ error: '节点不存在' }, { status: 404 });
+  if (operationId === null) return Response.json({ error: '节点正在处理其他操作，请稍后重试' }, { status: 409 });
+  try {
+    const [node] = await db.select().from(nodes).where(eq(nodes.id, id)).limit(1);
+    if (!node) return Response.json({ error: '节点不存在' }, { status: 404 });
+    if (node.bootstrapPayloadCiphertext) return Response.json({ error: '该节点已有安装命令，无需补存' }, { status: 409 });
+    if (await sha256(agentToken) !== node.tokenHash) return Response.json({ error: '探针令牌与该节点不符，请从这台机器的 /etc/ddns-monitor.conf 复制 TOKEN=' }, { status: 400 });
+
+    // 换机重装计划：优先用本次粘贴的官方命令；没粘贴时用仍保存着的同步凭据；都没有的实例不加入。
+    const pasted = Array.isArray(body.instances) ? body.instances : [];
+    const commandsById = new Map<string, unknown>();
+    for (const entry of pasted) {
+      if (!entry || typeof entry !== 'object') continue;
+      const item = entry as Record<string, unknown>;
+      if (typeof item.id === 'string' && typeof item.command === 'string' && item.command.trim()) commandsById.set(item.id, item.command);
+    }
+    const registered = await db.select().from(nyanpassInstances).where(eq(nyanpassInstances.nodeId, id));
+    const planned: Array<{ id: string; name: string; optimize: boolean; args: string }> = [];
+    for (const instance of registered) {
+      if (planned.length >= 16) break;
+      const command = commandsById.get(instance.id);
+      if (command !== undefined) {
+        const parsed = parseOfficialNyanpassCommand(command);
+        if (!parsed.ok) return Response.json({ error: `${instance.name}：${parsed.error}` }, { status: 400 });
+        if (parsed.role !== instance.role || parsed.panelUrl !== instance.panelUrl) {
+          return Response.json({ error: `${instance.name}：粘贴的命令与登记的实例不一致（入口/出口或对接面板地址不同）` }, { status: 400 });
+        }
+        planned.push({ id: instance.id, name: instance.name, optimize: false, args: parsed.args });
+        continue;
+      }
+      if (!instance.credentialCiphertext) continue;
+      try {
+        const clientToken = await decryptNyanpassCredential(instance.credentialCiphertext, { nodeId: id, instanceId: instance.id, revision: instance.configRevision });
+        const args = reinstallArgs(instance.role, clientToken, instance.panelUrl);
+        const parsed = parseNyanpassArgs(args);
+        if (parsed.ok && parsed.args === args) planned.push({ id: instance.id, name: instance.name, optimize: false, args });
+      } catch {
+        // 无法解密的凭据跳过，不影响其他实例。
+      }
+    }
+    if (!planned.length) {
+      return Response.json({ error: '这台机器上没有保存了同步凭据的 Nyanpass 实例，请至少粘贴一个实例的 Nyanpass 官方安装命令' }, { status: 409 });
+    }
+
+    const downloadToken = newBootstrapDownloadToken();
+    let ciphertext = '';
+    try {
+      ciphertext = await encryptBootstrapPayload({
+        protocol: 1,
+        agentToken,
+        downloadToken,
+        rootPassword,
+        bbrProfile,
+        instances: planned.map(({ name, optimize, args }) => ({ name, optimize, args })),
+      }, { nodeId: id, generation: node.provisionGeneration });
+    } catch (error) {
+      return Response.json({ error: safeBootstrapEncryptionError(error) }, { status: 503 });
+    }
+    const now = new Date();
+    const updated = await db.update(nodes).set({
+      bootstrapPayloadCiphertext: ciphertext,
+      bootstrapDownloadTokenHash: await sha256(downloadToken),
+      updatedAt: now,
+    }).where(and(eq(nodes.id, id), eq(nodes.dnsOperationId, operationId), isNull(nodes.bootstrapPayloadCiphertext)));
+    if (!affectedRows(updated)) return Response.json({ error: '节点状态已变化，请刷新后重试' }, { status: 409 });
+    await db.update(nyanpassInstances).set({ bootstrapGeneration: node.provisionGeneration })
+      .where(and(eq(nyanpassInstances.nodeId, id), inArray(nyanpassInstances.id, planned.map((instance) => instance.id))));
+    const skipped = registered.length - planned.length;
+    await db.insert(events).values({
+      nodeId: id,
+      kind: 'node_installation_restored',
+      message: `${user.username} 补存了节点安装命令，换机重装 ${planned.length} 个 Nyanpass 实例${skipped ? `（${skipped} 个未提供安装命令，未加入）` : ''}`,
+      createdAt: now,
+    });
+  } finally {
+    await releaseNodeOperationLock(db, id, operationId);
+  }
+  return installationCommands(request, db, user, { id });
 }
 
 function safeBootstrapEncryptionError(error: unknown) {
