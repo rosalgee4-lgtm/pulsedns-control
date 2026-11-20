@@ -831,7 +831,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
           <p className="modal-intro">这个节点由旧版本创建，首次安装后面板没有保留安装凭据。补存一次后，安装命令和开机脚本会长期固定，以后复制多少次都一样。机器上正在运行的探针沿用原令牌，不受影响，也不用重装。</p>
           <form onSubmit={restoreInstallation} className="node-form">
             <label>探针令牌<input name="agentToken" required autoComplete="off" spellCheck={false} placeholder="pd_…" /></label>
-            <p className="form-hint">在这台机器上执行 <code>grep '^TOKEN=' /etc/ddns-monitor.conf</code>，复制 TOKEN= 后面的内容。</p>
+            <p className="form-hint">在这台机器上执行 <code>{"grep '^TOKEN=' /etc/ddns-monitor.conf"}</code>，复制 TOKEN= 后面的内容。</p>
             <label>root 密码<input name="rootPassword" type="password" required minLength={8} maxLength={128} autoComplete="new-password" /></label>
             <p className="form-hint">Spot 换机后新机器会用这个密码设置 SSH root 登录。</p>
             <label>BBR 优化<select name="bbrProfile" defaultValue="c6in"><option value="c6in">使用 c6in BBR 优化（10MB 缓冲）</option><option value="c5in">使用 c5in BBR 优化（50MB 缓冲）</option><option value="nyp">使用 nyp 的 BBR 优化</option></select></label>

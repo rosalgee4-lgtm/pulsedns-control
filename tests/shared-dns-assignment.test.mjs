@@ -19,7 +19,7 @@ globalThis.fetch = async (input, init) => {
   if (action === 'DescribeDomains') return Response.json({ Domains: { Domain: [] } });
   if (action === 'DescribeDomainRecords') {
     const rows = all().filter((row) => row.domain === p('DomainName') && (!p('RRKeyWord') || row.RR === p('RRKeyWord')) && (!p('TypeKeyWord') || row.Type === p('TypeKeyWord')));
-    return Response.json({ DomainRecords: { Record: rows.map(({ domain, ...row }) => row) } });
+    return Response.json({ DomainRecords: { Record: rows.map((row) => { const copy = { ...row }; delete copy.domain; return copy; }) } });
   }
   if (action === 'AddDomainRecord') {
     const RecordId = String(nextRecordId++);
