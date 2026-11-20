@@ -714,8 +714,8 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
               <label>节点名称<input name="name" required placeholder="例如：东京 · jp-01" /></label>
               <label>root 密码<input name="rootPassword" type="password" required minLength={8} maxLength={128} autoComplete="new-password" placeholder="8-128 个字符" /></label>
               <p className="form-hint">root 密码只会随开机安装凭据加密保存，不会进入节点列表、事件或日志；Spot 换机重装时沿用同一密码。</p>
-              <label>BBR 优化<select name="bbrProfile" defaultValue="c6in"><option value="c6in">使用 c6in BBR 优化（10MB 缓冲）</option><option value="c5in">使用 c5in BBR 优化（50MB 缓冲）</option></select></label>
-              <p className="form-hint">BBR + fq 和 sysctl 参数作用于整台机器，覆盖 /etc/sysctl.conf 前会先备份。</p>
+              <label>BBR 优化<select name="bbrProfile" defaultValue="c6in"><option value="c6in">使用 c6in BBR 优化（10MB 缓冲）</option><option value="c5in">使用 c5in BBR 优化（50MB 缓冲）</option><option value="nyp">使用 nyp 的 BBR 优化</option></select></label>
+              <p className="form-hint">BBR + fq 和 sysctl 参数作用于整台机器，覆盖 /etc/sysctl.conf 前会先备份。选 nyp 时面板不改 /etc/sysctl.conf，改为安装 Nyanpass 时开启官方的「优化系统参数」。</p>
               <label>阿里云主域名<select name="domainName" defaultValue=""><option value="">不配置 DNS</option>{domainsOwnedBy(user.id).map((domain) => <option key={domain.name} value={domain.name}>{domain.name}</option>)}</select></label>
               {!domainsOwnedBy(user.id).length && <p className="form-hint">还没有主域名，请先到「阿里云主域名」页面添加。</p>}
               <div className="form-grid"><label>IPv4 主机记录<input name="recordV4" placeholder="home 或 @" /></label><label>IPv6 主机记录<input name="recordV6" placeholder="home 或 @" /></label></div>
@@ -834,7 +834,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
             <p className="form-hint">在这台机器上执行 <code>grep '^TOKEN=' /etc/ddns-monitor.conf</code>，复制 TOKEN= 后面的内容。</p>
             <label>root 密码<input name="rootPassword" type="password" required minLength={8} maxLength={128} autoComplete="new-password" /></label>
             <p className="form-hint">Spot 换机后新机器会用这个密码设置 SSH root 登录。</p>
-            <label>BBR 优化<select name="bbrProfile" defaultValue="c6in"><option value="c6in">使用 c6in BBR 优化（10MB 缓冲）</option><option value="c5in">使用 c5in BBR 优化（50MB 缓冲）</option></select></label>
+            <label>BBR 优化<select name="bbrProfile" defaultValue="c6in"><option value="c6in">使用 c6in BBR 优化（10MB 缓冲）</option><option value="c5in">使用 c5in BBR 优化（50MB 缓冲）</option><option value="nyp">使用 nyp 的 BBR 优化</option></select></label>
             {nyanpass.filter((instance) => instance.nodeId === restoringNode.id).map((instance) => <label key={instance.id}>{instance.name}（{instance.role === 'outbound' ? '出口' : '入口'}）的 Nyanpass 官方安装命令<textarea name={`command-${instance.id}`} rows={3} autoComplete="off" spellCheck={false} placeholder={instance.hasCredential ? '面板仍保存着这个实例的同步凭据，可以留空' : 'bash <(curl -fLSs https://dl.nyafw.com/download/nyanpass-install.sh) rel_nodeclient "…"'} /></label>)}
             <p className="form-hint">从 Nyanpass 面板复制每个实例的对接命令粘贴进来，Spot 换机后新机器会自动重装这些实例。留空的实例不会加入换机重装，至少需要一个。</p>
             {restoreError && <p className="form-error" role="alert">{restoreError}</p>}

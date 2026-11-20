@@ -14,7 +14,7 @@ PulseDNS 把原仓库的多份 VPS Shell 脚本合并为一个 Web 主控（Dock
 | `/var/log/ddns-monitor.log` | 保留，卸载时不删除 |
 | locale 修复及 curl/coreutils 依赖 | 保留，支持 apt、yum、dnf、apk |
 | root 密码与 SSH root/password 登录配置 | 保留；菜单模式现场输入，Web 一键安装经节点专属配置数据下发；root 密码仅以 AES-GCM 密文保存，供 Spot 换机重装 |
-| 原 23 项 BBR/sysctl 配置 | 完整安装和 Web 开机安装固定执行；添加节点时用下拉框选择 c6in（10MB 缓冲，默认）或 c5in（50MB 缓冲），选择写入生成的安装命令，安装时无人值守执行；菜单模式使用 c6in。执行前仍备份 `/etc/sysctl.conf` |
+| 原 23 项 BBR/sysctl 配置 | 完整安装和 Web 开机安装固定执行；添加节点时用下拉框选择 c6in（10MB 缓冲，默认）、c5in（50MB 缓冲）或「使用 nyp 的 BBR 优化」，选择写入生成的安装命令，安装时无人值守执行；菜单模式使用 c6in。执行前仍备份 `/etc/sysctl.conf`；选 nyp 时面板不改 `/etc/sysctl.conf`，改为以 `OPTIMIZE=1` 调用 Nyanpass 官方安装器，由它写入 `/etc/sysctl.d/ny.conf`（不含面板配置里的 ip_forward、forwarding、route_localnet） |
 | Nyanpass `rel_nodeclient` 安装 | 保留；创建探针时预配一个或多个实例，由固定公共安装器读取节点配置后无人值守安装 |
 | `--run` / `--uninstall` | 保留；卸载 DDNS 服务、安装目录、IP 缓存、节点配置及本机任务租约状态 |
 
@@ -316,7 +316,7 @@ DELETE FROM sessions;
 界面生成的命令包含真实节点参数和当前发布摘要；下面只演示结构，不要直接执行占位符：
 
 ```bash
-wget -O '/root/aws-jp_c6in_install.sh' 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/740e21c79291ff6eb0c183b0c5a6f7525a30689b/public/install.sh' && echo '80cd13187a6428384c529fcaba05e9606db7c3b171d44190a421c9821e687e9a  /root/aws-jp_c6in_install.sh' | sha256sum -c - && chmod +x '/root/aws-jp_c6in_install.sh' && bash '/root/aws-jp_c6in_install.sh' probe '<节点参数>' 'c6in'
+wget -O '/root/aws-jp_c6in_install.sh' 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/eaa159a33c3db024a089f2de7516e3942a6e6923/public/install.sh' && echo '70058095eef10874e180d1b4c768ad2681d1970d120c6171ed02a0d8c94e7291  /root/aws-jp_c6in_install.sh' | sha256sum -c - && chmod +x '/root/aws-jp_c6in_install.sh' && bash '/root/aws-jp_c6in_install.sh' probe '<节点参数>' 'c6in'
 ```
 
 公共安装器会把接口返回的配置数据校验后以 `0600` 缓存为 `/root/pulsedns_<节点ID>_bootstrap.config`，并把通过 SHA-256 校验的同一固定安装器以 `0700` 缓存为 `/root/pulsedns_<节点ID>_installer.sh`；接口不会生成或返回另一份 Shell 脚本。开机启动器显式设置 `PATH`，首次执行即把自身原子复制到 `/var/lib/cloud/scripts/per-boot/`，并使用独立的 `_entrypoint.sh` 缓存，避免与安装器缓存互相覆盖。如果本次开机未完成，下次开机会再次调用；当前代次完成并成功恢复 `ddns-monitor` 后，敏感缓存与 per-boot 副本会被删除，仅清理包含本节点参数的 cloud-init 本地 user-data，不清理无关启动内容。
@@ -337,8 +337,8 @@ umask 077
 (
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
-  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/740e21c79291ff6eb0c183b0c5a6f7525a30689b/public/install.sh -o "$tmp" &&
-  printf '%s  %s\n' '80cd13187a6428384c529fcaba05e9606db7c3b171d44190a421c9821e687e9a' "$tmp" | sha256sum -c - &&
+  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/eaa159a33c3db024a089f2de7516e3942a6e6923/public/install.sh -o "$tmp" &&
+  printf '%s  %s\n' '70058095eef10874e180d1b4c768ad2681d1970d120c6171ed02a0d8c94e7291' "$tmp" | sha256sum -c - &&
   grep -Fq '# PulseDNS / 原 DDNS 脚本兼容安装器' "$tmp" &&
   bash -n "$tmp" &&
   bash "$tmp"
@@ -357,7 +357,7 @@ umask 077
 6. 卸载 DDNS
 7. 升级现有探针，启用 Nyanpass 远程同步
 
-Web 中“添加探针节点”会先要求填写一次性 root 密码，选择 BBR 优化（c6in 或 c5in），并预配一个或多个 Nyanpass 服务名和官方命令。原 `OPTIMIZE` 选项已移除，一律以 `OPTIMIZE=0` 调用官方安装器，系统参数只由 BBR 选项控制。主控把 root 密码、节点原始令牌、下载凭据和规范化后的预配参数绑定 `nodeId + generation`，以 AES-GCM 加密暂存；页面并列提供开机脚本和下载后运行的一键命令。节点访问短时参数时，主控才解密并返回当前可信清单组成的有界配置数据。固定安装器执行：补齐基础环境 → 主控令牌预校验 → DDNS 安装与首次上报验收 → 全部 Nyanpass → BBR → 最后事务式配置 SSH → DDNS 复检。每完成一步都会把 `ddns`、`nyanpass`、`bbr` 或 `ssh` 随心跳和最终回执上报；面板在失败或结果未知时显示最后完成阶段，若 SSH 已完成则明确提示使用新密码核查。
+Web 中“添加探针节点”会先要求填写一次性 root 密码，选择 BBR 优化（c6in、c5in 或 nyp），并预配一个或多个 Nyanpass 服务名和官方命令。实例上的 `OPTIMIZE` 选项已移除：选 c6in/c5in 时一律以 `OPTIMIZE=0` 调用官方安装器；选 nyp 时开机安装（含 Spot 换机重装）以 `OPTIMIZE=1` 安装全部实例，之后单个实例的同步仍传 `OPTIMIZE=0`。主控把 root 密码、节点原始令牌、下载凭据和规范化后的预配参数绑定 `nodeId + generation`，以 AES-GCM 加密暂存；页面并列提供开机脚本和下载后运行的一键命令。节点访问短时参数时，主控才解密并返回当前可信清单组成的有界配置数据。固定安装器执行：补齐基础环境 → 主控令牌预校验 → DDNS 安装与首次上报验收 → 全部 Nyanpass → BBR → 最后事务式配置 SSH → DDNS 复检。每完成一步都会把 `ddns`、`nyanpass`、`bbr` 或 `ssh` 随心跳和最终回执上报；面板在失败或结果未知时显示最后完成阶段，若 SSH 已完成则明确提示使用新密码核查。
 
 新节点创建后先显示“等待开机安装”，不能提前修改或下发额外实例。超过 10 分钟仍未开始时，面板会提示检查 User data、CRLF 和出站网络。固定安装器开始执行后每 20 秒向主控续租，并用节点 generation 与本次随机 attempt ID 绑定回执；旧参数或另一台机器的回执不能覆盖当前结果。若机器断电或安装进程被强制终止，租约到期后会标记“结果未知”，per-boot 会在下次开机复用本机固定安装器和配置。探针对接全程无人值守：取得本机安装锁、主控确认旧尝试失败后，自动归档 `started` 并以新 attempt ID 重试，不再要求输入 `RETRY` 或手工删除标记。已完成的节点跳过重复安装；锁被占用、主控未确认、回执过期或本地标记冲突时，保留状态并报错退出，不强制重装。重试使用原配置和服务名，可能重新执行已完成部分的 Nyanpass 安装，但不会创建另一组实例；Nyanpass 安装继续由机器级任务锁串行保护。每次调用最多开始一次新尝试，不在失败后无限循环。旧版已下载的启动脚本不会自动变化，需从更新后的面板重新取得命令。
 
@@ -406,7 +406,7 @@ HTTP 面板上的“复制下载并运行命令”和“复制开机脚本”按
 (
   tmp="$(mktemp)" &&
   trap 'rm -f "$tmp"' EXIT &&
-  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/740e21c79291ff6eb0c183b0c5a6f7525a30689b/public/update.sh -o "$tmp" &&
+  curl --proto '=https' --proto-redir '=https' -fLSs https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/eaa159a33c3db024a089f2de7516e3942a6e6923/public/update.sh -o "$tmp" &&
   printf '%s  %s\n' '455ac7fb86324559003799304de5b2d71a0e1dca495e22a2b667898e9aa40986' "$tmp" | sha256sum -c - &&
   bash "$tmp"
 )

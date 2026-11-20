@@ -162,7 +162,7 @@ export async function GET(request: Request) {
         role: task.role,
         panelUrl: task.panelUrl,
         clientToken,
-        // OPTIMIZE 已移除：一律传 0，系统参数只由节点的 c5in / c6in BBR 选项控制。
+        // 单实例同步一律传 OPTIMIZE=0；选 nyp BBR 优化的节点已在开机安装时开启过官方系统参数优化。
         optimize: false,
         release: nyanpassRelease,
       },

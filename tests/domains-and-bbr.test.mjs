@@ -69,4 +69,10 @@ test('BBR profile is chosen per node, defaults to c6in, and OPTIMIZE is always o
   const again = await (await nodesPost(api(url, 'POST', { action: 'installation', id: c5in.node.id }, adminCookie))).json();
   assert.equal(again.startupScript, c5in.startupScript);
   assert.equal(again.connectCommand, c5in.connectCommand);
+
+  const nyp = await (await createNode({ name: 'nyp-node', recordV4: '', bbrProfile: 'nyp' })).json();
+  assert.match(nyp.connectCommand, /^wget -O '\/root\/nyp-node_nyp_install\.sh' .* probe '[^']+' 'nyp'$/);
+  assert.match(nyp.startupScript, /^bbr_profile='nyp'$/m);
+  const [nypRow] = await database.query('SELECT bootstrap_payload_ciphertext AS ciphertext FROM nodes WHERE id = ?', [nyp.node.id]);
+  assert.equal((await decryptBootstrapPayload(nypRow.ciphertext, { nodeId: nyp.node.id, generation: 1 })).bbrProfile, 'nyp');
 });

@@ -34,7 +34,7 @@ export async function POST(request: Request) {
   const name = cleanText(body?.name, 60);
   const region = 'unknown';
   const bbrProfile = body?.bbrProfile === undefined || body?.bbrProfile === '' ? DEFAULT_BBR_PROFILE : body.bbrProfile;
-  if (!isBbrProfile(bbrProfile)) return Response.json({ error: 'BBR 优化只能选择 c5in 或 c6in' }, { status: 400 });
+  if (!isBbrProfile(bbrProfile)) return Response.json({ error: 'BBR 优化只能选择 c5in、c6in 或 nyp' }, { status: 400 });
   const domainName = normalizeDomainName(body?.domainName) || null;
   const recordV4 = normalizeDnsRr(body?.recordV4) || null;
   const recordV6 = normalizeDnsRr(body?.recordV6) || null;
@@ -67,7 +67,7 @@ export async function POST(request: Request) {
     const parsed = parseOfficialNyanpassCommand(entry.command);
     if (!parsed.ok) return Response.json({ error: `${instanceName}：${parsed.error}` }, { status: 400 });
     instanceNames.add(instanceName);
-    // OPTIMIZE 已移除：系统参数只由节点的 c5in / c6in BBR 选项控制。
+    // 实例本身的 OPTIMIZE 一律为 0；选 nyp BBR 优化时由安装器在开机安装中统一开启。
     preparedInstances.push({ id: crypto.randomUUID(), name: instanceName, args: parsed.args, panelUrl: parsed.panelUrl, role: parsed.role, optimize: false });
   }
 
@@ -223,7 +223,7 @@ async function restoreInstallation(request: Request, db: AppDb, user: CurrentUse
   const rootPassword = typeof body.rootPassword === 'string' ? body.rootPassword : '';
   const bbrProfile = body.bbrProfile === undefined || body.bbrProfile === '' ? DEFAULT_BBR_PROFILE : body.bbrProfile;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) return Response.json({ error: '节点 ID 无效' }, { status: 400 });
-  if (!isBbrProfile(bbrProfile)) return Response.json({ error: 'BBR 优化只能选择 c5in 或 c6in' }, { status: 400 });
+  if (!isBbrProfile(bbrProfile)) return Response.json({ error: 'BBR 优化只能选择 c5in、c6in 或 nyp' }, { status: 400 });
   if (!/^pd_[a-f0-9]{64}$/.test(agentToken)) return Response.json({ error: '探针令牌格式无效：应为 pd_ 开头加 64 位十六进制字符' }, { status: 400 });
   if (rootPassword.length < 8 || rootPassword.length > 128 || /[\x00-\x1f\x7f]/.test(rootPassword)) {
     return Response.json({ error: 'root 密码必须为 8-128 个字符，且不能包含控制字符' }, { status: 400 });

@@ -16,8 +16,9 @@ type NodeBootstrapConfigInput = {
   nyanpassRelease: TrustedNyanpassRelease;
 };
 
-// 整机 BBR/sysctl 配置：c6in = 10MB 缓冲（原默认），c5in = 50MB 缓冲。
-export const BBR_PROFILES = ['c6in', 'c5in'] as const;
+// 整机 BBR/sysctl 配置：c6in = 10MB 缓冲（原默认），c5in = 50MB 缓冲；
+// nyp = 面板不写 sysctl，改用 Nyanpass 官方安装器的系统参数优化（OPTIMIZE=1）。
+export const BBR_PROFILES = ['c6in', 'c5in', 'nyp'] as const;
 export type BbrProfile = (typeof BBR_PROFILES)[number];
 export const DEFAULT_BBR_PROFILE: BbrProfile = 'c6in';
 
@@ -25,8 +26,8 @@ export function isBbrProfile(value: unknown): value is BbrProfile {
   return typeof value === 'string' && (BBR_PROFILES as readonly string[]).includes(value);
 }
 
-export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/740e21c79291ff6eb0c183b0c5a6f7525a30689b/public/install.sh';
-export const PROBE_INSTALLER_SHA256 = '80cd13187a6428384c529fcaba05e9606db7c3b171d44190a421c9821e687e9a';
+export const PROBE_INSTALLER_URL = 'https://raw.githubusercontent.com/rosalgee4-lgtm/pulsedns-control/eaa159a33c3db024a089f2de7516e3942a6e6923/public/install.sh';
+export const PROBE_INSTALLER_SHA256 = '70058095eef10874e180d1b4c768ad2681d1970d120c6171ed02a0d8c94e7291';
 // 上面固定的公共安装器所安装的探针版本；远程升级以探针上报这个版本作为完成标志。
 export const PROBE_AGENT_VERSION = '0.9.0';
 export const MAX_CLOUD_LAUNCHER_BYTES = 15 * 1024;
