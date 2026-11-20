@@ -148,7 +148,7 @@ git clone https://github.com/rosalgee4-lgtm/pulsedns-control.git
 ```
 
 ```bash
-git -C pulsedns-control checkout --detach 4326d80bf2a1b2804004cd375b9d317d8dcf51b7
+git -C pulsedns-control checkout --detach 64e8a0ac02cc39aa4df3afd2dcc4e87237bb3b69
 ```
 
 镜像按这个固定 commit 的源码在本机构建，基础镜像按摘要固定，依赖按 `pnpm-lock.yaml` 锁定，不会拉取其他版本的代码。
