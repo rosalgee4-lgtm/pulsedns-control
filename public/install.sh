@@ -14,7 +14,8 @@ SERVER_URL="${SERVER_URL:-}"
 TOKEN="${TOKEN:-}"
 ROOT_PASSWORD="${ROOT_PASSWORD:-}"
 APPLY_BBR=""
-# 整机 BBR/sysctl 配置：c6in = 10MB 缓冲（默认），c5in = 50MB 缓冲。由面板生成的命令指定。
+# 整机 BBR/sysctl 配置：c6in = 10MB 缓冲（默认），c5in = 50MB 缓冲；nyp = 不写 /etc/sysctl.conf，
+# 改由 Nyanpass 官方安装器的系统参数优化（OPTIMIZE=1）配置。由面板生成的命令指定。
 BBR_PROFILE="c6in"
 CHECK_INTERVAL=10
 LOG_FILE="/var/log/ddns-monitor.log"
@@ -864,13 +865,17 @@ write_nyanpass_start_script() {
 }
 
 valid_bbr_profile() {
-    [[ "$1" == "c5in" || "$1" == "c6in" ]]
+    [[ "$1" == "c5in" || "$1" == "c6in" || "$1" == "nyp" ]]
 }
 
 configure_bbr() {
     local net_buffer_max="" tcp_buffer=""
     need_root
-    valid_bbr_profile "$BBR_PROFILE" || fail "BBR 优化只能为 c5in 或 c6in"
+    valid_bbr_profile "$BBR_PROFILE" || fail "BBR 优化只能为 c5in、c6in 或 nyp"
+    if [[ "$BBR_PROFILE" == "nyp" ]]; then
+        log INFO "使用 Nyanpass 官方 BBR 优化（OPTIMIZE=1），不修改 /etc/sysctl.conf"
+        return 0
+    fi
     if [[ "$BBR_PROFILE" == "c5in" ]]; then
         log INFO "配置 BBR + fq（AWS c5in）..."
         net_buffer_max="50000000"
@@ -1242,11 +1247,12 @@ install_nyanpass_batch() {
     [[ ${#NYANPASS_BATCH_NAMES[@]} -gt 0 ]] || fail "无人值守安装缺少 Nyanpass 实例"
     [[ ${#NYANPASS_BATCH_NAMES[@]} -eq ${#NYANPASS_BATCH_OPTIMIZES[@]} && ${#NYANPASS_BATCH_NAMES[@]} -eq ${#NYANPASS_BATCH_INPUTS[@]} ]] || fail "Nyanpass 批量参数不完整"
 
+    # 选择 nyp BBR 优化时，由 Nyanpass 官方安装器写入系统参数（OPTIMIZE=1）。
     for ((index = 0; index < ${#NYANPASS_BATCH_NAMES[@]}; index++)); do
         install_nyanpass_once \
             "${NYANPASS_BATCH_INPUTS[$index]}" \
             "${NYANPASS_BATCH_NAMES[$index]}" \
-            "${NYANPASS_BATCH_OPTIMIZES[$index]}" \
+            "$([[ "$BBR_PROFILE" == "nyp" ]] && printf 1 || printf '%s' "${NYANPASS_BATCH_OPTIMIZES[$index]}")" \
             "1"
     done
 }
@@ -1772,9 +1778,9 @@ if [[ $# -gt 0 ]]; then
 fi
 
 if [[ "$ACTION" == "probe" || "$ACTION" == "bootstrap" ]]; then
-    [[ $# -eq 1 || $# -eq 2 ]] || fail "用法：bash install.sh probe '<节点专属参数>' [c5in|c6in]"
+    [[ $# -eq 1 || $# -eq 2 ]] || fail "用法：bash install.sh probe '<节点专属参数>' [c5in|c6in|nyp]"
     if [[ $# -eq 2 ]]; then
-        valid_bbr_profile "$2" || fail "BBR 优化只能为 c5in 或 c6in"
+        valid_bbr_profile "$2" || fail "BBR 优化只能为 c5in、c6in 或 nyp"
         BBR_PROFILE="$2"
     fi
     bootstrap_node "$1"
@@ -1806,7 +1812,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --bbr-profile)
             [[ $# -ge 2 ]] || fail "--bbr-profile 缺少参数"
-            valid_bbr_profile "$2" || fail "BBR 优化只能为 c5in 或 c6in"
+            valid_bbr_profile "$2" || fail "BBR 优化只能为 c5in、c6in 或 nyp"
             BBR_PROFILE="$2"
             shift 2
             ;;

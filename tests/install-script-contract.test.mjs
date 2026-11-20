@@ -442,3 +442,37 @@ test('Nyanpass installation executes only pinned installer and binary payloads',
   assert.match(source, /validate_nyanpass_release_manifest\(\)/);
   assert.match(source, /PULSEDNS_NYANPASS_INSTALLER_SHA256/);
 });
+
+test('the nyp BBR profile leaves /etc/sysctl.conf alone and installs Nyanpass with OPTIMIZE=1', () => {
+  const script = [
+    'set -euo pipefail',
+    'log() { printf "LOG %s\\n" "$*"; }',
+    'fail() { printf "FAIL %s\\n" "$*"; exit 1; }',
+    'need_root() { :; }',
+    'modprobe() { echo "MODPROBE"; }',
+    'sysctl() { echo "SYSCTL"; }',
+    'install_nyanpass_once() { echo "INSTALL $2 optimize=$3"; }',
+    'valid_bbr_profile() {', body('valid_bbr_profile'), '}',
+    'configure_bbr() {', body('configure_bbr').replaceAll('/etc/sysctl.conf', '"$SYSCTL_FILE"'), '}',
+    'install_nyanpass_batch() {', body('install_nyanpass_batch'), '}',
+    'SYSCTL_FILE=$(mktemp); trap \'rm -f "$SYSCTL_FILE"\' EXIT',
+    'NYANPASS_BATCH_NAMES=(in out); NYANPASS_BATCH_OPTIMIZES=(0 0); NYANPASS_BATCH_INPUTS=(a b)',
+    'BBR_PROFILE="$1"',
+    'install_nyanpass_batch',
+    'configure_bbr',
+    'grep -c tcp_congestion_control "$SYSCTL_FILE" || true',
+  ].join('\n');
+  const run = (profile) => spawnSync('bash', ['-c', script, 'bash', profile], { encoding: 'utf8' });
+  const nyp = run('nyp');
+  assert.equal(nyp.status, 0, nyp.stderr + nyp.stdout);
+  assert.match(nyp.stdout, /INSTALL in optimize=1\nINSTALL out optimize=1\n/);
+  assert.match(nyp.stdout, /使用 Nyanpass 官方 BBR 优化（OPTIMIZE=1），不修改 /);
+  assert.match(body('configure_bbr'), /不修改 \/etc\/sysctl\.conf/);
+  assert.doesNotMatch(nyp.stdout, /MODPROBE|SYSCTL/);
+  assert.match(nyp.stdout, /\n0\n$/);
+  const c6in = run('c6in');
+  assert.equal(c6in.status, 0, c6in.stderr + c6in.stdout);
+  assert.match(c6in.stdout, /INSTALL in optimize=0\nINSTALL out optimize=0\n/);
+  assert.match(c6in.stdout, /\n1\n$/);
+  assert.match(source, /probe '<节点专属参数>' \[c5in\|c6in\|nyp\]/);
+});
