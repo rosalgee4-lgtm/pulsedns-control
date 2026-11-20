@@ -57,7 +57,7 @@ type NodeRow = {
   agentUpgradeStatus?: 'queued' | 'running' | null; agentUpgradeTargetVersion?: string | null;
 };
 type EventRow = { id: number; nodeId: string; nodeName: string; level: string; kind: string; message: string; createdAt: string };
-type DnsRecordRow = { id: string; nodeId: string; nodeName: string; ownerId: string; ownerName: string; domainName: string; recordV4: string | null; recordV6: string | null; createdAt: string };
+type DnsRecordRow = { id: string; nodeId: string; nodeName: string; ownerId: string; ownerName: string; domainName: string; recordV4: string | null; recordV6: string | null; assigned?: boolean; createdAt: string };
 type NyanpassStatusValue = 'ready' | 'pending' | 'running' | 'success' | 'failed' | 'uncertain' | 'bootstrap' | 'legacy' | '等待安装';
 type NyanpassRow = {
   id: string; nodeId: string; nodeName: string; name: string; role: 'inbound' | 'outbound'; panelUrl: string;
@@ -843,7 +843,7 @@ export default function Dashboard({ basePath, user, initialNodes, initialDomains
         </section>
       </div>}
 
-      {sharingNode && adminState && <ShareModal apiPath={apiPath} node={sharingNode} users={adminState.users} multiUserEnabled={adminState.multiUserEnabled} onClose={() => setSharingNodeId(null)}
+      {sharingNode && adminState && <ShareModal apiPath={apiPath} node={sharingNode} users={adminState.users} multiUserEnabled={adminState.multiUserEnabled} domains={domainsOwnedBy(user.id)} records={dnsRecords.filter((record) => record.nodeId === sharingNode.id && record.assigned)} onRecordsChange={setDnsRecords} onEvents={(added) => setEvents((current) => [...added, ...current].slice(0, 100))} onClose={() => setSharingNodeId(null)}
         onShared={(share) => setNodes((current) => current.map((node) => node.id === share.nodeId ? { ...node, sharedWith: [...(node.sharedWith ?? []), { userId: share.userId, username: share.username }] } : node))}
         onUnshared={(nodeId, userId) => {
           setNodes((current) => current.map((node) => node.id === nodeId ? { ...node, sharedWith: (node.sharedWith ?? []).filter((share) => share.userId !== userId) } : node));
@@ -1033,6 +1033,7 @@ function SettingsPanel({ apiPath, user, admin, onAdminChange }: { apiPath: (path
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string; scope: 'password' | 'admin' } | null>(null);
   const [resettingId, setResettingId] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
 
   async function send(method: string, path: string, body?: unknown) {
     const response = await fetchWithTimeout(apiPath(path), { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -1100,6 +1101,20 @@ function SettingsPanel({ apiPath, user, admin, onAdminChange }: { apiPath: (path
     });
   }
 
+  function renameUser(event: FormEvent<HTMLFormElement>, target: AdminUserRow) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    void run('admin', async () => {
+      const { ok, result } = await send('PATCH', '/api/admin/users', { id: target.id, username: form.get('username') });
+      const username = typeof result.username === 'string' ? result.username : '';
+      if (!ok || !username) { setMessage({ kind: 'error', text: result.error ?? '改名失败', scope: 'admin' }); return; }
+      onAdminChange((current) => current && { ...current, users: current.users.map((item) => item.id === target.id ? { ...item, username } : item) });
+      setRenamingId(null);
+      if (target.id === user.id) window.location.reload();
+      return `已把 ${target.username} 改名为 ${username}`;
+    });
+  }
+
   function removeUser(target: AdminUserRow) {
     if (!window.confirm(`确定删除用户 ${target.username} 吗？`)) return;
     void run('admin', async () => {
@@ -1143,11 +1158,17 @@ function SettingsPanel({ apiPath, user, admin, onAdminChange }: { apiPath: (path
             <td>{member.role === 'admin' ? '管理员' : '普通用户'}</td>
             <td>{member.nodeCount}</td>
             <td>{new Date(member.createdAt).toLocaleString()}</td>
-            <td>{member.role === 'admin' ? <span className="muted-value">在上方修改自己的密码</span> : <div className="row-actions">
-              <button type="button" className="edit-link" disabled={saving} onClick={() => setResettingId(resettingId === member.id ? null : member.id)}>{resettingId === member.id ? '取消' : '重置密码'}</button>
-              <button type="button" className="danger-link" disabled={saving || member.nodeCount > 0} title={member.nodeCount ? '该用户还有节点，不能删除' : undefined} onClick={() => removeUser(member)}>删除</button>
-            </div>}</td>
-          </tr>, resettingId === member.id && <tr key={`${member.id}-reset`} className="account-rotate"><td colSpan={5}>
+            <td><div className="row-actions">
+              <button type="button" className="edit-link" disabled={saving} onClick={() => { setResettingId(null); setRenamingId(renamingId === member.id ? null : member.id); }}>{renamingId === member.id ? '取消' : '改名'}</button>
+              {member.role !== 'admin' && <><button type="button" className="edit-link" disabled={saving} onClick={() => { setRenamingId(null); setResettingId(resettingId === member.id ? null : member.id); }}>{resettingId === member.id ? '取消' : '重置密码'}</button>
+              <button type="button" className="danger-link" disabled={saving || member.nodeCount > 0} title={member.nodeCount ? '该用户还有节点，不能删除' : undefined} onClick={() => removeUser(member)}>删除</button></>}
+            </div></td>
+          </tr>, renamingId === member.id && <tr key={`${member.id}-rename`} className="account-rotate"><td colSpan={5}>
+            <form className="node-form domain-form" onSubmit={(event) => renameUser(event, member)} autoComplete="off">
+              <label>{member.username} 的新用户名<input name="username" required minLength={3} maxLength={32} pattern="[A-Za-z0-9_.\-]{3,32}" defaultValue={member.username} placeholder="3-32 位字母、数字、点、下划线或短横线" /></label>
+              <button className="primary-button" disabled={saving}>保存</button>
+            </form>
+          </td></tr>, resettingId === member.id && <tr key={`${member.id}-reset`} className="account-rotate"><td colSpan={5}>
             <form className="node-form domain-form" onSubmit={(event) => resetPassword(event, member)} autoComplete="off">
               <label>{member.username} 的新密码<input name="password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" placeholder="12-128 位" /></label>
               <button className="primary-button" disabled={saving}>保存</button>
@@ -1357,6 +1378,8 @@ function eventKindLabel(kind: string) {
     node_created: '节点创建',
     node_updated: '节点修改',
     node_shared: '机器分享',
+    dns_paused: '暂停解析',
+    dns_pause_failed: '暂停解析失败',
     node_installation_restored: '补存安装命令',
     agent_upgrade_requested: '请求升级探针',
     agent_upgrade_started: '探针开始升级',
@@ -1395,9 +1418,10 @@ function relativeTime(value: string | null, now: number) {
 }
 
 // 机器分享（仅管理员）：把机器分享给普通用户，或取消分享。
-function ShareModal({ apiPath, node, users, multiUserEnabled, onClose, onShared, onUnshared }: { apiPath: (path: string) => string; node: NodeRow; users: AdminUserRow[]; multiUserEnabled: boolean; onClose: () => void; onShared: (share: { nodeId: string; userId: string; username: string }) => void; onUnshared: (nodeId: string, userId: string) => void }) {
+function ShareModal({ apiPath, node, users, multiUserEnabled, domains, records, onRecordsChange, onEvents, onClose, onShared, onUnshared }: { apiPath: (path: string) => string; node: NodeRow; users: AdminUserRow[]; multiUserEnabled: boolean; domains: DomainRow[]; records: DnsRecordRow[]; onRecordsChange: (update: (current: DnsRecordRow[]) => DnsRecordRow[]) => void; onEvents: (events: EventRow[]) => void; onClose: () => void; onShared: (share: { nodeId: string; userId: string; username: string }) => void; onUnshared: (nodeId: string, userId: string) => void }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const shares = node.sharedWith ?? [];
   const candidates = users.filter((candidate) => candidate.role === 'user' && candidate.id !== node.ownerId && !shares.some((share) => share.userId === candidate.id));
 
@@ -1407,15 +1431,33 @@ function ShareModal({ apiPath, node, users, multiUserEnabled, onClose, onShared,
     return { ok: response.ok, result };
   }
 
+  // 给被分享用户分配一条用管理员主域名的解析；返回是否成功。
+  async function assign(userId: string, data: FormData) {
+    const recordV4 = String(data.get('recordV4') ?? '').trim();
+    const recordV6 = String(data.get('recordV6') ?? '').trim();
+    if (!recordV4 && !recordV6) return true;
+    const { ok, result } = await send('POST', '/api/admin/node-dns', { nodeId: node.id, userId, domainName: data.get('domainName'), recordV4, recordV6 });
+    if (!ok || !result.record) { setError(`解析分配失败：${result.error ?? '未知错误'}`); return false; }
+    const record = result.record as DnsRecordRow;
+    onRecordsChange((current) => [...current, record]);
+    onEvents((result.events as EventRow[] | undefined) ?? []);
+    const warnings = result.warnings as string[] | undefined;
+    setNotice(warnings?.length ? warnings.join('；') : `已分配解析 ${[record.recordV4, record.recordV6].filter(Boolean).map((rr) => fqdn(record.domainName, rr as string)).join('、')}；机器已有地址时已立即同步`);
+    return true;
+  }
+
   async function share(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const userId = String(new FormData(event.currentTarget).get('userId') ?? '');
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const userId = String(data.get('userId') ?? '');
     if (!userId) return;
-    setSaving(true); setError('');
+    setSaving(true); setError(''); setNotice('');
     try {
       const { ok, result } = await send('POST', '/api/admin/node-shares', { nodeId: node.id, userId });
       if (!ok) { setError(result.error ?? '分享失败'); return; }
       onShared(result.share as { nodeId: string; userId: string; username: string });
+      if (await assign(userId, data)) form.reset();
     } catch {
       setError('无法确认是否已分享，请刷新页面核对。');
     } finally {
@@ -1423,13 +1465,45 @@ function ShareModal({ apiPath, node, users, multiUserEnabled, onClose, onShared,
     }
   }
 
+  async function assignLater(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    setSaving(true); setError(''); setNotice('');
+    try {
+      if (await assign(String(data.get('userId') ?? ''), data)) form.reset();
+    } catch {
+      setError('无法确认解析是否已分配，请刷新页面核对。');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeAssigned(record: DnsRecordRow) {
+    if (!window.confirm(`移除分配给 ${record.ownerName} 的解析 ${[record.recordV4, record.recordV6].filter(Boolean).map((rr) => fqdn(record.domainName, rr as string)).join('、')}？\n\n面板将停止同步这条解析，阿里云上已有的记录不会自动删除。`)) return;
+    setSaving(true); setError(''); setNotice('');
+    try {
+      const { ok, result } = await send('DELETE', `/api/admin/node-dns?id=${encodeURIComponent(record.id)}`);
+      if (!ok) { setError(result.error ?? '移除解析失败'); return; }
+      onRecordsChange((current) => current.filter((item) => item.id !== record.id));
+      setNotice((result.warnings as string[] | undefined)?.join('；') ?? '');
+    } catch {
+      setError('无法确认解析是否已移除，请刷新页面核对。');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function unshare(target: { userId: string; username: string }) {
-    if (!window.confirm(`取消 ${target.username} 对 ${node.name} 的分享？\n\n会一并移除 ${target.username} 在这台机器上的 Nyanpass 实例登记和解析：实例不再随换机重装，解析停止自动同步。当前机器上已安装的服务不会被卸载，阿里云上已有的记录也不会被删除。`)) return;
-    setSaving(true); setError('');
+    if (!window.confirm(`取消 ${target.username} 对 ${node.name} 的分享？\n\n会一并移除 ${target.username} 在这台机器上的 Nyanpass 实例登记和全部解析（包括你分配的解析）：实例不再随换机重装；解析停止自动同步，并在阿里云上暂停解析（不删除记录）。当前机器上已安装的服务不会被卸载。`)) return;
+    setSaving(true); setError(''); setNotice('');
     try {
       const { ok, result } = await send('DELETE', `/api/admin/node-shares?nodeId=${encodeURIComponent(node.id)}&userId=${encodeURIComponent(target.userId)}`);
       if (!ok) { setError(result.error ?? '取消分享失败'); return; }
       onUnshared(node.id, target.userId);
+      const warnings = result.warnings as string[] | undefined;
+      if (warnings?.length) setError(`已取消分享，但部分解析没能在阿里云上暂停，请到阿里云控制台手动暂停：${warnings.join('；')}`);
+      else setNotice(`已取消 ${target.username} 的分享，对方的解析已停止同步并在阿里云上暂停`);
     } catch {
       setError('无法确认是否已取消分享，请刷新页面核对。');
     } finally {
@@ -1444,15 +1518,31 @@ function ShareModal({ apiPath, node, users, multiUserEnabled, onClose, onShared,
       <p className="modal-intro">被分享的用户可以在这台机器上添加自己的解析和 Nyanpass 实例，并能只读查看机器状态、其他人的实例与解析和全部事件；看不到 root 密码、安装命令和开机脚本，也不能修改或删除机器。机器换 IP 时，他们的解析会自动同步，实例也会随开机脚本一起重装。</p>
       {!multiUserEnabled && <p className="transport-warning" role="status">多用户模式当前关闭，被分享的用户暂时无法登录；可在「设置」中打开。</p>}
       <div className="share-list">
-        {shares.length ? shares.map((target) => <div className="share-row" key={target.userId}><span>{target.username}</span><button type="button" className="danger-link" disabled={saving} onClick={() => unshare(target)}>取消分享</button></div>) : <p className="muted-value">还没有分享给任何用户。</p>}
+        {shares.length ? shares.map((target) => <div className="share-row" key={target.userId}><span>{target.username}{records.filter((record) => record.ownerId === target.userId).map((record) => <small key={record.id}>分配的解析：{[record.recordV4, record.recordV6].filter(Boolean).map((rr) => fqdn(record.domainName, rr as string)).join('、')} <button type="button" className="danger-link" disabled={saving} onClick={() => removeAssigned(record)}>移除</button></small>)}</span><button type="button" className="danger-link" disabled={saving} onClick={() => unshare(target)}>取消分享</button></div>) : <p className="muted-value">还没有分享给任何用户。</p>}
       </div>
       <form className="node-form domain-form" onSubmit={share}>
         <label>分享给<select name="userId" required defaultValue="" key={candidates.map((candidate) => candidate.id).join()}>{candidates.length ? <><option value="" disabled>选择用户</option>{candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.username}</option>)}</> : <option value="">没有可分享的用户，请先在「设置」中添加</option>}</select></label>
+        <AssignFields domains={domains} />
         <button className="primary-button" disabled={saving || !candidates.length}>{saving ? '处理中…' : '分享'}</button>
       </form>
+      <p className="form-hint">分配解析可选：用你自己的主域名给对方一条解析（如 jp2.example.com），跟随这台机器的地址自动同步；对方只能查看，不能修改或删除。取消分享时会停止同步并在阿里云上暂停解析。</p>
+      {shares.length > 0 && <form className="node-form domain-form" onSubmit={assignLater}>
+        <label>给已分享的用户分配解析<select name="userId" required>{shares.map((target) => <option key={target.userId} value={target.userId}>{target.username}</option>)}</select></label>
+        <AssignFields domains={domains} />
+        <button className="primary-button" disabled={saving || !domains.length}>{saving ? '同步中…' : '分配解析'}</button>
+      </form>}
       {error && <p className="form-error" role="alert">{error}</p>}
+      {notice && <p className="form-success" role="status">{notice}</p>}
     </section>
   </div>;
+}
+
+function AssignFields({ domains }: { domains: DomainRow[] }) {
+  return <>
+    <label>分配解析的主域名<select name="domainName">{domains.length ? domains.map((domain) => <option key={domain.name} value={domain.name}>{domain.name}</option>) : <option value="">请先在「阿里云主域名」添加</option>}</select></label>
+    <label>IPv4 主机记录<input name="recordV4" placeholder="可留空，例如：jp2" autoComplete="off" spellCheck={false} /></label>
+    <label>IPv6 主机记录<input name="recordV6" placeholder="可留空" autoComplete="off" spellCheck={false} /></label>
+  </>;
 }
 
 // 共享机器上的解析：被分享的用户用自己的主域名把记录指向共享机器，机器换 IP 时自动同步。
@@ -1515,12 +1605,12 @@ function SharedDnsPanel({ apiPath, user, nodes, records, domains, onRecordsChang
     <div className="table-wrap">
       {records.length ? <table><thead><tr><th>机器</th><th>A 记录</th><th>AAAA 记录</th><th>添加者</th><th>操作</th></tr></thead><tbody>{records.map((record) => {
         const node = nodes.find((item) => item.id === record.nodeId);
-        const canRemove = user.role === 'admin' || record.ownerId === user.id;
+        const canRemove = user.role === 'admin' || (record.ownerId === user.id && !record.assigned);
         return <tr key={record.id}>
           <td><span className="node-name">{record.nodeName}</span></td>
           <td>{record.recordV4 ? <><code>{fqdn(record.domainName, record.recordV4)}</code><small>{node?.ipv4 ?? '等待 IPv4 上报'}</small></> : <span className="muted-value">未配置</span>}</td>
           <td>{record.recordV6 ? <><code>{fqdn(record.domainName, record.recordV6)}</code><small>{node?.ipv6 ?? '等待 IPv6 上报'}</small></> : <span className="muted-value">未配置</span>}</td>
-          <td>{record.ownerId === user.id ? '我' : record.ownerName}</td>
+          <td>{record.ownerId === user.id ? '我' : record.ownerName}{record.assigned && <small>管理员分配</small>}</td>
           <td>{canRemove ? <button type="button" className="danger-link" disabled={saving} onClick={() => remove(record)}>移除</button> : null}</td>
         </tr>;
       })}</tbody></table> : <div className="empty-state compact-empty"><span>◇</span><h4>还没有解析</h4><p>选择共享机器和自己的主域名，填写主机记录后添加。</p></div>}

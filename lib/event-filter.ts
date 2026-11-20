@@ -16,7 +16,7 @@ export type FilterableEvent = {
 export function eventCategory(kind: string) {
   if (kind === 'node_created' || kind === 'node_updated' || kind === 'node_installation_restored' || kind === 'node_shared' || kind === 'node_unshared' || kind.startsWith('agent_upgrade_')) return 'node';
   if (kind === 'ip_changed') return 'ip';
-  if (kind === 'dns_synced' || kind === 'dns_failed' || kind === 'dns_ownership_conflict' || kind === 'dns_record_added' || kind === 'dns_record_removed') return 'dns';
+  if (kind === 'dns_synced' || kind === 'dns_failed' || kind === 'dns_ownership_conflict' || kind === 'dns_record_added' || kind === 'dns_record_removed' || kind === 'dns_paused' || kind === 'dns_pause_failed') return 'dns';
   if (kind.startsWith('nyanpass_')) return 'nyanpass';
   return 'other';
 }

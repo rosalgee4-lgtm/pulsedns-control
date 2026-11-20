@@ -39,13 +39,14 @@ export async function listDnsRecords(db: AppDb, user: CurrentUser) {
     domainName: nodeDnsRecords.domainName,
     recordV4: nodeDnsRecords.recordV4,
     recordV6: nodeDnsRecords.recordV6,
+    assignedBy: nodeDnsRecords.assignedBy,
     createdAt: nodeDnsRecords.createdAt,
   }).from(nodeDnsRecords)
     .innerJoin(nodes, eq(nodeDnsRecords.nodeId, nodes.id))
     .innerJoin(users, eq(nodeDnsRecords.ownerId, users.id))
     .where(ownedBy(db, user))
     .orderBy(asc(nodes.name), asc(nodeDnsRecords.createdAt));
-  return rows.map((record) => ({ ...record, createdAt: record.createdAt.toISOString() }));
+  return rows.map(({ assignedBy, ...record }) => ({ ...record, assigned: Boolean(assignedBy), createdAt: record.createdAt.toISOString() }));
 }
 
 export async function listInstances(db: AppDb, user: CurrentUser) {

@@ -5,6 +5,8 @@ import { events, nodeDnsRecords, nodes, nodeShares, nyanpassInstances, users } f
 import { requireApiUser } from '@/lib/auth';
 import { acquireNodeOperationLock, releaseNodeOperationLock } from '@/lib/node-operation-lock';
 import { removeReinstallInstance } from '@/lib/reinstall-plan';
+import { pauseAliDnsRecord } from '@/lib/alidns';
+import { dnsLabel } from '@/lib/shared-dns';
 import { cleanText } from '@/lib/validation';
 
 // 机器分享：只有管理员可以把机器分享给普通用户或取消分享。
@@ -42,8 +44,8 @@ export async function POST(request: Request) {
   return Response.json({ share: { nodeId, userId, username: target.username } }, { status: 201 });
 }
 
-// 取消分享时一并移除该用户在这台机器上的 Nyanpass 实例登记（并从换机重装清单中去掉）和解析（停止同步）。
-// 不会卸载当前机器上已经安装的服务，也不会删除阿里云上已有的记录。
+// 取消分享时一并移除该用户在这台机器上的 Nyanpass 实例登记（并从换机重装清单中去掉）和解析：
+// 解析停止同步，并在阿里云上把对应记录设为暂停（不删除）。不会卸载当前机器上已经安装的服务。
 export async function DELETE(request: Request) {
   await ensureSchema();
   const auth = await requireApiUser(request, { admin: true });
@@ -68,7 +70,7 @@ export async function DELETE(request: Request) {
         .where(and(eq(nyanpassInstances.nodeId, nodeId), eq(nyanpassInstances.ownerId, userId))).for('update');
       const busy = owned.find((instance) => busyStatuses.includes(instance.status));
       if (busy) return { error: `${target.username} 的实例 ${busy.name} 正在等待或执行同步，请等它结束（或先取消排队）后再取消分享`, status: 409 } as const;
-      const records = await tx.select({ id: nodeDnsRecords.id }).from(nodeDnsRecords)
+      const records = await tx.select({ id: nodeDnsRecords.id, domainName: nodeDnsRecords.domainName, recordV4: nodeDnsRecords.recordV4, recordV6: nodeDnsRecords.recordV6 }).from(nodeDnsRecords)
         .where(and(eq(nodeDnsRecords.nodeId, nodeId), eq(nodeDnsRecords.ownerId, userId)));
       await tx.delete(nyanpassInstances).where(and(eq(nyanpassInstances.nodeId, nodeId), eq(nyanpassInstances.ownerId, userId)));
       await tx.delete(nodeDnsRecords).where(and(eq(nodeDnsRecords.nodeId, nodeId), eq(nodeDnsRecords.ownerId, userId)));
@@ -79,11 +81,30 @@ export async function DELETE(request: Request) {
         message: `${user.username} 取消了 ${target.username} 对机器 ${node.name} 的分享，移除了 ${owned.length} 个实例登记和 ${records.length} 组解析`,
         createdAt: new Date(),
       });
-      return { removedInstances: owned.map((instance) => instance.name), removedRecords: records.length } as const;
+      return { removedInstances: owned.map((instance) => instance.name), removedRecords: records } as const;
     });
     if ('error' in outcome) return Response.json({ error: outcome.error }, { status: outcome.status });
     for (const name of outcome.removedInstances) await removeReinstallInstance(db, nodeId, name).catch(() => false);
-    return Response.json({ status: 'ok', removedInstances: outcome.removedInstances.length, removedRecords: outcome.removedRecords });
+    const warnings: string[] = [];
+    for (const record of outcome.removedRecords) {
+      for (const target of [{ type: 'A' as const, rr: record.recordV4 }, { type: 'AAAA' as const, rr: record.recordV6 }]) {
+        if (!target.rr) continue;
+        const label = dnsLabel(record.domainName, target.rr);
+        const result = await pauseAliDnsRecord(record.domainName, target.rr, target.type);
+        if (!result.ok) warnings.push(`${target.type} ${label} 暂停失败：${result.error}`);
+        await db.insert(events).values({
+          nodeId,
+          level: result.ok ? 'info' : 'error',
+          kind: result.ok ? 'dns_paused' : 'dns_pause_failed',
+          message: result.ok
+            ? `${target.type} 记录 ${label} 已停止同步，并在阿里云上暂停解析`
+            : `${target.type} 记录 ${label} 已停止同步，但阿里云暂停解析失败：${result.error}；请到阿里云控制台手动暂停`,
+          ipType: target.type,
+          createdAt: new Date(),
+        });
+      }
+    }
+    return Response.json({ status: 'ok', removedInstances: outcome.removedInstances.length, removedRecords: outcome.removedRecords.length, warnings });
   } finally {
     await releaseNodeOperationLock(db, nodeId, operationId);
   }

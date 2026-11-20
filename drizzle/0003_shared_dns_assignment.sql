@@ -1,0 +1,1 @@
+ALTER TABLE `node_dns_records` ADD `assigned_by` varchar(36);

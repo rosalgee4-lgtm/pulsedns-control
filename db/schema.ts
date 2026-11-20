@@ -173,6 +173,8 @@ export const nodeDnsRecords = mysqlTable('node_dns_records', {
   domainName: varchar('domain_name', { length: 253 }).notNull(),
   recordV4: varchar('record_v4', { length: 253 }),
   recordV6: varchar('record_v6', { length: 253 }),
+  // 管理员分享机器时分配给对方的解析：记录分配人，被分享用户只能查看，不能修改或删除。
+  assignedBy: varchar('assigned_by', { length: 36 }),
   createdAt: timestamp('created_at').notNull(),
   dnsV4Key: varchar('dns_v4_key', { length: 510 }).generatedAlwaysAs(sql`(case when \`record_v4\` is not null then concat(\`domain_name\`, '|', \`record_v4\`) end)`, { mode: 'stored' }),
   dnsV6Key: varchar('dns_v6_key', { length: 510 }).generatedAlwaysAs(sql`(case when \`record_v6\` is not null then concat(\`domain_name\`, '|', \`record_v6\`) end)`, { mode: 'stored' }),

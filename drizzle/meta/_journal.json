@@ -22,6 +22,13 @@
       "when": 1794938215058,
       "tag": "0002_agent_remote_upgrade",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1795156472451,
+      "tag": "0003_shared_dns_assignment",
+      "breakpoints": true
     }
   ]
 }

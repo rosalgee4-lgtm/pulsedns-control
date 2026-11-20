@@ -14,6 +14,7 @@ type AliDnsResponse = {
       Type: string;
       Value: string;
       Line?: string;
+      Status?: string;
     }>;
   };
 };
@@ -21,7 +22,8 @@ type AliDnsResponse = {
 const HOST = 'alidns.aliyuncs.com';
 const VERSION = '2015-01-09';
 
-export async function syncAliDnsRecord(domainName: string, rr: string, type: DnsType, value: string) {
+// enable：记录在阿里云上处于暂停状态时一并恢复解析（重新分配共享解析时使用）。
+export async function syncAliDnsRecord(domainName: string, rr: string, type: DnsType, value: string, options: { enable?: boolean } = {}) {
   // 按主域名绑定的阿里云账号取 Key。
   let credentials: AliDnsCredentials;
   try {
@@ -63,7 +65,11 @@ export async function syncAliDnsRecord(domainName: string, rr: string, type: Dns
     }
 
     const current = matching[0];
-    if (current.Value === value) return { ok: true, unchanged: true } as const;
+    const paused = (current.Status ?? '').toUpperCase() === 'DISABLE';
+    if (options.enable && paused) {
+      await callAliDns(credentials, 'SetDomainRecordStatus', { RecordId: current.RecordId, Status: 'Enable' });
+    }
+    if (current.Value === value) return options.enable && paused ? { ok: true, updated: true } as const : { ok: true, unchanged: true } as const;
 
     await callAliDns(credentials, 'UpdateDomainRecord', {
       RecordId: current.RecordId,
@@ -74,6 +80,33 @@ export async function syncAliDnsRecord(domainName: string, rr: string, type: Dns
       Line: 'default',
     });
     return { ok: true, updated: true } as const;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '阿里云 DNS 请求失败';
+    return { ok: false, error: message.slice(0, 180) } as const;
+  }
+}
+
+// 在阿里云上暂停一条解析（不删除）。记录不存在时视为成功。
+export async function pauseAliDnsRecord(domainName: string, rr: string, type: DnsType) {
+  try {
+    const credentials = await domainCredentials(await getDb(), domainName);
+    const listed = await callAliDns(credentials, 'DescribeDomainRecords', {
+      DomainName: domainName,
+      RRKeyWord: rr,
+      TypeKeyWord: type,
+      SearchMode: 'COMBINATION',
+      PageNumber: '1',
+      PageSize: '500',
+    });
+    const matching = (listed.DomainRecords?.Record ?? []).filter((record) =>
+      record.RR.toLowerCase() === rr.toLowerCase() && record.Type.toUpperCase() === type);
+    let paused = 0;
+    for (const record of matching) {
+      if ((record.Status ?? '').toUpperCase() === 'DISABLE') continue;
+      await callAliDns(credentials, 'SetDomainRecordStatus', { RecordId: record.RecordId, Status: 'Disable' });
+      paused += 1;
+    }
+    return { ok: true, paused } as const;
   } catch (error) {
     const message = error instanceof Error ? error.message : '阿里云 DNS 请求失败';
     return { ok: false, error: message.slice(0, 180) } as const;

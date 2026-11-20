@@ -44,6 +44,20 @@ export async function PATCH(request: Request) {
   if ('response' in auth) return auth.response;
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   const id = typeof body?.id === 'string' ? body.id : '';
+  // 改用户名：管理员可以改任何人，包括管理员自己；登录会话不受影响。
+  if (body?.username !== undefined) {
+    const username = typeof body.username === 'string' ? body.username.trim() : '';
+    if (!validUsername(username)) return Response.json({ error: '用户名须为 3-32 位字母、数字、点、下划线或短横线' }, { status: 400 });
+    const [target] = await auth.db.select({ id: users.id }).from(users).where(eq(users.id, id)).limit(1);
+    if (!target) return Response.json({ error: '用户不存在' }, { status: 404 });
+    try {
+      await auth.db.update(users).set({ username, updatedAt: new Date() }).where(eq(users.id, id));
+    } catch (error) {
+      if (isDuplicateKeyError(error)) return Response.json({ error: `用户名 ${username} 已经存在` }, { status: 409 });
+      throw error;
+    }
+    return Response.json({ status: 'ok', username });
+  }
   const password = body?.password;
   if (!validPassword(password)) return Response.json({ error: '密码须为 12-128 位，且不能包含换行' }, { status: 400 });
   const [target] = await auth.db.select({ role: users.role }).from(users).where(eq(users.id, id)).limit(1);
